@@ -29,8 +29,12 @@ type nopRecorder struct{}
 func (nopRecorder) RecordBan(_, _ string) {}
 func (nopRecorder) RecordDeletion()       {}
 
-// Version is set by the build system via -ldflags.
-var Version = "dev"
+// Version, Commit, and BuildDate are set by the build system via -ldflags.
+var (
+	Version   = "dev"
+	Commit    = "unknown"
+	BuildDate = "unknown"
+)
 
 func main() {
 	root := &cobra.Command{
@@ -253,13 +257,16 @@ func healthcheckCmd() *cobra.Command {
 	}
 }
 
-// versionCmd prints the version and exits.
+// versionCmd prints the version, commit, and build date, then exits.
 func versionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
-		Short: "Print version and exit",
+		Short: "Print version information and exit",
+		Long:  "Print the version, commit hash, and build date, then exit 0.",
+		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("cs-unifi-bouncer-pro %s\n", Version)
+			fmt.Printf("cs-unifi-bouncer-pro %s (commit: %s, built: %s)\n",
+				Version, Commit, BuildDate)
 		},
 	}
 }

@@ -37,8 +37,13 @@ func TestRootSubcommands(t *testing.T) {
 	}
 }
 
-// TestVersionOutput verifies the version subcommand prints the binary name.
+// TestVersionOutput verifies the version subcommand prints the version, commit, and build date.
 func TestVersionOutput(t *testing.T) {
+	// Set known values so we can verify them in the output
+	Version = "1.2.3"
+	Commit = "abc1234"
+	BuildDate = "2025-01-01T00:00:00Z"
+
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -62,8 +67,19 @@ func TestVersionOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !strings.Contains(buf.String(), "cs-unifi-bouncer-pro") {
-		t.Errorf("version output %q does not contain expected string %q", buf.String(), "cs-unifi-bouncer-pro")
+	output := buf.String()
+
+	tests := []string{
+		"cs-unifi-bouncer-pro",
+		"1.2.3",
+		"abc1234",
+		"2025-01-01T00:00:00Z",
+	}
+
+	for _, want := range tests {
+		if !strings.Contains(output, want) {
+			t.Errorf("version output %q does not contain expected string %q", output, want)
+		}
 	}
 }
 
