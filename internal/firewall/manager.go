@@ -30,14 +30,16 @@ type Manager interface {
 
 // ManagerConfig holds all firewall manager configuration.
 type ManagerConfig struct {
-	FirewallMode    string // "auto", "legacy", "zone"
-	EnableIPv6      bool
-	GroupCapacityV4 int
-	GroupCapacityV6 int
-	BatchWindow     time.Duration
-	DryRun          bool
-	LegacyCfg       LegacyConfig
-	ZoneCfg         ZoneConfig
+	FirewallMode     string // "auto", "legacy", "zone"
+	EnableIPv6       bool
+	GroupCapacityV4  int
+	GroupCapacityV6  int
+	BatchWindow      time.Duration
+	DryRun           bool
+	APIShardDelay    time.Duration
+	FlushConcurrency int
+	LegacyCfg        LegacyConfig
+	ZoneCfg          ZoneConfig
 }
 
 type managerImpl struct {
@@ -57,18 +59,27 @@ type managerImpl struct {
 	legacyMgr *LegacyManager
 	zoneMgr   *ZoneManager
 
-	// Batch flush timers per site
+	// Shared semaphore for concurrent flush limiting
+	flushSem chan struct{}
+
+	// Cached resolved mode per site (avoids repeated HasFeature API calls)
+	siteMode map[string]string
+	siteMu   sync.RWMutex
+
+	// Batch flush timers per site (one per site, flushes both v4 and v6)
 	batchMu     sync.Mutex
 	batchTimers map[string]*time.Timer
 }
 
 // NewManager constructs a Manager.
 func NewManager(cfg ManagerConfig, ctrl controller.Controller, store storage.Store, namer *Namer, log zerolog.Logger) Manager {
-	var legacyMgr *LegacyManager
-	var zoneMgr *ZoneManager
+	conc := cfg.FlushConcurrency
+	if conc < 1 {
+		conc = 1
+	}
 
-	legacyMgr = NewLegacyManager(cfg.LegacyCfg, namer, ctrl, store, log)
-	zoneMgr = NewZoneManager(cfg.ZoneCfg, namer, ctrl, store, log)
+	legacyMgr := NewLegacyManager(cfg.LegacyCfg, namer, ctrl, store, log)
+	zoneMgr := NewZoneManager(cfg.ZoneCfg, namer, ctrl, store, log)
 
 	return &managerImpl{
 		cfg:         cfg,
@@ -80,6 +91,8 @@ func NewManager(cfg ManagerConfig, ctrl controller.Controller, store storage.Sto
 		v6Mgrs:      make(map[string]*ShardManager),
 		legacyMgr:   legacyMgr,
 		zoneMgr:     zoneMgr,
+		flushSem:    make(chan struct{}, conc),
+		siteMode:    make(map[string]string),
 		batchTimers: make(map[string]*time.Timer),
 	}
 }
@@ -94,7 +107,8 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		v4Cap := m.cfg.GroupCapacityV4
 		v6Cap := m.cfg.GroupCapacityV6
 
-		v4 := NewShardManager(site, false, v4Cap, m.namer, m.ctrl, m.store, m.log)
+		v4 := NewShardManager(site, false, v4Cap, m.namer, m.ctrl, m.store, m.log,
+			m.cfg.APIShardDelay, m.flushSem)
 		if err := v4.EnsureShards(ctx); err != nil {
 			return fmt.Errorf("ensure v4 shards for site %s: %w", site, err)
 		}
@@ -104,7 +118,8 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		m.mu.Unlock()
 
 		if m.cfg.EnableIPv6 {
-			v6 := NewShardManager(site, true, v6Cap, m.namer, m.ctrl, m.store, m.log)
+			v6 := NewShardManager(site, true, v6Cap, m.namer, m.ctrl, m.store, m.log,
+				m.cfg.APIShardDelay, m.flushSem)
 			if err := v6.EnsureShards(ctx); err != nil {
 				return fmt.Errorf("ensure v6 shards for site %s: %w", site, err)
 			}
@@ -118,6 +133,11 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		if err != nil {
 			return fmt.Errorf("resolve mode for site %s: %w", site, err)
 		}
+
+		// Cache resolved mode for use in ensureNewShardInfrastructure and pruneEmptyTailShards
+		m.siteMu.Lock()
+		m.siteMode[site] = mode
+		m.siteMu.Unlock()
 
 		m.mu.RLock()
 		v4Mgr := m.v4Mgrs[site]
@@ -153,12 +173,21 @@ func (m *managerImpl) ApplyBan(ctx context.Context, site, ip string, ipv6 bool) 
 		return fmt.Errorf("no shard manager for site %s (ipv6=%v)", site, ipv6)
 	}
 
-	shardName, err := sm.Add(ctx, ip)
+	shardName, newShardIdx, err := sm.Add(ctx, ip)
 	if err != nil {
 		return err
 	}
+
+	if newShardIdx >= 0 {
+		// New shard was created: provision its firewall rule/policy immediately
+		if err2 := m.ensureNewShardInfrastructure(ctx, site, ipv6, newShardIdx, sm); err2 != nil {
+			m.log.Error().Err(err2).Str("site", site).Bool("ipv6", ipv6).Int("shard", newShardIdx).
+				Msg("failed to provision new shard rule/policy")
+		}
+	}
+
 	if shardName != "" {
-		m.scheduleBatchFlush(ctx, site, ipv6)
+		m.scheduleBatchFlush(ctx, site)
 	}
 	return nil
 }
@@ -181,7 +210,7 @@ func (m *managerImpl) ApplyUnban(ctx context.Context, site, ip string, ipv6 bool
 	if _, err := sm.Remove(ctx, ip); err != nil {
 		return err
 	}
-	m.scheduleBatchFlush(ctx, site, ipv6)
+	m.scheduleBatchFlush(ctx, site)
 	return nil
 }
 
@@ -234,10 +263,16 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 	// Add missing IPs
 	for ip := range desiredV4 {
 		if !v4Mgr.Contains(ip) {
-			if _, err := v4Mgr.Add(ctx, ip); err != nil {
+			if _, newIdx, err := v4Mgr.Add(ctx, ip); err != nil {
 				errs = append(errs, err)
 			} else {
 				added++
+				if newIdx >= 0 {
+					if err2 := m.ensureNewShardInfrastructure(ctx, site, false, newIdx, v4Mgr); err2 != nil {
+						m.log.Error().Err(err2).Str("site", site).Int("shard", newIdx).
+							Msg("failed to provision new v4 shard rule/policy during reconcile")
+					}
+				}
 			}
 		}
 	}
@@ -257,10 +292,16 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 	if v6Mgr != nil {
 		for ip := range desiredV6 {
 			if !v6Mgr.Contains(ip) {
-				if _, err := v6Mgr.Add(ctx, ip); err != nil {
+				if _, newIdx, err := v6Mgr.Add(ctx, ip); err != nil {
 					errs = append(errs, err)
 				} else {
 					added++
+					if newIdx >= 0 {
+						if err2 := m.ensureNewShardInfrastructure(ctx, site, true, newIdx, v6Mgr); err2 != nil {
+							m.log.Error().Err(err2).Str("site", site).Int("shard", newIdx).
+								Msg("failed to provision new v6 shard rule/policy during reconcile")
+						}
+					}
 				}
 			}
 		}
@@ -284,40 +325,144 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 			errs = append(errs, err)
 		}
 	}
+
+	// Prune empty tail shards after flush
+	m.pruneEmptyTailShards(ctx, site, v4Mgr, v6Mgr)
+
 	return
 }
 
 // scheduleBatchFlush resets (or starts) the batch window timer for a site.
-func (m *managerImpl) scheduleBatchFlush(ctx context.Context, site string, ipv6 bool) {
-	key := site
-	if ipv6 {
-		key += ":v6"
-	}
-
+// One timer per site handles both v4 and v6 families.
+func (m *managerImpl) scheduleBatchFlush(ctx context.Context, site string) {
 	m.batchMu.Lock()
 	defer m.batchMu.Unlock()
 
-	if t, ok := m.batchTimers[key]; ok {
+	if t, ok := m.batchTimers[site]; ok {
 		t.Reset(m.cfg.BatchWindow)
 		return
 	}
 
-	m.batchTimers[key] = time.AfterFunc(m.cfg.BatchWindow, func() {
+	m.batchTimers[site] = time.AfterFunc(m.cfg.BatchWindow, func() {
 		m.mu.RLock()
-		sm := m.shardMgr(site, ipv6)
+		v4 := m.v4Mgrs[site]
+		v6 := m.v6Mgrs[site]
 		m.mu.RUnlock()
 
-		if sm == nil {
-			return
+		if v4 != nil {
+			if err := v4.FlushDirty(ctx); err != nil {
+				m.log.Error().Err(err).Str("site", site).Msg("batch flush v4 failed")
+			}
 		}
-		if err := sm.FlushDirty(ctx); err != nil {
-			m.log.Error().Err(err).Str("site", site).Bool("ipv6", ipv6).Msg("batch flush failed")
+		if v6 != nil {
+			if err := v6.FlushDirty(ctx); err != nil {
+				m.log.Error().Err(err).Str("site", site).Msg("batch flush v6 failed")
+			}
 		}
 
+		// Prune empty tail shards after flush
+		m.pruneEmptyTailShards(ctx, site, v4, v6)
+
 		m.batchMu.Lock()
-		delete(m.batchTimers, key)
+		delete(m.batchTimers, site)
 		m.batchMu.Unlock()
 	})
+}
+
+// ensureNewShardInfrastructure provisions the firewall rule/policy for a newly created shard.
+func (m *managerImpl) ensureNewShardInfrastructure(ctx context.Context, site string, ipv6 bool, shardIdx int, sm *ShardManager) error {
+	// Apply delay before the API call (the group was just created; give the UDM a moment)
+	if m.cfg.APIShardDelay > 0 {
+		select {
+		case <-time.After(m.cfg.APIShardDelay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	// Get the new shard's UniFi group ID
+	ids := sm.GroupIDs()
+	if shardIdx >= len(ids) {
+		return fmt.Errorf("shard %d not found (have %d shards)", shardIdx, len(ids))
+	}
+	groupID := ids[shardIdx]
+
+	mode := m.cachedMode(site)
+	switch mode {
+	case "legacy":
+		return m.legacyMgr.EnsureRuleForShard(ctx, site, groupID, ipv6, shardIdx)
+	case "zone":
+		return m.zoneMgr.EnsurePoliciesForShard(ctx, site, groupID, ipv6, shardIdx)
+	}
+	return nil
+}
+
+// pruneEmptyTailShards deletes empty trailing shards (group + rule/policy) for both families.
+func (m *managerImpl) pruneEmptyTailShards(ctx context.Context, site string, v4, v6 *ShardManager) {
+	mode := m.cachedMode(site)
+
+	type entry struct {
+		sm   *ShardManager
+		ipv6 bool
+	}
+
+	for _, e := range []entry{{v4, false}, {v6, true}} {
+		if e.sm == nil {
+			continue
+		}
+		for {
+			unifiID, shardIdx, ok := e.sm.PrunableTail()
+			if !ok {
+				break
+			}
+
+			// Delete rule/policy first (best-effort; log but don't abort)
+			switch mode {
+			case "legacy":
+				if err := m.legacyMgr.DeleteRuleForShard(ctx, site, e.ipv6, shardIdx); err != nil {
+					m.log.Warn().Err(err).Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
+						Msg("failed to delete rule for pruned shard")
+				}
+			case "zone":
+				if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, e.ipv6, shardIdx); err != nil {
+					m.log.Warn().Err(err).Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
+						Msg("failed to delete policies for pruned shard")
+				}
+			}
+
+			// Apply delay before group delete
+			if m.cfg.APIShardDelay > 0 {
+				select {
+				case <-time.After(m.cfg.APIShardDelay):
+				case <-ctx.Done():
+					return
+				}
+			}
+
+			// Delete group from UniFi
+			if err := m.ctrl.DeleteFirewallGroup(ctx, site, unifiID); err != nil {
+				m.log.Error().Err(err).Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
+					Msg("failed to delete pruned shard group")
+				break // stop pruning on error to avoid inconsistency
+			}
+
+			// Finalize: remove from in-memory + bbolt
+			if err := e.sm.RemoveTail(); err != nil {
+				m.log.Warn().Err(err).Msg("RemoveTail bbolt error")
+			}
+
+			m.log.Info().Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
+				Msg("pruned empty shard and its firewall rule/policy")
+		}
+	}
+}
+
+// cachedMode returns the resolved firewall mode for a site (cached from EnsureInfrastructure).
+func (m *managerImpl) cachedMode(site string) string {
+	m.siteMu.RLock()
+	mode := m.siteMode[site]
+	m.siteMu.RUnlock()
+	return mode
 }
 
 // resolveMode determines the effective firewall mode for a site.

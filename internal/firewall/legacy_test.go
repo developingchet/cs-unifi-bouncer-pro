@@ -23,7 +23,7 @@ func newTestLegacyManager(ctrl controller.Controller, store storage.Store, namer
 
 func ensuredV4Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
-	sm := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop())
+	sm := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil)
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
@@ -32,7 +32,7 @@ func ensuredV4Shard(t *testing.T, ctrl controller.Controller, store storage.Stor
 
 func ensuredV6Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
-	sm := NewShardManager(testSite, true, 5, testNamer(t), ctrl, store, zerolog.Nop())
+	sm := NewShardManager(testSite, true, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil)
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
@@ -170,5 +170,98 @@ func TestLegacyManager_RuleIndex(t *testing.T) {
 	expected := 22000
 	if rules[0].RuleIndex != expected {
 		t.Errorf("RuleIndex: got %d, want %d", rules[0].RuleIndex, expected)
+	}
+}
+
+// TestLegacyManager_EnsureRuleForShard_Create verifies that EnsureRuleForShard
+// creates a rule for the given shard index when none exists.
+func TestLegacyManager_EnsureRuleForShard_Create(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	namer := testNamer(t)
+
+	v4 := ensuredV4Shard(t, ctrl, store)
+	lm := newTestLegacyManager(ctrl, store, namer)
+
+	groupIDs := v4.GroupIDs()
+	if len(groupIDs) == 0 {
+		t.Fatal("expected at least one shard")
+	}
+
+	if err := lm.EnsureRuleForShard(context.Background(), testSite, groupIDs[0], false, 0); err != nil {
+		t.Fatalf("EnsureRuleForShard: %v", err)
+	}
+
+	if got := ctrl.Calls("CreateFirewallRule"); got != 1 {
+		t.Errorf("CreateFirewallRule calls: got %d, want 1", got)
+	}
+}
+
+// TestLegacyManager_EnsureRuleForShard_Idempotent verifies that calling
+// EnsureRuleForShard twice does not create a duplicate rule.
+func TestLegacyManager_EnsureRuleForShard_Idempotent(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	namer := testNamer(t)
+
+	v4 := ensuredV4Shard(t, ctrl, store)
+	lm := newTestLegacyManager(ctrl, store, namer)
+
+	groupIDs := v4.GroupIDs()
+	if err := lm.EnsureRuleForShard(context.Background(), testSite, groupIDs[0], false, 0); err != nil {
+		t.Fatalf("EnsureRuleForShard (first): %v", err)
+	}
+	firstCalls := ctrl.Calls("CreateFirewallRule")
+
+	if err := lm.EnsureRuleForShard(context.Background(), testSite, groupIDs[0], false, 0); err != nil {
+		t.Fatalf("EnsureRuleForShard (second): %v", err)
+	}
+	if got := ctrl.Calls("CreateFirewallRule"); got != firstCalls {
+		t.Errorf("second EnsureRuleForShard: CreateFirewallRule went from %d to %d; want no new calls",
+			firstCalls, ctrl.Calls("CreateFirewallRule"))
+	}
+}
+
+// TestLegacyManager_DeleteRuleForShard verifies that DeleteRuleForShard removes
+// the rule and its bbolt record.
+func TestLegacyManager_DeleteRuleForShard(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	namer := testNamer(t)
+
+	v4 := ensuredV4Shard(t, ctrl, store)
+	lm := newTestLegacyManager(ctrl, store, namer)
+
+	groupIDs := v4.GroupIDs()
+	// Create first
+	if err := lm.EnsureRuleForShard(context.Background(), testSite, groupIDs[0], false, 0); err != nil {
+		t.Fatalf("EnsureRuleForShard: %v", err)
+	}
+
+	// Delete
+	if err := lm.DeleteRuleForShard(context.Background(), testSite, false, 0); err != nil {
+		t.Fatalf("DeleteRuleForShard: %v", err)
+	}
+
+	if got := ctrl.Calls("DeleteFirewallRule"); got != 1 {
+		t.Errorf("DeleteFirewallRule calls: got %d, want 1", got)
+	}
+}
+
+// TestLegacyManager_DeleteRuleForShard_NoOp verifies that DeleteRuleForShard
+// is a no-op when no rule record exists.
+func TestLegacyManager_DeleteRuleForShard_NoOp(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	namer := testNamer(t)
+
+	lm := newTestLegacyManager(ctrl, store, namer)
+
+	// No rule was ever created
+	if err := lm.DeleteRuleForShard(context.Background(), testSite, false, 0); err != nil {
+		t.Fatalf("DeleteRuleForShard (no-op): %v", err)
+	}
+	if got := ctrl.Calls("DeleteFirewallRule"); got != 0 {
+		t.Errorf("DeleteFirewallRule calls: got %d, want 0 (no-op)", got)
 	}
 }

@@ -38,7 +38,7 @@ func newTestZoneManager(ctrl controller.Controller, store storage.Store, namer *
 func ensuredZoneV4Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
 	namer := zoneTestNamer(t)
-	sm := NewShardManager(testSite, false, 5, namer, ctrl, store, zerolog.Nop())
+	sm := NewShardManager(testSite, false, 5, namer, ctrl, store, zerolog.Nop(), 0, nil)
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards (v4): %v", err)
 	}
@@ -49,7 +49,7 @@ func ensuredZoneV4Shard(t *testing.T, ctrl controller.Controller, store storage.
 func ensuredZoneV6Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
 	namer := zoneTestNamer(t)
-	sm := NewShardManager(testSite, true, 5, namer, ctrl, store, zerolog.Nop())
+	sm := NewShardManager(testSite, true, 5, namer, ctrl, store, zerolog.Nop(), 0, nil)
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards (v6): %v", err)
 	}
@@ -220,5 +220,99 @@ func TestZoneManager_EnsurePolicies_RecreatesDeleted(t *testing.T) {
 
 	if got := ctrl.Calls("CreateZonePolicy"); got <= firstCalls {
 		t.Errorf("CreateZonePolicy calls: got %d, want > %d (policy should be recreated)", got, firstCalls)
+	}
+}
+
+// TestZoneManager_EnsurePoliciesForShard_Create verifies that EnsurePoliciesForShard
+// creates a policy for each zone pair for the given shard.
+func TestZoneManager_EnsurePoliciesForShard_Create(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore()
+	namer := zoneTestNamer(t)
+
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	zm := newTestZoneManager(ctrl, store, namer)
+
+	groupIDs := v4.GroupIDs()
+	if len(groupIDs) == 0 {
+		t.Fatal("expected at least one shard")
+	}
+
+	if err := zm.EnsurePoliciesForShard(context.Background(), testSite, groupIDs[0], false, 0); err != nil {
+		t.Fatalf("EnsurePoliciesForShard: %v", err)
+	}
+
+	// One zone pair configured → one CreateZonePolicy call
+	if got := ctrl.Calls("CreateZonePolicy"); got != 1 {
+		t.Errorf("CreateZonePolicy calls: got %d, want 1", got)
+	}
+}
+
+// TestZoneManager_EnsurePoliciesForShard_Idempotent verifies that calling
+// EnsurePoliciesForShard twice does not create duplicate policies.
+func TestZoneManager_EnsurePoliciesForShard_Idempotent(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore()
+	namer := zoneTestNamer(t)
+
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	zm := newTestZoneManager(ctrl, store, namer)
+
+	groupIDs := v4.GroupIDs()
+	if err := zm.EnsurePoliciesForShard(context.Background(), testSite, groupIDs[0], false, 0); err != nil {
+		t.Fatalf("EnsurePoliciesForShard (first): %v", err)
+	}
+	firstCalls := ctrl.Calls("CreateZonePolicy")
+
+	if err := zm.EnsurePoliciesForShard(context.Background(), testSite, groupIDs[0], false, 0); err != nil {
+		t.Fatalf("EnsurePoliciesForShard (second): %v", err)
+	}
+	if got := ctrl.Calls("CreateZonePolicy"); got != firstCalls {
+		t.Errorf("second EnsurePoliciesForShard: CreateZonePolicy went from %d to %d; want no new calls",
+			firstCalls, ctrl.Calls("CreateZonePolicy"))
+	}
+}
+
+// TestZoneManager_DeletePoliciesForShard verifies that DeletePoliciesForShard removes
+// the policy and its bbolt record.
+func TestZoneManager_DeletePoliciesForShard(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore()
+	namer := zoneTestNamer(t)
+
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	zm := newTestZoneManager(ctrl, store, namer)
+
+	groupIDs := v4.GroupIDs()
+	// Create first
+	if err := zm.EnsurePoliciesForShard(context.Background(), testSite, groupIDs[0], false, 0); err != nil {
+		t.Fatalf("EnsurePoliciesForShard: %v", err)
+	}
+
+	// Delete
+	if err := zm.DeletePoliciesForShard(context.Background(), testSite, false, 0); err != nil {
+		t.Fatalf("DeletePoliciesForShard: %v", err)
+	}
+
+	if got := ctrl.Calls("DeleteZonePolicy"); got != 1 {
+		t.Errorf("DeleteZonePolicy calls: got %d, want 1", got)
+	}
+}
+
+// TestZoneManager_DeletePoliciesForShard_NoOp verifies that DeletePoliciesForShard
+// is a no-op when no policy record exists.
+func TestZoneManager_DeletePoliciesForShard_NoOp(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore()
+	namer := zoneTestNamer(t)
+
+	zm := newTestZoneManager(ctrl, store, namer)
+
+	// No policy was ever created
+	if err := zm.DeletePoliciesForShard(context.Background(), testSite, false, 0); err != nil {
+		t.Fatalf("DeletePoliciesForShard (no-op): %v", err)
+	}
+	if got := ctrl.Calls("DeleteZonePolicy"); got != 0 {
+		t.Errorf("DeleteZonePolicy calls: got %d, want 0 (no-op)", got)
 	}
 }

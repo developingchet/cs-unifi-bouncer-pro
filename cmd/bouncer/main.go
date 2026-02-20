@@ -102,12 +102,14 @@ func runDaemon() error {
 	}
 
 	fwMgr := firewall.NewManager(firewall.ManagerConfig{
-		FirewallMode:    cfg.FirewallMode,
-		EnableIPv6:      cfg.FirewallEnableIPv6,
-		GroupCapacityV4: v4Cap,
-		GroupCapacityV6: v6Cap,
-		BatchWindow:     cfg.FirewallBatchWindow,
-		DryRun:          cfg.DryRun,
+		FirewallMode:     cfg.FirewallMode,
+		EnableIPv6:       cfg.FirewallEnableIPv6,
+		GroupCapacityV4:  v4Cap,
+		GroupCapacityV6:  v6Cap,
+		BatchWindow:      cfg.FirewallBatchWindow,
+		DryRun:           cfg.DryRun,
+		APIShardDelay:    cfg.FirewallAPIShardDelay,
+		FlushConcurrency: cfg.FirewallFlushConcurrency,
 		LegacyCfg: firewall.LegacyConfig{
 			RuleIndexStartV4: cfg.LegacyRuleIndexStartV4,
 			RuleIndexStartV6: cfg.LegacyRuleIndexStartV6,
@@ -116,12 +118,14 @@ func runDaemon() error {
 			BlockAction:      cfg.FirewallBlockAction,
 			LogDrops:         cfg.FirewallLogDrops,
 			Description:      cfg.ObjectDescription,
+			APIWriteDelay:    cfg.FirewallAPIShardDelay,
 		},
 		ZoneCfg: firewall.ZoneConfig{
 			ZonePairs:            zonePairs,
 			ZoneConnectionStates: cfg.ZoneConnectionStates,
 			PolicyReorder:        cfg.ZonePolicyReorder,
 			Description:          cfg.ObjectDescription,
+			APIWriteDelay:        cfg.FirewallAPIShardDelay,
 		},
 	}, ctrl, store, namer, log)
 
@@ -278,12 +282,14 @@ func reconcileCmd() *cobra.Command {
 
 			rcV4Cap, rcV6Cap := resolveCapacities(cfg)
 			fwMgr := firewall.NewManager(firewall.ManagerConfig{
-				FirewallMode:    cfg.FirewallMode,
-				EnableIPv6:      cfg.FirewallEnableIPv6,
-				GroupCapacityV4: rcV4Cap,
-				GroupCapacityV6: rcV6Cap,
-				BatchWindow:     cfg.FirewallBatchWindow,
-				DryRun:          cfg.DryRun,
+				FirewallMode:     cfg.FirewallMode,
+				EnableIPv6:       cfg.FirewallEnableIPv6,
+				GroupCapacityV4:  rcV4Cap,
+				GroupCapacityV6:  rcV6Cap,
+				BatchWindow:      cfg.FirewallBatchWindow,
+				DryRun:           cfg.DryRun,
+				APIShardDelay:    cfg.FirewallAPIShardDelay,
+				FlushConcurrency: cfg.FirewallFlushConcurrency,
 				LegacyCfg: firewall.LegacyConfig{
 					RuleIndexStartV4: cfg.LegacyRuleIndexStartV4,
 					RuleIndexStartV6: cfg.LegacyRuleIndexStartV6,
@@ -292,12 +298,14 @@ func reconcileCmd() *cobra.Command {
 					BlockAction:      cfg.FirewallBlockAction,
 					LogDrops:         cfg.FirewallLogDrops,
 					Description:      cfg.ObjectDescription,
+					APIWriteDelay:    cfg.FirewallAPIShardDelay,
 				},
 				ZoneCfg: firewall.ZoneConfig{
 					ZonePairs:            zonePairs,
 					ZoneConnectionStates: cfg.ZoneConnectionStates,
 					PolicyReorder:        cfg.ZonePolicyReorder,
 					Description:          cfg.ObjectDescription,
+					APIWriteDelay:        cfg.FirewallAPIShardDelay,
 				},
 			}, ctrl, store, namer, log)
 

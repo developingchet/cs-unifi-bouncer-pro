@@ -278,7 +278,7 @@ func TestReconcile_RemovesExtra(t *testing.T) {
 	v4 := mi.v4Mgrs[testSite]
 	mi.mu.RUnlock()
 
-	if _, err := v4.Add(context.Background(), "10.0.0.99"); err != nil {
+	if _, _, err := v4.Add(context.Background(), "10.0.0.99"); err != nil {
 		t.Fatalf("direct shard Add: %v", err)
 	}
 
@@ -313,6 +313,36 @@ func TestIPv6Disabled(t *testing.T) {
 
 	if hasV6 {
 		t.Error("v6Mgrs should be empty when EnableIPv6=false")
+	}
+}
+
+// TestApplyBan_OverflowProvisionRule verifies that when ApplyBan causes a new
+// shard to be created (capacity overflow), a firewall rule is provisioned for
+// the new shard.
+func TestApplyBan_OverflowProvisionRule(t *testing.T) {
+	cfg := defaultManagerConfig()
+	cfg.FirewallMode = "legacy"
+	cfg.GroupCapacityV4 = 1 // capacity=1 so second IP forces new shard
+
+	mgr, ctrl, _ := newTestManager(t, cfg)
+	if err := mgr.EnsureInfrastructure(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("EnsureInfrastructure: %v", err)
+	}
+
+	// First IP fills shard 0 (rule already created by EnsureInfrastructure)
+	if err := mgr.ApplyBan(context.Background(), testSite, "10.0.0.1", false); err != nil {
+		t.Fatalf("ApplyBan (first IP): %v", err)
+	}
+
+	rulesAfterFirst := ctrl.Calls("CreateFirewallRule")
+
+	// Second IP overflows into shard 1 → new rule must be created
+	if err := mgr.ApplyBan(context.Background(), testSite, "10.0.0.2", false); err != nil {
+		t.Fatalf("ApplyBan (overflow IP): %v", err)
+	}
+
+	if got := ctrl.Calls("CreateFirewallRule"); got <= rulesAfterFirst {
+		t.Errorf("CreateFirewallRule calls: got %d, want > %d (new shard needs a rule)", got, rulesAfterFirst)
 	}
 }
 

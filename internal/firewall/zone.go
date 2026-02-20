@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
@@ -17,6 +18,7 @@ type ZoneConfig struct {
 	ZoneConnectionStates []string
 	PolicyReorder        bool
 	Description          string
+	APIWriteDelay        time.Duration
 }
 
 // ZoneManager manages zone-based firewall policies.
@@ -56,6 +58,18 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 	}
 
 	groupIDs := sm.GroupIDs()
+
+	// Fetch ALL existing policies once before the loop (avoids N redundant GETs).
+	existingPolicies, err := zm.ctrl.ListZonePolicies(ctx, site)
+	if err != nil {
+		return err
+	}
+	existingByID := make(map[string]bool, len(existingPolicies))
+	for _, p := range existingPolicies {
+		existingByID[p.ID] = true
+	}
+
+	firstCreate := true
 	for i, groupID := range groupIDs {
 		policyName, err := zm.namer.PolicyName(NameData{
 			Family:  family,
@@ -73,24 +87,20 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 			return fmt.Errorf("lookup policy %s: %w", policyName, lookupErr)
 		}
 
-		if existing != nil && existing.UnifiID != "" {
-			// Verify it still exists in the API
-			policies, apiErr := zm.ctrl.ListZonePolicies(ctx, site)
-			if apiErr != nil {
-				return apiErr
-			}
-			found := false
-			for _, p := range policies {
-				if p.ID == existing.UnifiID {
-					found = true
-					break
-				}
-			}
-			if found {
-				zm.log.Debug().Str("policy", policyName).Msg("zone policy already exists")
-				continue
+		if existing != nil && existing.UnifiID != "" && existingByID[existing.UnifiID] {
+			zm.log.Debug().Str("policy", policyName).Msg("zone policy already exists")
+			continue
+		}
+
+		// Apply delay between consecutive creates (not before the first one)
+		if !firstCreate && zm.cfg.APIWriteDelay > 0 {
+			select {
+			case <-time.After(zm.cfg.APIWriteDelay):
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
+		firstCreate = false
 
 		policy := controller.ZonePolicy{
 			Name:        policyName,
@@ -129,6 +139,122 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 		}
 	}
 
+	return nil
+}
+
+// EnsurePoliciesForShard creates zone policies for a single new shard across all configured zone pairs.
+// Called when a new shard overflows mid-operation.
+func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID string, ipv6 bool, shardIdx int) error {
+	family := Family(ipv6)
+	ipVersion := "IPV4"
+	if ipv6 {
+		ipVersion = "IPV6"
+	}
+
+	for _, pair := range zm.cfg.ZonePairs {
+		policyName, err := zm.namer.PolicyName(NameData{
+			Family:  family,
+			Index:   shardIdx,
+			Site:    site,
+			SrcZone: pair.Src,
+			DstZone: pair.Dst,
+		})
+		if err != nil {
+			return err
+		}
+
+		existing, lookupErr := zm.store.GetPolicy(policyName)
+		if lookupErr != nil {
+			return fmt.Errorf("lookup policy %s: %w", policyName, lookupErr)
+		}
+
+		if existing != nil && existing.UnifiID != "" {
+			// Verify it still exists in the API
+			policies, apiErr := zm.ctrl.ListZonePolicies(ctx, site)
+			if apiErr != nil {
+				return apiErr
+			}
+			found := false
+			for _, p := range policies {
+				if p.ID == existing.UnifiID {
+					found = true
+					break
+				}
+			}
+			if found {
+				zm.log.Debug().Str("policy", policyName).Msg("zone policy already exists for new shard")
+				continue
+			}
+		}
+
+		policy := controller.ZonePolicy{
+			Name:        policyName,
+			Enabled:     true,
+			Action:      "BLOCK",
+			Description: zm.cfg.Description,
+			SrcZone:     pair.Src,
+			DstZone:     pair.Dst,
+			IPVersion:   ipVersion,
+			MatchIPs: []controller.MatchSet{
+				{FirewallGroupID: groupID, Negate: false},
+			},
+		}
+
+		created, err := zm.ctrl.CreateZonePolicy(ctx, site, policy)
+		if err != nil {
+			return fmt.Errorf("create zone policy %s: %w", policyName, err)
+		}
+
+		if err := zm.store.SetPolicy(policyName, storage.PolicyRecord{
+			UnifiID: created.ID,
+			Site:    site,
+			Mode:    "zone",
+		}); err != nil {
+			zm.log.Warn().Err(err).Str("policy", policyName).Msg("failed to cache policy in bbolt")
+		}
+
+		zm.log.Info().Str("name", policyName).Str("id", created.ID).
+			Msg("created zone policy for new shard")
+	}
+	return nil
+}
+
+// DeletePoliciesForShard deletes all zone policies for the given shard across all zone pairs.
+// Called during shard pruning.
+func (zm *ZoneManager) DeletePoliciesForShard(ctx context.Context, site string, ipv6 bool, shardIdx int) error {
+	family := Family(ipv6)
+
+	for _, pair := range zm.cfg.ZonePairs {
+		policyName, err := zm.namer.PolicyName(NameData{
+			Family:  family,
+			Index:   shardIdx,
+			Site:    site,
+			SrcZone: pair.Src,
+			DstZone: pair.Dst,
+		})
+		if err != nil {
+			return err
+		}
+
+		existing, lookupErr := zm.store.GetPolicy(policyName)
+		if lookupErr != nil {
+			return fmt.Errorf("lookup policy %s: %w", policyName, lookupErr)
+		}
+
+		if existing == nil || existing.UnifiID == "" {
+			continue // Already gone
+		}
+
+		if err := zm.ctrl.DeleteZonePolicy(ctx, site, existing.UnifiID); err != nil {
+			return fmt.Errorf("delete zone policy %s: %w", policyName, err)
+		}
+
+		if err := zm.store.DeletePolicy(policyName); err != nil {
+			zm.log.Warn().Err(err).Str("policy", policyName).Msg("failed to delete policy from bbolt")
+		}
+
+		zm.log.Info().Str("name", policyName).Msg("deleted zone policy for pruned shard")
+	}
 	return nil
 }
 
@@ -208,4 +334,3 @@ func (zm *ZoneManager) UpdateGroupReference(ctx context.Context, site, oldGroupI
 	}
 	return nil
 }
-

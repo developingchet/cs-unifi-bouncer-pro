@@ -35,6 +35,8 @@ type Config struct {
 	FirewallGroupCapacityV4   int           `koanf:"firewall_group_capacity_v4"`
 	FirewallGroupCapacityV6   int           `koanf:"firewall_group_capacity_v6"`
 	FirewallBatchWindow       time.Duration `koanf:"firewall_batch_window"`
+	FirewallAPIShardDelay     time.Duration `koanf:"firewall_api_shard_delay"`
+	FirewallFlushConcurrency  int           `koanf:"firewall_flush_concurrency"`
 	FirewallLogDrops          bool          `koanf:"firewall_log_drops"`
 	FirewallReconcileOnStart  bool          `koanf:"firewall_reconcile_on_start"`
 	FirewallReconcileInterval time.Duration `koanf:"firewall_reconcile_interval"`
@@ -129,6 +131,8 @@ func defaults() map[string]interface{} {
 		"firewall_enable_ipv6":        true,
 		"firewall_group_capacity":     10000,
 		"firewall_batch_window":       "500ms",
+		"firewall_api_shard_delay":    "250ms",
+		"firewall_flush_concurrency":  1,
 		"firewall_reconcile_on_start": true,
 		"firewall_reconcile_interval": "0s",
 		"group_name_template":         "crowdsec-block-{{.Family}}-{{.Index}}",

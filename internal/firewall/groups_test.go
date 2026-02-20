@@ -43,7 +43,7 @@ func newBboltStore(t *testing.T) storage.Store {
 // newV4ShardManager creates a new v4 ShardManager with a small capacity.
 func newV4ShardManager(t *testing.T, capacity int, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
-	return NewShardManager(testSite, false, capacity, testNamer(t), ctrl, store, zerolog.Nop())
+	return NewShardManager(testSite, false, capacity, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil)
 }
 
 // TestEnsureShards_FirstRun verifies that an empty store causes the first shard
@@ -153,7 +153,7 @@ func TestAdd_Basic(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	_, err := sm.Add(context.Background(), "10.0.0.1")
+	_, _, err := sm.Add(context.Background(), "10.0.0.1")
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -177,8 +177,8 @@ func TestAdd_Idempotent(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	_, _ = sm.Add(context.Background(), "10.0.0.1")
-	_, _ = sm.Add(context.Background(), "10.0.0.1")
+	_, _, _ = sm.Add(context.Background(), "10.0.0.1")
+	_, _, _ = sm.Add(context.Background(), "10.0.0.1")
 
 	members := sm.AllMembers()
 	count := 0
@@ -208,7 +208,7 @@ func TestAdd_NewShardOnOverflow(t *testing.T) {
 	// Fill first shard to capacity, then add one more.
 	for i := 0; i <= capacity; i++ {
 		ip := fmt.Sprintf("10.0.0.%d", i+1)
-		if _, err := sm.Add(context.Background(), ip); err != nil {
+		if _, _, err := sm.Add(context.Background(), ip); err != nil {
 			t.Fatalf("Add(%s): %v", ip, err)
 		}
 	}
@@ -232,7 +232,7 @@ func TestRemove_Basic(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	if _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+	if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if _, err := sm.Remove(context.Background(), "10.0.0.1"); err != nil {
@@ -271,7 +271,7 @@ func TestFlushDirty_UpdatesAPI(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	if _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+	if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := sm.FlushDirty(context.Background()); err != nil {
@@ -314,7 +314,7 @@ func TestFlushDirty_APIError(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	if _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+	if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
@@ -339,7 +339,7 @@ func TestAllMembers_AcrossShards(t *testing.T) {
 
 	ips := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
 	for _, ip := range ips {
-		if _, err := sm.Add(context.Background(), ip); err != nil {
+		if _, _, err := sm.Add(context.Background(), ip); err != nil {
 			t.Fatalf("Add(%s): %v", ip, err)
 		}
 	}
@@ -374,7 +374,7 @@ func TestGroupIDs(t *testing.T) {
 	// Force a second shard by overflowing the first.
 	for i := 0; i <= capacity; i++ {
 		ip := fmt.Sprintf("10.0.0.%d", i+1)
-		if _, err := sm.Add(context.Background(), ip); err != nil {
+		if _, _, err := sm.Add(context.Background(), ip); err != nil {
 			t.Fatalf("Add(%s): %v", ip, err)
 		}
 	}
@@ -413,7 +413,7 @@ func TestConcurrentAddRemove(t *testing.T) {
 		ip := fmt.Sprintf("10.1.%d.%d", i/256, i%256)
 		go func(ip string) {
 			defer wg.Done()
-			_, _ = sm.Add(context.Background(), ip)
+			_, _, _ = sm.Add(context.Background(), ip)
 		}(ip)
 		go func(ip string) {
 			defer wg.Done()
@@ -422,4 +422,137 @@ func TestConcurrentAddRemove(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+// TestAdd_NewShardOnOverflow_ReturnsNewIdx verifies that when a new shard is
+// created on overflow, Add returns the correct newShardIdx (>= 0).
+func TestAdd_NewShardOnOverflow_ReturnsNewIdx(t *testing.T) {
+	const capacity = 2
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+
+	sm := newV4ShardManager(t, capacity, ctrl, store)
+	if err := sm.EnsureShards(context.Background()); err != nil {
+		t.Fatalf("EnsureShards: %v", err)
+	}
+
+	// Fill first shard to capacity — newShardIdx should be -1 each time.
+	for i := 0; i < capacity; i++ {
+		ip := fmt.Sprintf("10.0.0.%d", i+1)
+		_, newIdx, err := sm.Add(context.Background(), ip)
+		if err != nil {
+			t.Fatalf("Add(%s): %v", ip, err)
+		}
+		if newIdx != -1 {
+			t.Errorf("Add(%s): newShardIdx = %d; want -1 (no new shard)", ip, newIdx)
+		}
+	}
+
+	// One more IP forces a new shard — newShardIdx should be 1.
+	_, newIdx, err := sm.Add(context.Background(), "10.0.0.99")
+	if err != nil {
+		t.Fatalf("Add overflow IP: %v", err)
+	}
+	if newIdx != 1 {
+		t.Errorf("Add overflow: newShardIdx = %d; want 1", newIdx)
+	}
+}
+
+// TestPrunableTail verifies that PrunableTail returns ok=false when there is
+// only one shard, or when the last shard has members. It returns ok=true only
+// when there are multiple shards and the last shard is empty.
+func TestPrunableTail(t *testing.T) {
+	t.Run("single shard not prunable", func(t *testing.T) {
+		ctrl := testutil.NewMockController()
+		store := newBboltStore(t)
+		sm := newV4ShardManager(t, 5, ctrl, store)
+		if err := sm.EnsureShards(context.Background()); err != nil {
+			t.Fatalf("EnsureShards: %v", err)
+		}
+		_, _, ok := sm.PrunableTail()
+		if ok {
+			t.Error("PrunableTail: got ok=true for single shard; want false")
+		}
+	})
+
+	t.Run("last shard with members not prunable", func(t *testing.T) {
+		ctrl := testutil.NewMockController()
+		store := newBboltStore(t)
+		sm := newV4ShardManager(t, 1, ctrl, store) // capacity=1 forces overflow quickly
+		if err := sm.EnsureShards(context.Background()); err != nil {
+			t.Fatalf("EnsureShards: %v", err)
+		}
+		// Create two shards, both with IPs
+		if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+		if _, _, err := sm.Add(context.Background(), "10.0.0.2"); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+		_, _, ok := sm.PrunableTail()
+		if ok {
+			t.Error("PrunableTail: got ok=true when last shard has members; want false")
+		}
+	})
+
+	t.Run("empty last shard prunable", func(t *testing.T) {
+		ctrl := testutil.NewMockController()
+		store := newBboltStore(t)
+		sm := newV4ShardManager(t, 1, ctrl, store)
+		if err := sm.EnsureShards(context.Background()); err != nil {
+			t.Fatalf("EnsureShards: %v", err)
+		}
+		// Add two IPs to overflow into shard 1, then remove the overflow IP
+		if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+			t.Fatalf("Add shard0: %v", err)
+		}
+		if _, _, err := sm.Add(context.Background(), "10.0.0.2"); err != nil {
+			t.Fatalf("Add shard1 overflow: %v", err)
+		}
+		if _, err := sm.Remove(context.Background(), "10.0.0.2"); err != nil {
+			t.Fatalf("Remove: %v", err)
+		}
+		// Now shard 1 is empty and there are 2 shards → prunable
+		_, shardIdx, ok := sm.PrunableTail()
+		if !ok {
+			t.Error("PrunableTail: got ok=false for empty last shard with 2 shards; want true")
+		}
+		if shardIdx != 1 {
+			t.Errorf("PrunableTail: shardIdx = %d; want 1", shardIdx)
+		}
+	})
+}
+
+// TestRemoveTail verifies that RemoveTail shrinks the shard slice and removes
+// the group from bbolt.
+func TestRemoveTail(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	sm := newV4ShardManager(t, 1, ctrl, store)
+	if err := sm.EnsureShards(context.Background()); err != nil {
+		t.Fatalf("EnsureShards: %v", err)
+	}
+
+	// Create two shards via overflow, then empty shard 1
+	if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+		t.Fatalf("Add shard0: %v", err)
+	}
+	if _, _, err := sm.Add(context.Background(), "10.0.0.2"); err != nil {
+		t.Fatalf("Add shard1: %v", err)
+	}
+	if _, err := sm.Remove(context.Background(), "10.0.0.2"); err != nil {
+		t.Fatalf("Remove shard1 IP: %v", err)
+	}
+
+	if got := len(sm.GroupIDs()); got != 2 {
+		t.Fatalf("expected 2 shards before RemoveTail; got %d", got)
+	}
+
+	if err := sm.RemoveTail(); err != nil {
+		t.Fatalf("RemoveTail: %v", err)
+	}
+
+	if got := len(sm.GroupIDs()); got != 1 {
+		t.Errorf("expected 1 shard after RemoveTail; got %d", got)
+	}
 }

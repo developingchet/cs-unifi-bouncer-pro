@@ -80,6 +80,8 @@ UNIFI_SITES=default,homelab,iot
 | `FIREWALL_GROUP_CAPACITY_V4` | — | No | Override capacity for IPv4 groups |
 | `FIREWALL_GROUP_CAPACITY_V6` | — | No | Override capacity for IPv6 groups |
 | `FIREWALL_BATCH_WINDOW` | `500ms` | No | Accumulate group member changes for this duration before issuing a single API update |
+| `FIREWALL_API_SHARD_DELAY` | `250ms` | No | Minimum pause between consecutive write calls (`PUT /rest/firewallgroup`, rule/policy `POST`/`DELETE`). Prevents the UDM from stacking back-to-back ruleset regenerations. Set `0` to disable. |
+| `FIREWALL_FLUSH_CONCURRENCY` | `1` | No | Maximum concurrent `PUT /rest/firewallgroup` calls in-flight across all sites and address families. `1` = fully serialized (recommended). Increase only for multi-site setups where faster bulk updates are needed. |
 | `FIREWALL_LOG_DROPS` | `false` | No | Enable UniFi "log dropped packets" on managed firewall rules |
 | `FIREWALL_RECONCILE_ON_START` | `true` | No | Run a full reconcile on startup before accepting the CrowdSec stream |
 | `FIREWALL_RECONCILE_INTERVAL` | — | No | Periodically re-sync UniFi state with bbolt (e.g. `6h`). `0` or empty = startup only. |

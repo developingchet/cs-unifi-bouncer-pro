@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
@@ -14,14 +15,16 @@ import (
 
 // ShardManager manages a set of firewall group shards for one address family on one site.
 type ShardManager struct {
-	mu       sync.RWMutex
-	site     string
-	ipv6     bool
-	capacity int
-	namer    *Namer
-	ctrl     controller.Controller
-	store    storage.Store
-	log      zerolog.Logger
+	mu         sync.RWMutex
+	site       string
+	ipv6       bool
+	capacity   int
+	namer      *Namer
+	ctrl       controller.Controller
+	store      storage.Store
+	log        zerolog.Logger
+	flushDelay time.Duration
+	flushSem   chan struct{} // shared semaphore; nil = unlimited
 
 	// In-memory shadow of each shard's members
 	shards []shard // index == shard number
@@ -33,17 +36,28 @@ type shard struct {
 	dirty   bool
 }
 
+// flushSnapshot captures the data needed to flush a dirty shard without holding the lock.
+type flushSnapshot struct {
+	idx     int
+	unifiID string
+	name    string
+	members []string // sorted
+}
+
 // NewShardManager creates a ShardManager. Call EnsureShards to initialize from the API.
 func NewShardManager(site string, ipv6 bool, capacity int, namer *Namer,
-	ctrl controller.Controller, store storage.Store, log zerolog.Logger) *ShardManager {
+	ctrl controller.Controller, store storage.Store, log zerolog.Logger,
+	flushDelay time.Duration, flushSem chan struct{}) *ShardManager {
 	return &ShardManager{
-		site:     site,
-		ipv6:     ipv6,
-		capacity: capacity,
-		namer:    namer,
-		ctrl:     ctrl,
-		store:    store,
-		log:      log,
+		site:       site,
+		ipv6:       ipv6,
+		capacity:   capacity,
+		namer:      namer,
+		ctrl:       ctrl,
+		store:      store,
+		log:        log,
+		flushDelay: flushDelay,
+		flushSem:   flushSem,
 	}
 }
 
@@ -120,15 +134,18 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 }
 
 // Add adds an IP to the appropriate shard, creating new shards as needed.
-// Returns the shard name that was modified (for batch flushing).
-func (sm *ShardManager) Add(ctx context.Context, ip string) (string, error) {
+// Returns the shard name that was modified (for batch flushing) and the index of a
+// newly created shard (newShardIdx >= 0), or newShardIdx == -1 if no new shard was created.
+func (sm *ShardManager) Add(ctx context.Context, ip string) (shardName string, newShardIdx int, err error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+
+	newShardIdx = -1
 
 	// Check if already present
 	for _, s := range sm.shards {
 		if _, ok := s.members[ip]; ok {
-			return "", nil // already there
+			return "", -1, nil // already there
 		}
 	}
 
@@ -145,8 +162,9 @@ func (sm *ShardManager) Add(ctx context.Context, ip string) (string, error) {
 	if shardIdx < 0 {
 		shardIdx = len(sm.shards)
 		if err := sm.createShard(ctx, shardIdx); err != nil {
-			return "", err
+			return "", -1, err
 		}
+		newShardIdx = shardIdx
 	}
 
 	sm.shards[shardIdx].members[ip] = struct{}{}
@@ -154,10 +172,10 @@ func (sm *ShardManager) Add(ctx context.Context, ip string) (string, error) {
 
 	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: shardIdx, Site: sm.site})
 	if err != nil {
-		return "", err
+		return "", newShardIdx, err
 	}
 	sm.updateMetrics()
-	return name, nil
+	return name, newShardIdx, nil
 }
 
 // Remove removes an IP from whichever shard contains it.
@@ -181,10 +199,17 @@ func (sm *ShardManager) Remove(ctx context.Context, ip string) (string, error) {
 }
 
 // FlushDirty pushes all dirty shards to the UniFi API.
+// The mutex is released before any HTTP call or sleep, allowing Add/Remove to proceed
+// concurrently. On failure the affected shard is re-marked dirty for retry.
 func (sm *ShardManager) FlushDirty(ctx context.Context) error {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
+	groupType := "address-group"
+	if sm.ipv6 {
+		groupType = "ipv6-address-group"
+	}
 
+	// --- Phase 1: snapshot dirty shards under lock, clear dirty flags ---
+	sm.mu.Lock()
+	var snapshots []flushSnapshot
 	for i := range sm.shards {
 		if !sm.shards[i].dirty {
 			continue
@@ -196,38 +221,128 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 		}
 		sort.Strings(members)
 
-		groupType := "address-group"
-		if sm.ipv6 {
-			groupType = "ipv6-address-group"
-		}
-
 		name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: i, Site: sm.site})
 		if err != nil {
+			sm.mu.Unlock()
 			return err
 		}
 
-		if err := sm.ctrl.UpdateFirewallGroup(ctx, sm.site, controller.FirewallGroup{
-			ID:           sm.shards[i].unifiID,
-			Name:         name,
+		snapshots = append(snapshots, flushSnapshot{
+			idx:     i,
+			unifiID: sm.shards[i].unifiID,
+			name:    name,
+			members: members,
+		})
+		sm.shards[i].dirty = false
+	}
+	sm.mu.Unlock()
+
+	// --- Phase 2: flush each snapshot without holding the lock ---
+	var firstErr error
+	for i, snap := range snapshots {
+		// Apply inter-shard delay (not before the first one)
+		if i > 0 && sm.flushDelay > 0 {
+			select {
+			case <-time.After(sm.flushDelay):
+			case <-ctx.Done():
+				// Re-mark remaining snapshots as dirty
+				sm.mu.Lock()
+				for _, s := range snapshots[i:] {
+					sm.shards[s.idx].dirty = true
+				}
+				sm.mu.Unlock()
+				return ctx.Err()
+			}
+		}
+
+		// Acquire semaphore slot
+		if sm.flushSem != nil {
+			select {
+			case sm.flushSem <- struct{}{}:
+			case <-ctx.Done():
+				sm.mu.Lock()
+				for _, s := range snapshots[i:] {
+					sm.shards[s.idx].dirty = true
+				}
+				sm.mu.Unlock()
+				return ctx.Err()
+			}
+		}
+
+		putErr := sm.ctrl.UpdateFirewallGroup(ctx, sm.site, controller.FirewallGroup{
+			ID:           snap.unifiID,
+			Name:         snap.name,
 			GroupType:    groupType,
-			GroupMembers: members,
-		}); err != nil {
-			return fmt.Errorf("flush shard %d (%s): %w", i, name, err)
+			GroupMembers: snap.members,
+		})
+
+		// Release semaphore slot
+		if sm.flushSem != nil {
+			<-sm.flushSem
+		}
+
+		if putErr != nil {
+			// Re-mark as dirty for retry on next flush
+			sm.mu.Lock()
+			sm.shards[snap.idx].dirty = true
+			sm.mu.Unlock()
+
+			if firstErr == nil {
+				firstErr = fmt.Errorf("flush shard %d (%s): %w", snap.idx, snap.name, putErr)
+			}
+			continue // attempt remaining shards
 		}
 
 		// Update bbolt cache
-		if err := sm.store.SetGroup(name, storage.GroupRecord{
-			UnifiID: sm.shards[i].unifiID,
+		if err := sm.store.SetGroup(snap.name, storage.GroupRecord{
+			UnifiID: snap.unifiID,
 			Site:    sm.site,
-			Members: members,
+			Members: snap.members,
 			IPv6:    sm.ipv6,
 		}); err != nil {
-			sm.log.Warn().Err(err).Str("shard", name).Msg("failed to update bbolt group cache")
+			sm.log.Warn().Err(err).Str("shard", snap.name).Msg("failed to update bbolt group cache")
 		}
-
-		sm.shards[i].dirty = false
 	}
-	return nil
+
+	return firstErr
+}
+
+// PrunableTail returns the last shard's UniFi ID and index if it is pruneable:
+// empty (0 members) AND not the only shard (len > 1).
+// Returns ok=false if pruning is not applicable.
+func (sm *ShardManager) PrunableTail() (unifiID string, shardIdx int, ok bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if len(sm.shards) <= 1 {
+		return "", -1, false
+	}
+
+	last := sm.shards[len(sm.shards)-1]
+	if len(last.members) > 0 {
+		return "", -1, false
+	}
+
+	return last.unifiID, len(sm.shards) - 1, true
+}
+
+// RemoveTail removes the last shard from in-memory slice and bbolt.
+// Call only after the API group has been successfully deleted.
+func (sm *ShardManager) RemoveTail() error {
+	sm.mu.Lock()
+	n := len(sm.shards)
+	if n == 0 {
+		sm.mu.Unlock()
+		return nil
+	}
+	name, nameErr := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: n - 1, Site: sm.site})
+	sm.shards = sm.shards[:n-1]
+	sm.mu.Unlock()
+
+	if nameErr != nil {
+		return nameErr
+	}
+	return sm.store.DeleteGroup(name)
 }
 
 // Contains returns true if any shard contains the given IP.
