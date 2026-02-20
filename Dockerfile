@@ -48,4 +48,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
 # Expose Prometheus metrics and health endpoints
 EXPOSE 9090 8081
 
-ENTRYPOINT ["/cs-unifi-bouncer-pro", "run"]
+ENTRYPOINT ["/cs-unifi-bouncer-pro"]
+CMD ["run"]
