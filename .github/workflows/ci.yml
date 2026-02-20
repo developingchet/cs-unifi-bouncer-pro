@@ -69,5 +69,5 @@ jobs:
             --security-opt "seccomp:./security/seccomp-unifi.json" \
             --security-opt no-new-privileges:true \
             --cap-drop ALL \
-            cs-unifi-bouncer-pro:ci \
+            cs-unifi-bouncer-test:ci \
             version
