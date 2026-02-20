@@ -116,7 +116,8 @@ func (s *sessionManager) login(ctx context.Context) error {
 		return &ErrUnauthorized{Msg: fmt.Sprintf("login returned HTTP %d", resp.StatusCode)}
 	}
 
-	// Extract the session cookie
+	// Extract the session cookie (reset first so re-auth doesn't accumulate stale values)
+	s.cookie = ""
 	for _, c := range resp.Cookies() {
 		if c.Name == "TOKEN" || c.Name == "unifises" || c.Name == "csrf_token" {
 			if s.cookie == "" {

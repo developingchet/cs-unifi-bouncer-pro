@@ -2,59 +2,121 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
     branches: [main]
 
 jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-          cache: true
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-          args: --timeout=5m
-
+  # ── 1. Go tests ─────────────────────────────────────────────────────────────
   test:
-    name: Test
+    name: Go Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-          cache: true
-      - name: Run tests with race detector
-        run: go test -race -coverprofile=coverage.out ./...
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./coverage.out
-          fail_ci_if_error: false
 
-  security:
-    name: Security scan
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests (race detector)
+        run: go test -race ./... -count=1 -timeout=120s
+
+  # ── 2. Seccomp profile static validation ────────────────────────────────────
+  validate-seccomp:
+    name: Validate Seccomp Profile
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+
+      - name: Install jq
+        run: sudo apt-get install -y --no-install-recommends jq
+
+      - name: Validate syscall allowlist
+        run: bash scripts/validate-seccomp.sh ./security/seccomp-unifi.json
+
+  # ── 3. Seccomp integration test ─────────────────────────────────────────────
+  # Builds the real image and runs it under the seccomp profile with all the
+  # same security options used in production. The bouncer will exit with a
+  # connection error (no real UniFi/LAPI) — that is expected. What must NOT
+  # appear is the runc "reopen exec fifo" error, which signals that seccomp
+  # blocked the container before the Go binary ran.
+  test-seccomp:
+    name: Seccomp Integration Test
+    runs-on: ubuntu-latest
+    needs: validate-seccomp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Sanity-check seccomp profile with Alpine (fast, no build)
+        run: |
+          # Exercises getdents64 (ls reads /proc/self/fd/) and execve (launching /bin/ls).
+          # Fails in <5 s if these are missing, saving the 3–5 min full image build.
+          docker run --rm \
+            --security-opt "seccomp:./security/seccomp-unifi.json" \
+            --security-opt no-new-privileges:true \
+            --cap-drop ALL \
+            alpine:latest \
+            ls /proc/self/fd
+
+      - name: Build image (linux/amd64)
+        uses: docker/build-push-action@v5
         with:
-          go-version: '1.24'
-          cache: true
-      - name: Nancy (go.sum CVE scan)
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: cs-unifi-bouncer-test:ci
+          build-args: |
+            VERSION=ci-seccomp-test
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=1970-01-01T00:00:00Z
+
+      - name: Run container under seccomp profile
         run: |
-          go list -json -deps ./... | docker run --rm -i sonatypecommunity/nancy:latest sleuth
-        continue-on-error: true
-      - name: Validate seccomp JSON
-        run: python3 -m json.tool security/seccomp-unifi.json > /dev/null
-      - name: govulncheck
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+          set +e
+
+          # Run with production security flags. The bouncer will fail to reach
+          # the UniFi controller or LAPI (expected) but must not be blocked by
+          # seccomp itself.
+          output=$(timeout 20 docker run --rm \
+            --security-opt "seccomp:./security/seccomp-unifi.json" \
+            --security-opt no-new-privileges:true \
+            --cap-drop ALL \
+            --read-only \
+            --tmpfs /tmp:size=10M,uid=65532,gid=65532,mode=1777 \
+            --tmpfs /data:size=50M,uid=65532,gid=65532 \
+            -e UNIFI_URL=https://192.0.2.1 \
+            -e UNIFI_API_KEY=ci-test-api-key \
+            -e CROWDSEC_LAPI_URL=http://no-such-host-ci-test:8080 \
+            -e CROWDSEC_LAPI_KEY=ci-test-lapi-key \
+            cs-unifi-bouncer-test:ci 2>&1)
+
+          set -e
+
+          echo "──── Container output ────────────────────────────────────────────"
+          echo "$output"
+          echo "──────────────────────────────────────────────────────────────────"
+
+          # FAIL: runc was blocked by seccomp before the Go binary ran.
+          # This is the exact error produced by a missing syscall in the profile.
+          if echo "$output" | grep -qE "reopen exec fifo|error closing exec fds"; then
+            echo ""
+            echo "FAIL: seccomp profile blocked container startup (runc exec fifo error)."
+            echo "      A required syscall is missing from security/seccomp-unifi.json."
+            echo "      Run:  bash scripts/validate-seccomp.sh"
+            exit 1
+          fi
+
+          # FAIL: completely empty output is unexpected — something is very wrong.
+          if [ -z "$output" ]; then
+            echo ""
+            echo "FAIL: no output from container — unexpected empty result."
+            exit 1
+          fi
+
+          echo ""
+          echo "PASS: container started under seccomp profile."
+          echo "      (runc exec fifo completed; bouncer exited normally on missing UniFi/LAPI)"

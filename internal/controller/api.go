@@ -356,7 +356,7 @@ func deleteZonePolicy(ctx context.Context, c *unifiClient, site, id string) erro
 }
 
 func reorderZonePolicies(ctx context.Context, c *unifiClient, site string, orderedIDs []string) error {
-	url := zonePolicyEndpoint(c.cfg.BaseURL, site) + "/order"
+	url := zonePolicyEndpoint(c.cfg.BaseURL, site) + "/reorder"
 	payload := map[string]interface{}{"ids": orderedIDs}
 	b, err := json.Marshal(payload)
 	if err != nil {

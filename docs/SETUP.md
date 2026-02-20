@@ -142,11 +142,10 @@ docker compose build
 
 This produces a multi-stage build: a Go builder stage compiles a static binary, and a distroless runtime stage packages it. The resulting image is under 20 MB.
 
-To use a pre-built image from GHCR instead of building locally:
+To use the pre-built image from Docker Hub instead of building locally, update `docker-compose.yml` to remove the `build:` block (or comment it out) and run:
 
 ```bash
-# The docker-compose.yml already references the GHCR image by default.
-# Pull it explicitly:
+# Pull the published image explicitly:
 docker compose pull
 ```
 
@@ -183,10 +182,13 @@ docker ps --filter name=cs-unifi-bouncer-pro
 docker logs cs-unifi-bouncer-pro
 ```
 
-Look for:
+Look for these startup log lines (exact field order may vary):
 
 ```json
-{"level":"info","msg":"bouncer started","firewall_mode":"auto","sites":["default"]}
+{"level":"info","version":"1.0.0","msg":"cs-unifi-bouncer-pro starting"}
+{"level":"info","sites":["default"],"msg":"ensuring firewall infrastructure"}
+{"level":"info","addr":":9090","msg":"Prometheus metrics server started"}
+{"level":"info","addr":":8081","msg":"health server started"}
 ```
 
 If errors appear, check [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

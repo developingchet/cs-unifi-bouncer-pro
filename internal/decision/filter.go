@@ -12,22 +12,22 @@ import (
 
 // FilterConfig holds the parameters for the 8-stage decision pipeline.
 type FilterConfig struct {
-	// Stage 2: allowed action types
+	// Stage 1: allowed action types
 	AllowedActions []string // default: ["ban", "delete"]
 
-	// Stage 3: scenario substrings to skip
+	// Stage 2: scenario substrings to skip
 	BlockScenarioExclude []string
 
-	// Stage 4: allowed origins (empty = all)
+	// Stage 3: allowed origins (empty = all)
 	AllowedOrigins []string
 
-	// Stage 5: allowed scopes
+	// Stage 4: allowed scopes
 	AllowedScopes []string // default: ["ip", "range"]
 
-	// Stage 8: whitelist
+	// Stage 7: whitelist
 	Whitelist []*net.IPNet
 
-	// Stage 9: minimum ban duration (0 = disabled)
+	// Stage 8: minimum ban duration (0 = disabled)
 	MinBanDuration time.Duration
 }
 

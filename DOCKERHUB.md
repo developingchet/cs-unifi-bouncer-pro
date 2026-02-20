@@ -62,7 +62,7 @@ Detects zone-based firewall support from the UniFi controller version. Uses zone
 Creates `WAN_IN` / `WANv6_IN` drop rules referencing managed address-group shards. Compatible with all UniFi Network versions.
 
 ### zone
-Creates zone firewall policies for each configured `ZONE_PAIRS` (e.g. `wan->lan,wan->iot`). Requires UniFi Network ≥ 8.x.
+Creates zone firewall policies for each configured `ZONE_PAIRS` (e.g. `External->Internal,External->IoT`). Requires UniFi Network ≥ 8.x.
 
 ---
 

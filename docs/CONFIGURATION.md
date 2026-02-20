@@ -155,7 +155,7 @@ These settings apply only when `FIREWALL_MODE=zone` or when `auto` detects a zon
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ZONE_PAIRS` | `External->Internal` | Comma-separated `src->dst` zone pairs. A policy is created for each pair and each shard. `External` and `Internal` are the default zone names in UniFi Network 8.x — check Settings → Firewall → Zones if you have renamed them. |
-| `ZONE_CONNECTION_STATES` | `new,invalid` | Connection states to match. Comma-separated. |
+| `ZONE_CONNECTION_STATES` | `new,invalid` | Connection states to match. Comma-separated. **Note: this value is accepted by the config parser but is not yet wired to the zone policy API payload. All connection states are matched by the policy regardless of this setting.** |
 | `ZONE_POLICY_REORDER` | `true` | Move bouncer-managed policies to the highest priority in each zone pair. |
 
 ```bash

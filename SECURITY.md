@@ -59,18 +59,18 @@ Every release tag triggers a GitHub Actions workflow that:
 2. Runs **Trivy** vulnerability scanning — blocks on `HIGH`/`CRITICAL` unfixed CVEs
 3. Signs the image with **Cosign** keyless OIDC (no long-lived signing key)
 4. Generates a **CycloneDX SBOM** and attaches it as an OCI attestation
-5. Publishes binaries via **GoReleaser** with checksums
+5. Publishes binaries via a **manual binary build matrix** with checksums
 
 To verify a release image:
 
 ```bash
 # Verify Cosign signature
-cosign verify ghcr.io/developingchet/cs-unifi-bouncer-pro:latest \
-  --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro" \
+cosign verify developingchet/cs-unifi-bouncer-pro:latest \
+  --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 
 # Download and verify SBOM
-cosign download attestation ghcr.io/developingchet/cs-unifi-bouncer-pro:latest \
+cosign download attestation developingchet/cs-unifi-bouncer-pro:latest \
   | jq -r '.payload | @base64d | fromjson | .predicate'
 ```
 
@@ -81,7 +81,7 @@ cosign download attestation ghcr.io/developingchet/cs-unifi-bouncer-pro:latest \
 - The Go bouncer binary (`cmd/bouncer/`)
 - `Dockerfile` and container configuration
 - GitHub Actions workflows (`.github/workflows/`)
-- Published Docker images on GHCR
+- Published Docker images on Docker Hub
 
 ### Out of Scope
 

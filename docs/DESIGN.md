@@ -89,20 +89,20 @@ Decisions from CrowdSec pass through eight stages before being enqueued. Each st
 | `whitelist` | IP matches `BLOCK_WHITELIST` | Trusted ranges (e.g. office CGNAT) |
 | `min-duration` | Decision duration is below `BLOCK_MIN_DURATION` | Filter out short test decisions |
 
-The pipeline is implemented as a single function (`filter.Apply`) that returns a `FilterResult` struct. No goroutines, no channels — just a fast sequential check.
+The pipeline is implemented as a single function (`decision.Filter`) that returns a `FilterResult` struct. No goroutines, no channels — just a fast sequential check.
 
 ---
 
 ## Firewall Abstraction
 
-The `firewall.Manager` interface exposes three operations:
+The `firewall.Manager` interface exposes four operations:
 
 ```go
 type Manager interface {
-    EnsureInfrastructure(ctx context.Context) error
-    ApplyBan(ctx context.Context, ip string, ipv6 bool) error
-    ApplyUnban(ctx context.Context, ip string, ipv6 bool) error
-    Reconcile(ctx context.Context) (ReconcileResult, error)
+    EnsureInfrastructure(ctx context.Context, sites []string) error
+    ApplyBan(ctx context.Context, site, ip string, ipv6 bool) error
+    ApplyUnban(ctx context.Context, site, ip string, ipv6 bool) error
+    Reconcile(ctx context.Context, sites []string) (*ReconcileResult, error)
 }
 ```
 

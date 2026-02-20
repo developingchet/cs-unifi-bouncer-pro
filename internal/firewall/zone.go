@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
@@ -210,11 +209,3 @@ func (zm *ZoneManager) UpdateGroupReference(ctx context.Context, site, oldGroupI
 	return nil
 }
 
-// parseConnectionState normalizes connection state strings.
-func parseConnectionState(states []string) string {
-	normalized := make([]string, 0, len(states))
-	for _, s := range states {
-		normalized = append(normalized, strings.ToUpper(strings.TrimSpace(s)))
-	}
-	return strings.Join(normalized, ",")
-}

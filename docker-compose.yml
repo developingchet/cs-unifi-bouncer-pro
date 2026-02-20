@@ -1,6 +1,6 @@
 services:
   cs-unifi-bouncer-pro:
-    image: ghcr.io/developingchet/cs-unifi-bouncer-pro:latest
+    image: developingchet/cs-unifi-bouncer-pro:latest
     restart: unless-stopped
     read_only: true
     cap_drop:
@@ -15,8 +15,8 @@ services:
     env_file:
       - .env
     ports:
-      - "9090:9090"  # Prometheus metrics
-      - "8081:8081"  # Health endpoints
+      - "127.0.0.1:9090:9090"  # Prometheus metrics
+      - "127.0.0.1:8081:8081"  # Health endpoints
     networks:
       - crowdsec_net
     healthcheck:
