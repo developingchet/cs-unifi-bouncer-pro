@@ -24,6 +24,7 @@
         "epoll_ctl",
         "epoll_pwait",
         "epoll_wait",
+        "eventfd2",
         "exit",
         "exit_group",
         "execve",
