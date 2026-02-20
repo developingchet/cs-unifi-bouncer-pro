@@ -1,0 +1,54 @@
+# cs-unifi-bouncer-pro — standalone Docker Compose
+# No git clone required. See README for setup instructions.
+#
+# Usage:
+#   curl -O https://raw.githubusercontent.com/developingchet/cs-unifi-bouncer-pro/main/docker-compose.standalone.yml
+#   curl -O https://raw.githubusercontent.com/developingchet/cs-unifi-bouncer-pro/main/security/seccomp-unifi.json
+#   # Create .env with your 3 required values (see below)
+#   docker compose -f docker-compose.standalone.yml up -d
+
+services:
+  cs-unifi-bouncer-pro:
+    image: developingchet/cs-unifi-bouncer-pro:latest
+    container_name: cs-unifi-bouncer-pro
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:./seccomp-unifi.json
+    tmpfs:
+      - /tmp:size=10m,noexec,nosuid
+    volumes:
+      - bouncer-data:/data
+    environment:
+      # Required — fill these in or use an .env file
+      - UNIFI_URL=${UNIFI_URL}
+      - UNIFI_API_KEY=${UNIFI_API_KEY}
+      - CROWDSEC_LAPI_KEY=${CROWDSEC_LAPI_KEY}
+      # Optional — uncomment and set as needed
+      # - CROWDSEC_LAPI_URL=${CROWDSEC_LAPI_URL:-http://crowdsec:8080}
+      # - UNIFI_SITES=${UNIFI_SITES:-default}
+      # - FIREWALL_MODE=${FIREWALL_MODE:-auto}
+      # - LAPI_METRICS_PUSH_INTERVAL=${LAPI_METRICS_PUSH_INTERVAL:-30m}
+      # - DRY_RUN=${DRY_RUN:-false}
+      # - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "127.0.0.1:9090:9090"
+      - "127.0.0.1:8081:8081"
+    networks:
+      - crowdsec_net
+    healthcheck:
+      test: ["/cs-unifi-bouncer-pro", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  bouncer-data:
+
+networks:
+  crowdsec_net:
+    external: true

@@ -2,24 +2,15 @@
 
 Step-by-step instructions for deploying cs-unifi-bouncer-pro with Docker.
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Step 1: Register the Bouncer with CrowdSec](#step-1-register-the-bouncer-with-crowdsec)
-- [Step 2: Clone the Repository](#step-2-clone-the-repository)
-- [Step 3: Configure Environment Variables](#step-3-configure-environment-variables)
-- [Step 4: Configure Docker Networking](#step-4-configure-docker-networking)
-- [Step 5: Pull the Docker Image](#step-5-pull-the-docker-image)
-- [Step 6: Start the Container](#step-6-start-the-container)
-- [Step 7: Verify Deployment](#step-7-verify-deployment)
-- [Step 8: Test with a Manual Decision](#step-8-test-with-a-manual-decision)
-- [Network Scenarios](#network-scenarios)
-- [Updating](#updating)
-- [Uninstalling](#uninstalling)
+Choose your path below: **quick deploy without cloning** (recommended for most users) or **clone the repository** (recommended for contributors and power users).
 
 ---
 
-## Prerequisites
+## Option A: Quick Deploy (No Git Clone)
+
+Pull the compose file, seccomp profile, and you're running in under 2 minutes.
+
+### Prerequisites
 
 | Requirement | Details |
 |-------------|---------|
@@ -29,15 +20,13 @@ Step-by-step instructions for deploying cs-unifi-bouncer-pro with Docker.
 | UniFi controller | UniFi Network Application 7.x or later |
 | UniFi credentials | API key (recommended) or local admin username/password |
 
-Verify CrowdSec is running before proceeding:
+Verify CrowdSec is running:
 
 ```bash
 docker exec crowdsec cscli version
 ```
 
----
-
-## Step 1: Register the Bouncer with CrowdSec
+### Step 1: Register the Bouncer with CrowdSec
 
 Generate a LAPI key for the bouncer:
 
@@ -52,18 +41,104 @@ docker exec crowdsec cscli bouncers delete unifi-bouncer
 docker exec crowdsec cscli bouncers add unifi-bouncer
 ```
 
+### Step 2: Download the Required Files
+
+```bash
+curl -O https://raw.githubusercontent.com/developingchet/cs-unifi-bouncer-pro/main/docker-compose.standalone.yml
+curl -O https://raw.githubusercontent.com/developingchet/cs-unifi-bouncer-pro/main/security/seccomp-unifi.json
+```
+
+### Step 3: Create Your `.env`
+
+```bash
+cat > .env <<'EOF'
+UNIFI_URL=https://192.168.1.1
+UNIFI_API_KEY=your-api-key-here
+CROWDSEC_LAPI_KEY=paste-key-from-step-1-here
+EOF
+chmod 600 .env
+```
+
+**Get your UniFi API key** from: **Settings → Control Plane → API Keys**
+
+For all available configuration options, see [CONFIGURATION.md](CONFIGURATION.md).
+
+### Step 4: Create the Docker Network (if not already present)
+
+```bash
+docker network create crowdsec_net 2>/dev/null || true
+docker network connect crowdsec_net crowdsec 2>/dev/null || true
+```
+
+### Step 5: Start
+
+```bash
+docker compose -f docker-compose.standalone.yml up -d
+docker logs -f cs-unifi-bouncer-pro
+```
+
+### Step 6: Verify
+
+```bash
+# CrowdSec should show the bouncer connected
+docker exec crowdsec cscli bouncers list
+
+# Health check
+curl -s http://localhost:8081/healthz
+
+# Test with a manual decision
+docker exec crowdsec cscli decisions add -i 203.0.113.42 -t ban -d 1h -r "setup test"
+docker logs -f cs-unifi-bouncer-pro | grep 203.0.113.42
+# Clean up
+docker exec crowdsec cscli decisions delete --ip 203.0.113.42
+```
+
 ---
 
-## Step 2: Clone the Repository
+## Option B: Clone the Repository
+
+For contributors, `.env.example` access, or local builds.
+
+### Prerequisites
+
+| Requirement | Details |
+|-------------|---------|
+| Docker Engine | 20.10 or later |
+| Docker Compose | v2 or later (`docker compose` not `docker-compose`) |
+| CrowdSec | 1.4.0 or later, running and accessible |
+| UniFi controller | UniFi Network Application 7.x or later |
+| UniFi credentials | API key (recommended) or local admin username/password |
+| Git | Latest stable version |
+
+Verify CrowdSec is running:
+
+```bash
+docker exec crowdsec cscli version
+```
+
+### Step 1: Register the Bouncer with CrowdSec
+
+Generate a LAPI key for the bouncer:
+
+```bash
+docker exec crowdsec cscli bouncers add unifi-bouncer
+```
+
+**Copy the key output — it is only shown once.** If you lose it, delete the bouncer and add it again:
+
+```bash
+docker exec crowdsec cscli bouncers delete unifi-bouncer
+docker exec crowdsec cscli bouncers add unifi-bouncer
+```
+
+### Step 2: Clone the Repository
 
 ```bash
 git clone https://github.com/developingchet/cs-unifi-bouncer-pro.git
 cd cs-unifi-bouncer-pro
 ```
 
----
-
-## Step 3: Configure Environment Variables
+### Step 3: Configure Environment Variables
 
 ```bash
 cp .env.example .env
@@ -95,7 +170,7 @@ chmod 600 .env
 
 For the full list of configuration options, see [CONFIGURATION.md](CONFIGURATION.md).
 
-### Using API key authentication (recommended)
+#### Using API key authentication (recommended)
 
 UniFi Network ≥ 8.1 supports API key authentication, which is more secure than username/password:
 
@@ -103,7 +178,7 @@ UniFi Network ≥ 8.1 supports API key authentication, which is more secure than
 2. Create a key with the minimum required permissions (read/write on Firewall)
 3. Set `UNIFI_API_KEY` in `.env`
 
-### Using username/password authentication
+#### Using username/password authentication
 
 For older controllers or where API keys are unavailable:
 
@@ -113,9 +188,7 @@ UNIFI_PASSWORD=yourpassword
 # Leave UNIFI_API_KEY unset or commented out
 ```
 
----
-
-## Step 4: Configure Docker Networking
+### Step 4: Configure Docker Networking
 
 The bouncer must be on the same Docker network as CrowdSec to reach the LAPI. The default `docker-compose.yml` uses an external network named `crowdsec_net`:
 
@@ -132,9 +205,7 @@ docker network connect crowdsec_net crowdsec
 
 If your CrowdSec setup uses a different network name, update `CROWDSEC_LAPI_URL` and the network name in `docker-compose.yml`.
 
----
-
-## Step 5: Pull the Docker Image
+### Step 5: Pull the Docker Image
 
 ```bash
 docker compose pull
@@ -147,9 +218,7 @@ a non-root user in a distroless container, and is Cosign-signed on every release
 > the repository. Add `build: .` to the service in `docker-compose.yml` and run
 > `docker compose build` instead.
 
----
-
-## Step 6: Start the Container
+### Step 6: Start the Container
 
 ```bash
 docker compose up -d
@@ -163,18 +232,16 @@ The bouncer will:
 4. Run a startup reconcile (if `FIREWALL_RECONCILE_ON_START=true`)
 5. Connect to the CrowdSec LAPI stream and begin processing decisions
 
----
+### Step 7: Verify Deployment
 
-## Step 7: Verify Deployment
-
-### Check container health
+#### Check container health
 
 ```bash
 docker ps --filter name=cs-unifi-bouncer-pro
 # Status should show "healthy" after the start_period (10 s)
 ```
 
-### Check startup logs
+#### Check startup logs
 
 ```bash
 docker logs cs-unifi-bouncer-pro
@@ -191,7 +258,7 @@ Look for these startup log lines (exact field order may vary):
 
 If errors appear, check [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
-### Confirm LAPI connectivity
+#### Confirm LAPI connectivity
 
 ```bash
 docker exec crowdsec cscli bouncers list
@@ -199,22 +266,20 @@ docker exec crowdsec cscli bouncers list
 
 The `last_pull` column for `unifi-bouncer` should show a recent timestamp. It updates every poll interval (default 30 s).
 
-### Check health endpoints
+#### Check health endpoints
 
 ```bash
 curl -s http://localhost:8081/healthz    # Liveness — should return 200 OK
 curl -s http://localhost:8081/readyz    # Readiness — should return 200 OK
 ```
 
-### Check Prometheus metrics
+#### Check Prometheus metrics
 
 ```bash
 curl -s http://localhost:9090/metrics | grep crowdsec_unifi
 ```
 
----
-
-## Step 8: Test with a Manual Decision
+### Step 8: Test with a Manual Decision
 
 Inject a public test IP and confirm the bouncer processes it:
 

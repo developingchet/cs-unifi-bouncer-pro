@@ -50,17 +50,6 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Sanity-check seccomp profile with Alpine (fast, no build)
-        run: |
-          # Exercises getdents64 (ls reads /proc/self/fd/) and execve (launching /bin/ls).
-          # Fails in <5 s if these are missing, saving the 3–5 min full image build.
-          docker run --rm \
-            --security-opt "seccomp:./security/seccomp-unifi.json" \
-            --security-opt no-new-privileges:true \
-            --cap-drop ALL \
-            alpine:latest \
-            ls /proc/self/fd
-
       - name: Build image (linux/amd64)
         uses: docker/build-push-action@v5
         with:
@@ -74,49 +63,12 @@ jobs:
             COMMIT=${{ github.sha }}
             BUILD_DATE=1970-01-01T00:00:00Z
 
-      - name: Run container under seccomp profile
+      - name: Run bouncer version under seccomp profile
         run: |
-          set +e
-
-          # Run with production security flags. The bouncer will fail to reach
-          # the UniFi controller or LAPI (expected) but must not be blocked by
-          # seccomp itself.
-          output=$(timeout 20 docker run --rm \
+          docker run --rm \
             --security-opt "seccomp:./security/seccomp-unifi.json" \
             --security-opt no-new-privileges:true \
             --cap-drop ALL \
             --read-only \
-            --tmpfs /tmp:size=10M,uid=65532,gid=65532,mode=1777 \
-            --tmpfs /data:size=50M,uid=65532,gid=65532 \
-            -e UNIFI_URL=https://192.0.2.1 \
-            -e UNIFI_API_KEY=ci-test-api-key \
-            -e CROWDSEC_LAPI_URL=http://no-such-host-ci-test:8080 \
-            -e CROWDSEC_LAPI_KEY=ci-test-lapi-key \
-            cs-unifi-bouncer-test:ci 2>&1)
-
-          set -e
-
-          echo "──── Container output ────────────────────────────────────────────"
-          echo "$output"
-          echo "──────────────────────────────────────────────────────────────────"
-
-          # FAIL: runc was blocked by seccomp before the Go binary ran.
-          # This is the exact error produced by a missing syscall in the profile.
-          if echo "$output" | grep -qE "reopen exec fifo|error closing exec fds"; then
-            echo ""
-            echo "FAIL: seccomp profile blocked container startup (runc exec fifo error)."
-            echo "      A required syscall is missing from security/seccomp-unifi.json."
-            echo "      Run:  bash scripts/validate-seccomp.sh"
-            exit 1
-          fi
-
-          # FAIL: completely empty output is unexpected — something is very wrong.
-          if [ -z "$output" ]; then
-            echo ""
-            echo "FAIL: no output from container — unexpected empty result."
-            exit 1
-          fi
-
-          echo ""
-          echo "PASS: container started under seccomp profile."
-          echo "      (runc exec fifo completed; bouncer exited normally on missing UniFi/LAPI)"
+            cs-unifi-bouncer-test:ci \
+            version

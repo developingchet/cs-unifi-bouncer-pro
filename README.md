@@ -33,29 +33,29 @@ Automatically translates CrowdSec ban decisions into UniFi firewall rules — bl
 **Prerequisites**: Docker Engine 20.10+, Docker Compose v2+, a running CrowdSec instance.
 
 ```bash
-# 1. Register the bouncer with CrowdSec
+# 1. Register the bouncer with CrowdSec (copy the key — shown once)
 docker exec crowdsec cscli bouncers add unifi-bouncer
 
-# 2. Clone the repository
-git clone https://github.com/developingchet/cs-unifi-bouncer-pro.git
-cd cs-unifi-bouncer-pro
+# 2. Download compose file and seccomp profile
+curl -O https://raw.githubusercontent.com/developingchet/cs-unifi-bouncer-pro/main/docker-compose.standalone.yml
+curl -O https://raw.githubusercontent.com/developingchet/cs-unifi-bouncer-pro/main/security/seccomp-unifi.json
 
-# 3. Configure — only these 3 values are required
+# 3. Configure (3 required values)
 cat > .env <<'EOF'
-UNIFI_URL=https://192.168.1.1       # your controller IP or hostname
-UNIFI_API_KEY=your-api-key-here     # Settings → Control Plane → API Keys
-CROWDSEC_LAPI_KEY=paste-key-here    # from: cscli bouncers add unifi-bouncer
+UNIFI_URL=https://192.168.1.1
+UNIFI_API_KEY=your-api-key-here        # Settings → Control Plane → API Keys
+CROWDSEC_LAPI_KEY=paste-key-here       # from step 1
 EOF
-# Optional: cp .env.example .env  (adds all ~50 knobs for customisation)
 
-# 4. Launch
-docker compose up -d
+# 4. Start
+docker compose -f docker-compose.standalone.yml up -d
 
 # 5. Verify
 docker logs -f cs-unifi-bouncer-pro
 ```
 
-For detailed setup instructions, see [docs/SETUP.md](docs/SETUP.md).
+For the full setup guide including advanced configuration, multi-site deployments,
+TLS setup, and Docker Secrets support, see [docs/SETUP.md](docs/SETUP.md).
 
 ---
 
