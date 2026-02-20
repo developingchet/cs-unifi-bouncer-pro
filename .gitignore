@@ -23,11 +23,11 @@ docker-compose.override.yml
 # ------------------------------------------------------------------------------
 # Go Build Artifacts
 # ------------------------------------------------------------------------------
-# Compiled binary
-cs-unifi-bouncer-pro
-cs-unifi-bouncer-pro.exe
-bouncer
-bouncer.exe
+# Compiled binary (root-level only — does not affect cmd/bouncer/ source directory)
+/cs-unifi-bouncer-pro
+/cs-unifi-bouncer-pro.exe
+/bouncer
+/bouncer.exe
 
 # Cross-compiled release artifacts
 dist/
