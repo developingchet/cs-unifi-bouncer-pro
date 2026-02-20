@@ -33,11 +33,12 @@ type Bouncer struct {
 	filterCfg decision.FilterConfig
 	log       zerolog.Logger
 	streamBnc *csbouncer.StreamBouncer
+	recorder  MetricsRecorder
 }
 
 // New constructs a fully wired Bouncer.
 func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
-	fwMgr firewall.Manager, log zerolog.Logger) (*Bouncer, error) {
+	fwMgr firewall.Manager, recorder MetricsRecorder, log zerolog.Logger) (*Bouncer, error) {
 
 	whitelist, err := decision.ParseWhitelist(cfg.BlockWhitelist)
 	if err != nil {
@@ -50,7 +51,7 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 	filterCfg.Whitelist = whitelist
 	filterCfg.MinBanDuration = cfg.BlockMinDuration
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, log)
+	handler := makeJobHandler(ctrl, store, fwMgr, cfg, recorder, log)
 
 	p, err := pool.New(pool.Config{
 		Workers:    cfg.PoolWorkers,
@@ -83,6 +84,7 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 		filterCfg: filterCfg,
 		log:       log,
 		streamBnc: streamBnc,
+		recorder:  recorder,
 	}, nil
 }
 
@@ -149,12 +151,24 @@ func (b *Bouncer) handleDecisionBlock(decisions *models.DecisionsStreamResponse)
 			continue
 		}
 		metrics.DecisionsProcessed.WithLabelValues("ban", source).Inc()
+
+		origin := ""
+		if d.Origin != nil {
+			origin = *d.Origin
+		}
+		remType := ""
+		if d.Type != nil {
+			remType = *d.Type
+		}
+
 		b.enqueueJob(pool.SyncJob{
-			Action:    "ban",
-			IP:        result.Value,
-			IPv6:      result.IPv6,
-			Site:      "", // worker applies to all sites
-			ExpiresAt: expiresAt(result.Duration),
+			Action:          "ban",
+			IP:              result.Value,
+			IPv6:            result.IPv6,
+			Site:            "", // worker applies to all sites
+			ExpiresAt:       expiresAt(result.Duration),
+			Origin:          origin,
+			RemediationType: remType,
 		})
 	}
 

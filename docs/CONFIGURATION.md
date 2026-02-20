@@ -181,6 +181,7 @@ Zone names must match the zone names configured in the UniFi controller exactly 
 | `CROWDSEC_LAPI_VERIFY_TLS` | `true` | No | Verify the LAPI's TLS certificate |
 | `CROWDSEC_ORIGINS` | — | No | Comma-separated allowed decision origins. Empty = all origins accepted. Example: `crowdsec,lists` |
 | `CROWDSEC_POLL_INTERVAL` | `30s` | No | How often to poll the LAPI stream for new decisions |
+| `LAPI_METRICS_PUSH_INTERVAL` | `30m` | No | Interval for pushing metrics to LAPI `/v1/usage-metrics`; `0` disables |
 
 ---
 

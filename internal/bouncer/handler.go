@@ -16,6 +16,13 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// MetricsRecorder is implemented by the LAPI usage-metrics reporter.
+// A no-op implementation is used when reporting is disabled.
+type MetricsRecorder interface {
+	RecordBan(origin, remediationType string)
+	RecordDeletion()
+}
+
 // makeJobHandler returns a JobHandler that performs idempotency checks,
 // rate gating, and firewall API calls for each SyncJob.
 func makeJobHandler(
@@ -23,6 +30,7 @@ func makeJobHandler(
 	store storage.Store,
 	fwMgr firewall.Manager,
 	cfg *config.Config,
+	recorder MetricsRecorder,
 	log zerolog.Logger,
 ) pool.JobHandler {
 	return func(ctx context.Context, job pool.SyncJob) error {
@@ -83,16 +91,18 @@ func makeJobHandler(
 			}
 		}
 
-		// Step 4: Persist to bbolt
+		// Step 4: Persist to bbolt and record LAPI metrics
 		switch job.Action {
 		case "ban":
 			if err := store.BanRecord(job.IP, job.ExpiresAt, job.IPv6); err != nil {
 				log.Warn().Err(err).Str("ip", job.IP).Msg("failed to record ban in bbolt")
 			}
+			recorder.RecordBan(job.Origin, job.RemediationType)
 		case "delete":
 			if err := store.BanDelete(job.IP); err != nil {
 				log.Warn().Err(err).Str("ip", job.IP).Msg("failed to delete ban from bbolt")
 			}
+			recorder.RecordDeletion()
 		}
 
 		log.Info().Str("action", job.Action).Str("ip", job.IP).Bool("ipv6", job.IPv6).

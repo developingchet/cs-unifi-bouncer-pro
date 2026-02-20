@@ -13,12 +13,14 @@ import (
 
 // SyncJob is a unit of work for the worker pool.
 type SyncJob struct {
-	Action    string // "ban" or "delete"
-	IP        string
-	IPv6      bool
-	Site      string
-	ExpiresAt time.Time
-	Retries   int
+	Action          string // "ban" or "delete"
+	IP              string
+	IPv6            bool
+	Site            string
+	ExpiresAt       time.Time
+	Retries         int
+	Origin          string // CrowdSec decision origin (e.g. "CAPI", "crowdsec")
+	RemediationType string // CrowdSec remediation type (e.g. "ban")
 }
 
 // JobHandler processes a single SyncJob. Returns an error if the job should be retried.

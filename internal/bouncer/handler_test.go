@@ -14,6 +14,12 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// nopRecorder is a MetricsRecorder that discards all recordings.
+type nopRecorder struct{}
+
+func (nopRecorder) RecordBan(_, _ string) {}
+func (nopRecorder) RecordDeletion()        {}
+
 // mockFirewallManager satisfies firewall.Manager for handler tests.
 type mockFirewallManager struct {
 	applyBanErr     error
@@ -62,7 +68,7 @@ func TestJobHandler_BanAlreadyExists(t *testing.T) {
 	// Pre-record a ban
 	_ = store.BanRecord("1.2.3.4", time.Now().Add(time.Hour), false)
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, zerolog.Nop())
+	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
 	err := handler(context.Background(), pool.SyncJob{Action: "ban", IP: "1.2.3.4"})
 	if err != nil {
 		t.Errorf("expected nil error for already-banned IP, got %v", err)
@@ -78,7 +84,7 @@ func TestJobHandler_UnbanNotBanned(t *testing.T) {
 	cfg := testCfg()
 	fwMgr := &mockFirewallManager{}
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, zerolog.Nop())
+	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
 	// IP not in ban list — delete should be skipped
 	err := handler(context.Background(), pool.SyncJob{Action: "delete", IP: "5.6.7.8"})
 	if err != nil {
@@ -103,7 +109,7 @@ func TestJobHandler_RateLimited(t *testing.T) {
 	// Use up the rate budget
 	_, _ = store.APIRateGate("unifi-group-update", cfg.RateLimitWindow, cfg.RateLimitMaxCalls)
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, zerolog.Nop())
+	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
 	err := handler(context.Background(), pool.SyncJob{Action: "ban", IP: "9.9.9.9"})
 	if err == nil {
 		t.Error("expected rate-limit error, got nil")
@@ -116,7 +122,7 @@ func TestJobHandler_ApplyBanSuccess(t *testing.T) {
 	cfg := testCfg("default", "site2")
 	fwMgr := &mockFirewallManager{}
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, zerolog.Nop())
+	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
 	job := pool.SyncJob{
 		Action:    "ban",
 		IP:        "203.0.113.1",
@@ -145,7 +151,7 @@ func TestJobHandler_ApplyUnbanSuccess(t *testing.T) {
 
 	_ = store.BanRecord("10.20.30.40", time.Now().Add(time.Hour), false)
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, zerolog.Nop())
+	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
 	if err := handler(context.Background(), pool.SyncJob{Action: "delete", IP: "10.20.30.40"}); err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
@@ -164,7 +170,7 @@ func TestJobHandler_UnauthorizedRetriable(t *testing.T) {
 	cfg := testCfg()
 	fwMgr := &mockFirewallManager{applyBanErr: &controller.ErrUnauthorized{Msg: "test"}}
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, zerolog.Nop())
+	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
 	err := handler(context.Background(), pool.SyncJob{Action: "ban", IP: "1.1.1.1"})
 	if err == nil {
 		t.Fatal("expected ErrUnauthorized, got nil")
@@ -184,7 +190,7 @@ func TestJobHandler_StorageError_NonFatal(t *testing.T) {
 	// Inject BanRecord error — should be non-fatal (warns, returns nil)
 	store.SetError("BanRecord", errors.New("storage failure"))
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, zerolog.Nop())
+	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
 	job := pool.SyncJob{
 		Action:    "ban",
 		IP:        "2.2.2.2",
@@ -210,7 +216,7 @@ func TestJobHandler_DryRun(t *testing.T) {
 	// Handler itself doesn't check DryRun; that's in the manager. So just verify no error.
 	fwMgr := &mockFirewallManager{}
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, zerolog.Nop())
+	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
 	job := pool.SyncJob{
 		Action:    "ban",
 		IP:        "3.3.3.3",

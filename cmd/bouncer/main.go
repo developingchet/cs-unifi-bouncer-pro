@@ -10,15 +10,24 @@ import (
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/bouncer"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/capabilities"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/lapi_metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 )
+
+// nopRecorder is a MetricsRecorder that discards all recordings.
+// Used when LAPI_METRICS_PUSH_INTERVAL=0 (reporting disabled).
+type nopRecorder struct{}
+
+func (nopRecorder) RecordBan(_, _ string) {}
+func (nopRecorder) RecordDeletion()        {}
 
 // Version is set by the build system via -ldflags.
 var Version = "dev"
@@ -61,6 +70,13 @@ func runDaemon() error {
 
 	log := buildLogger(cfg)
 	log.Info().Str("version", Version).Msg("cs-unifi-bouncer-pro starting")
+	log.Info().
+		Str("bouncer_type", capabilities.BouncerType).
+		Str("layer", capabilities.Layer).
+		Bool("ipv4", true).Bool("ipv6", true).
+		Bool("captcha", capabilities.SupportsCaptcha).
+		Bool("appsec", capabilities.SupportsAppSec).
+		Msg("bouncer capabilities")
 
 	store, err := storage.NewBboltStore(cfg.DataDir)
 	if err != nil {
@@ -154,8 +170,21 @@ func runDaemon() error {
 		}
 	}
 
+	// Construct LAPI usage-metrics reporter.
+	var recorder bouncer.MetricsRecorder
+	if cfg.LAPIMetricsPushInterval > 0 {
+		reporter := lapi_metrics.NewReporter(
+			cfg.CrowdSecLAPIURL, cfg.CrowdSecLAPIKey, Version,
+			cfg.LAPIMetricsPushInterval, log,
+		)
+		go reporter.Run(ctx)
+		recorder = reporter
+	} else {
+		recorder = nopRecorder{}
+	}
+
 	bouncer.BinaryVersion = Version
-	bnc, err := bouncer.New(cfg, ctrl, store, fwMgr, log)
+	bnc, err := bouncer.New(cfg, ctrl, store, fwMgr, recorder, log)
 	if err != nil {
 		return fmt.Errorf("build bouncer: %w", err)
 	}
