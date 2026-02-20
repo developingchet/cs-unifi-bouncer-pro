@@ -112,6 +112,8 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `FIREWALL_GROUP_CAPACITY_V4` | — | Per-family override for IPv4 shard capacity |
 | `FIREWALL_GROUP_CAPACITY_V6` | — | Per-family override for IPv6 shard capacity |
 | `FIREWALL_BATCH_WINDOW` | `500ms` | How long to accumulate writes before flushing to API |
+| `FIREWALL_API_SHARD_DELAY` | `250ms` | Minimum pause between consecutive UniFi API write calls. Prevents the controller stacking back-to-back ruleset regenerations. `0` disables. |
+| `FIREWALL_FLUSH_CONCURRENCY` | `1` | Maximum concurrent group `PUT` calls in-flight. `1` = fully serialized (recommended). Increase only for multi-site setups. |
 | `FIREWALL_LOG_DROPS` | `false` | Enable logging rules on the firewall objects |
 | `FIREWALL_RECONCILE_ON_START` | `true` | Sync UniFi state with bbolt on startup |
 | `FIREWALL_RECONCILE_INTERVAL` | `0s` | Periodic reconcile interval; `0s` = disabled |

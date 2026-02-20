@@ -9,7 +9,7 @@ Step-by-step instructions for deploying cs-unifi-bouncer-pro with Docker.
 - [Step 2: Clone the Repository](#step-2-clone-the-repository)
 - [Step 3: Configure Environment Variables](#step-3-configure-environment-variables)
 - [Step 4: Configure Docker Networking](#step-4-configure-docker-networking)
-- [Step 5: Build the Docker Image](#step-5-build-the-docker-image)
+- [Step 5: Pull the Docker Image](#step-5-pull-the-docker-image)
 - [Step 6: Start the Container](#step-6-start-the-container)
 - [Step 7: Verify Deployment](#step-7-verify-deployment)
 - [Step 8: Test with a Manual Decision](#step-8-test-with-a-manual-decision)
@@ -99,7 +99,7 @@ For the full list of configuration options, see [CONFIGURATION.md](CONFIGURATION
 
 UniFi Network ≥ 8.1 supports API key authentication, which is more secure than username/password:
 
-1. In the UniFi console, go to **Settings → Admins & Users → API Keys**
+1. In the UniFi console, go to **Settings → Control Plane → API Keys**
 2. Create a key with the minimum required permissions (read/write on Firewall)
 3. Set `UNIFI_API_KEY` in `.env`
 
@@ -134,20 +134,18 @@ If your CrowdSec setup uses a different network name, update `CROWDSEC_LAPI_URL`
 
 ---
 
-## Step 5: Build the Docker Image
+## Step 5: Pull the Docker Image
 
 ```bash
-docker compose build
-```
-
-This produces a multi-stage build: a Go builder stage compiles a static binary, and a distroless runtime stage packages it. The resulting image is under 20 MB.
-
-To use the pre-built image from Docker Hub instead of building locally, update `docker-compose.yml` to remove the `build:` block (or comment it out) and run:
-
-```bash
-# Pull the published image explicitly:
 docker compose pull
 ```
+
+This pulls the pre-built image from Docker Hub. The image is under 20 MB, runs as
+a non-root user in a distroless container, and is Cosign-signed on every release.
+
+> **Building from source** is only needed for development or if you have forked
+> the repository. Add `build: .` to the service in `docker-compose.yml` and run
+> `docker compose build` instead.
 
 ---
 

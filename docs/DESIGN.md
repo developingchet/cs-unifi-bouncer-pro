@@ -227,6 +227,23 @@ This design allows:
 - **Histograms**: API call duration (per endpoint), reconcile duration (per trigger)
 - **Gauges**: active bans (per site/family), firewall group size, DB size, worker queue depth, reconcile delta
 
+### CrowdSec usage metrics
+
+The bouncer pushes decision telemetry to the CrowdSec LAPI `/v1/usage-metrics`
+endpoint on a configurable interval (default 30 minutes, `LAPI_METRICS_PUSH_INTERVAL`).
+
+Each push reports a delta window — counters reset after every push:
+
+- **blocked** — new ban decisions applied per `origin` × `remediation_type` since the last push
+- **processed** — total decisions handled (bans applied + deletions) since the last push
+
+This is distinct from the Prometheus metrics, which are cumulative for operator
+dashboards. The LAPI usage-metrics push is CrowdSec's telemetry mechanism for
+tracking bouncer activity across the ecosystem.
+
+On graceful shutdown, a final push is performed before the process exits so the
+last window's data is not lost.
+
 ### Health endpoints
 
 Two HTTP endpoints run on `HEALTH_ADDR` (default `:8081`):
@@ -268,6 +285,16 @@ All tests are table-driven and run without external services. The test suite cov
 - **`internal/storage`**: bbolt ban operations, rate gate sliding window, group/policy cache
 - **`internal/pool`**: enqueue, drain, retry backoff
 - **`internal/logger`**: redaction patterns
+- **`internal/lapi_metrics`**: Reporter construction, interval clamping, counter reset
+  behaviour after push, payload structure validation, user-agent and API key headers,
+  concurrent recording under the race detector, shutdown final-push
+- **`internal/capabilities`**: Constant value contracts (`BouncerType`, `Layer`,
+  remediation support flags) and the intentional distinction between `BouncerType`
+  (used in the metrics payload `type` field) and the LAPI user-agent service token
+  (`crowdsec-unifi-bouncer`, used in HTTP headers)
+
+A `nopRecorder` no-op implementation of `MetricsRecorder` is used in handler tests
+to keep them independent of the LAPI metrics reporter.
 
 The race detector (`go test -race ./...`) is run in CI for all packages. Concurrent tests use real bbolt databases in `t.TempDir()`.
 
