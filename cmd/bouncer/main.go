@@ -27,7 +27,7 @@ import (
 type nopRecorder struct{}
 
 func (nopRecorder) RecordBan(_, _ string) {}
-func (nopRecorder) RecordDeletion()        {}
+func (nopRecorder) RecordDeletion()       {}
 
 // Version is set by the build system via -ldflags.
 var Version = "dev"

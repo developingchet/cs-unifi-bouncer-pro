@@ -19,6 +19,7 @@ Automatically translates CrowdSec ban decisions into UniFi firewall rules — bl
 - **ACID persistence** — bbolt-backed ban tracking with TTL-aware auto-expiry; bans survive container restarts and are never double-applied
 - **Template-based naming** — Go templates for all managed object names; prevents conflicts in multi-instance deployments
 - **Prometheus metrics** — 15 `crowdsec_unifi_*` metrics covering decisions, jobs, API calls, active bans, and more
+- **CrowdSec usage-metrics** — Pushes decision telemetry to LAPI `/v1/usage-metrics` on a configurable interval (default 30 min); spec-compliant with CrowdSec remediation component requirements
 - **RedactWriter** — Automatically masks passwords, API keys, and Bearer tokens from all log output
 - **Dry-run mode** — Process decisions and log intended actions without modifying the UniFi controller
 - **Startup reconcile** — Syncs UniFi firewall state with bbolt on every start to correct drift
@@ -90,6 +91,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `CROWDSEC_LAPI_VERIFY_TLS` | `true` | Verify the LAPI TLS certificate |
 | `CROWDSEC_POLL_INTERVAL` | `30s` | How often to poll LAPI when SSE is unavailable |
 | `CROWDSEC_ORIGINS` | — | Comma-separated allowed origins; empty = all |
+| `LAPI_METRICS_PUSH_INTERVAL` | `30m` | Interval for pushing metrics to LAPI `/v1/usage-metrics`; `0` disables; minimum enforced value is `10m` |
 
 ### Decision filtering
 
@@ -272,6 +274,18 @@ Available at `:9090/metrics` (configurable via `METRICS_ADDR`):
 | `crowdsec_unifi_db_size_bytes` | Gauge | bbolt database file size |
 | `crowdsec_unifi_worker_queue_depth` | Gauge | Current number of pending jobs |
 
+### CrowdSec usage metrics
+
+The bouncer pushes decision telemetry to the CrowdSec LAPI on a configurable
+interval (default 30 minutes, configurable via `LAPI_METRICS_PUSH_INTERVAL`).
+
+Each push reports:
+- **blocked** — new ban decisions applied since the last push, labelled by `origin` and `remediation_type`
+- **processed** — total decisions handled (bans applied + deletions) since the last push
+
+Counters reset after each push (delta windows, not cumulative totals).
+Set `LAPI_METRICS_PUSH_INTERVAL=0` to disable.
+
 ### Health endpoints
 
 Available at `:8081` (configurable via `HEALTH_ADDR`):
@@ -327,6 +341,7 @@ For the vulnerability disclosure policy, see [SECURITY.md](SECURITY.md).
 | Error handling | `log.Fatal` | Typed errors + exponential backoff retry |
 | Session recovery | None | Mutex-guarded re-auth (thundering-herd guard) |
 | IPv6 | Limited | Full dual-stack with separate shard managers |
+| CrowdSec usage-metrics | No | Yes (LAPI `/v1/usage-metrics`, 30m default) |
 | Seccomp profile | None | 78-syscall allowlist |
 | Image signing | None | Cosign keyless OIDC + CycloneDX SBOM |
 

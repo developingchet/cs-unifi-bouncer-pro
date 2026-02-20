@@ -18,7 +18,7 @@ import (
 type nopRecorder struct{}
 
 func (nopRecorder) RecordBan(_, _ string) {}
-func (nopRecorder) RecordDeletion()        {}
+func (nopRecorder) RecordDeletion()       {}
 
 // mockFirewallManager satisfies firewall.Manager for handler tests.
 type mockFirewallManager struct {

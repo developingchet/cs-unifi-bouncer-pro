@@ -59,15 +59,15 @@ type Config struct {
 	ZonePolicyReorder    bool     `koanf:"zone_policy_reorder"`
 
 	// CrowdSec Decision Filtering
-	CrowdSecLAPIURL            string        `koanf:"crowdsec_lapi_url"`
-	CrowdSecLAPIKey            string        `koanf:"crowdsec_lapi_key"`
-	CrowdSecLAPIVerifyTLS      bool          `koanf:"crowdsec_lapi_verify_tls"`
-	CrowdSecOrigins            []string      `koanf:"crowdsec_origins"`
-	CrowdSecPollInterval       time.Duration `koanf:"crowdsec_poll_interval"`
-	LAPIMetricsPushInterval    time.Duration `koanf:"lapi_metrics_push_interval"`
-	BlockScenarioExclude       []string      `koanf:"block_scenario_exclude"`
-	BlockWhitelist             []string      `koanf:"block_whitelist"`
-	BlockMinDuration           time.Duration `koanf:"block_min_duration"`
+	CrowdSecLAPIURL         string        `koanf:"crowdsec_lapi_url"`
+	CrowdSecLAPIKey         string        `koanf:"crowdsec_lapi_key"`
+	CrowdSecLAPIVerifyTLS   bool          `koanf:"crowdsec_lapi_verify_tls"`
+	CrowdSecOrigins         []string      `koanf:"crowdsec_origins"`
+	CrowdSecPollInterval    time.Duration `koanf:"crowdsec_poll_interval"`
+	LAPIMetricsPushInterval time.Duration `koanf:"lapi_metrics_push_interval"`
+	BlockScenarioExclude    []string      `koanf:"block_scenario_exclude"`
+	BlockWhitelist          []string      `koanf:"block_whitelist"`
+	BlockMinDuration        time.Duration `koanf:"block_min_duration"`
 
 	// Worker Pool
 	PoolWorkers    int           `koanf:"pool_workers"`
@@ -147,10 +147,10 @@ func defaults() map[string]interface{} {
 		"zone_pairs":                  "External->Internal",
 		"zone_connection_states":      "new,invalid",
 		"zone_policy_reorder":         true,
-		"crowdsec_lapi_url":            "http://crowdsec:8080",
-		"crowdsec_lapi_verify_tls":     true,
-		"crowdsec_poll_interval":       "30s",
-		"lapi_metrics_push_interval":   "30m",
+		"crowdsec_lapi_url":           "http://crowdsec:8080",
+		"crowdsec_lapi_verify_tls":    true,
+		"crowdsec_poll_interval":      "30s",
+		"lapi_metrics_push_interval":  "30m",
 		"pool_workers":                4,
 		"pool_queue_depth":            4096,
 		"pool_max_retries":            3,

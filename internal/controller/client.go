@@ -15,15 +15,15 @@ import (
 
 // ClientConfig holds parameters for constructing a UniFi HTTP client.
 type ClientConfig struct {
-	BaseURL       string
-	Username      string
-	Password      string
-	APIKey        string
-	VerifyTLS     bool
-	CACertPath    string
-	Timeout       time.Duration
-	Debug         bool
-	ReauthMinGap  time.Duration // thundering-herd guard: skip re-auth if last one was < this ago
+	BaseURL      string
+	Username     string
+	Password     string
+	APIKey       string
+	VerifyTLS    bool
+	CACertPath   string
+	Timeout      time.Duration
+	Debug        bool
+	ReauthMinGap time.Duration // thundering-herd guard: skip re-auth if last one was < this ago
 }
 
 // unifiClient implements Controller using direct HTTPS calls to the UniFi Network API.

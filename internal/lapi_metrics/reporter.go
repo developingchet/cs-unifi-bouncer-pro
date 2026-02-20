@@ -27,6 +27,7 @@ type Reporter struct {
 	interval    time.Duration
 	startupTime time.Time
 	log         zerolog.Logger
+	httpClient  *http.Client
 
 	mu        sync.Mutex
 	blocked   map[originKey]int64
@@ -54,6 +55,7 @@ func NewReporter(lapiURL, apiKey, version string, interval time.Duration, log ze
 		interval:    interval,
 		startupTime: time.Now(),
 		log:         log,
+		httpClient:  &http.Client{Timeout: 5 * time.Second},
 		blocked:     make(map[originKey]int64),
 	}
 }
@@ -94,7 +96,7 @@ func (r *Reporter) Run(ctx context.Context) {
 			case <-ticker.C:
 			default:
 			}
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := r.push(shutdownCtx); err != nil {
 				r.log.Warn().Err(err).Msg("lapi usage-metrics final push failed")
@@ -152,17 +154,17 @@ func (r *Reporter) push(ctx context.Context) error {
 		Version string `json:"version"`
 	}
 	type windowMeta struct {
-		WindowSizeSeconds   float64 `json:"window_size_seconds"`
-		UtcStartupTimestamp int64   `json:"utc_startup_timestamp"`
-		UtcNowTimestamp     int64   `json:"utc_now_timestamp"`
+		WindowSizeSeconds   int64 `json:"window_size_seconds"`
+		UtcStartupTimestamp int64 `json:"utc_startup_timestamp"`
+		UtcNowTimestamp     int64 `json:"utc_now_timestamp"`
 	}
 	type component struct {
-		Type     string            `json:"type"`
-		Version  string            `json:"version"`
-		Os       osMeta            `json:"os"`
-		Features []string          `json:"features"`
-		Meta     windowMeta        `json:"meta"`
-		Metrics  []metricEntry     `json:"metrics"`
+		Type     string        `json:"type"`
+		Version  string        `json:"version"`
+		Os       osMeta        `json:"os"`
+		Features []string      `json:"features"`
+		Meta     windowMeta    `json:"meta"`
+		Metrics  []metricEntry `json:"metrics"`
 	}
 	type payload struct {
 		RemediationComponents []component `json:"remediation_components"`
@@ -171,12 +173,12 @@ func (r *Reporter) push(ctx context.Context) error {
 	body, err := json.Marshal(payload{
 		RemediationComponents: []component{
 			{
-				Type:    capabilities.BouncerType,
-				Version: r.version,
-				Os:      osMeta{Name: osName, Version: osVersion},
+				Type:     capabilities.BouncerType,
+				Version:  r.version,
+				Os:       osMeta{Name: osName, Version: osVersion},
 				Features: []string{},
 				Meta: windowMeta{
-					WindowSizeSeconds:   r.interval.Seconds(),
+					WindowSizeSeconds:   int64(r.interval.Seconds()),
 					UtcStartupTimestamp: r.startupTime.Unix(),
 					UtcNowTimestamp:     now.Unix(),
 				},
@@ -195,10 +197,9 @@ func (r *Reporter) push(ctx context.Context) error {
 	}
 	req.Header.Set("X-Api-Key", r.apiKey)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "crowdsec-unifi-bouncer/"+r.version)
+	req.Header.Set("User-Agent", "crowdsec-unifi-bouncer/v"+r.version)
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := r.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("POST usage-metrics: %w", err)
 	}

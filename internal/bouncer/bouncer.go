@@ -71,7 +71,7 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 		APIUrl:              cfg.CrowdSecLAPIURL,
 		TickerInterval:      tickerStr,
 		InsecureSkipVerify:  &skipVerify,
-		UserAgent:           "cs-unifi-bouncer-pro/" + BinaryVersion,
+		UserAgent:           "crowdsec-unifi-bouncer/v" + BinaryVersion,
 		RetryInitialConnect: true,
 	}
 
