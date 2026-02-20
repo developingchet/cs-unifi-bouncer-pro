@@ -9,6 +9,7 @@
     {
       "names": [
         "accept4",
+        "arch_prctl",
         "bind",
         "brk",
         "clock_gettime",
@@ -52,6 +53,7 @@
         "newfstatat",
         "openat",
         "pipe2",
+        "prctl",
         "prlimit64",
         "pread64",
         "pwrite64",
