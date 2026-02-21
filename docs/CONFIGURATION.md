@@ -44,6 +44,7 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 | `UNIFI_CA_CERT` | — | No | Path to a PEM CA certificate for self-signed controller certs. |
 | `UNIFI_HTTP_TIMEOUT` | `15s` | No | HTTP request timeout for UniFi API calls. |
 | `UNIFI_API_DEBUG` | `false` | No | Log raw HTTP request/response bodies (verbose; do not use in production). |
+| `ENABLE_IPV6` | `false` | No | Enable IPv6 dialing for the HTTP client. Set to `true` only if your controller is reachable over IPv6 with a working network path. |
 
 ### Authentication priority
 

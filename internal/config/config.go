@@ -31,6 +31,7 @@ type Config struct {
 	FirewallMode              string        `koanf:"firewall_mode"`
 	FirewallBlockAction       string        `koanf:"firewall_block_action"`
 	FirewallEnableIPv6        bool          `koanf:"firewall_enable_ipv6"`
+	EnableIPv6                bool          `koanf:"enable_ipv6"` // HTTP client IPv6 dialing
 	FirewallGroupCapacity     int           `koanf:"firewall_group_capacity"`
 	FirewallGroupCapacityV4   int           `koanf:"firewall_group_capacity_v4"`
 	FirewallGroupCapacityV6   int           `koanf:"firewall_group_capacity_v6"`
@@ -176,6 +177,7 @@ func defaults() map[string]interface{} {
 		"firewall_mode":               "auto",
 		"firewall_block_action":       "drop",
 		"firewall_enable_ipv6":        true,
+		"enable_ipv6":                 false,
 		"firewall_group_capacity":     10000,
 		"firewall_batch_window":       "500ms",
 		"firewall_api_shard_delay":    "250ms",

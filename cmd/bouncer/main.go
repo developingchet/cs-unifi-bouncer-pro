@@ -98,6 +98,7 @@ func runDaemon() error {
 		Timeout:      cfg.UnifiHTTPTimeout,
 		Debug:        cfg.UnifiAPIDebug,
 		ReauthMinGap: cfg.SessionReauthMinGap,
+		EnableIPv6:   cfg.EnableIPv6,
 	}, log)
 	if err != nil {
 		return fmt.Errorf("init UniFi client: %w", err)
@@ -300,6 +301,7 @@ func reconcileCmd() *cobra.Command {
 				Timeout:      cfg.UnifiHTTPTimeout,
 				Debug:        cfg.UnifiAPIDebug,
 				ReauthMinGap: cfg.SessionReauthMinGap,
+				EnableIPv6:   cfg.EnableIPv6,
 			}, log)
 			if err != nil {
 				return err

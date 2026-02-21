@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"time"
 
@@ -25,6 +26,7 @@ type ClientConfig struct {
 	Timeout      time.Duration
 	Debug        bool
 	ReauthMinGap time.Duration // thundering-herd guard: skip re-auth if last one was < this ago
+	EnableIPv6   bool          // dial IPv6 — false by default, set true only with working IPv6 path
 }
 
 // unifiClient implements Controller using direct HTTPS calls to the UniFi Network API.
@@ -53,16 +55,23 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 		tlsCfg.RootCAs = pool
 	}
 
-	// Build transport based on DefaultTransport to inherit all production-safe
-	// defaults (DialContext with keepalive, TLSHandshakeTimeout, IdleConnTimeout,
-	// etc.) while applying custom TLS configuration.
-	dialer := &net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
+	// dialNetwork is "tcp4" by default to avoid happy eyeballs stalls where IPv6
+	// attempts to the UniFi controller blackhole silently for 15 seconds.
+	// Set EnableIPv6 = true (ENABLE_IPV6=true) only if your controller is
+	// reachable over IPv6 with a working path.
+	dialNetwork := "tcp4"
+	if cfg.EnableIPv6 {
+		dialNetwork = "tcp"
 	}
+
 	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           dialer.DialContext,
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
+			return (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext(ctx, dialNetwork, addr)
+		},
 		TLSClientConfig:       tlsCfg,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ForceAttemptHTTP2:     false, // UniFi controllers do not support HTTP/2
@@ -105,7 +114,6 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 	c.session.SetAuthHeader(req)
 
 	// UniFi Network API requires these headers on every request.
-	// Without Accept: application/json the reverse proxy may return HTML or stall.
 	if req.Header.Get("Accept") == "" {
 		req.Header.Set("Accept", "application/json")
 	}
@@ -116,6 +124,36 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 
 	if c.cfg.Debug {
 		c.log.Debug().Str("method", req.Method).Str("url", req.URL.String()).Msg("unifi api request")
+
+		// Attach httptrace to ctx — must be done before req.WithContext so the
+		// trace is not overwritten. All callbacks fire on the goroutine that calls Do.
+		trace := &httptrace.ClientTrace{
+			GetConn: func(hostPort string) {
+				c.log.Debug().Str("hostport", hostPort).Msg("httptrace: GetConn")
+			},
+			GotConn: func(i httptrace.GotConnInfo) {
+				c.log.Debug().Bool("reused", i.Reused).Bool("was_idle", i.WasIdle).Msg("httptrace: GotConn")
+			},
+			ConnectStart: func(network, addr string) {
+				c.log.Debug().Str("network", network).Str("addr", addr).Msg("httptrace: ConnectStart")
+			},
+			ConnectDone: func(network, addr string, err error) {
+				c.log.Debug().Str("addr", addr).Err(err).Msg("httptrace: ConnectDone")
+			},
+			TLSHandshakeStart: func() {
+				c.log.Debug().Msg("httptrace: TLSHandshakeStart")
+			},
+			TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+				c.log.Debug().Err(err).Msg("httptrace: TLSHandshakeDone")
+			},
+			WroteRequest: func(info httptrace.WroteRequestInfo) {
+				c.log.Debug().Err(info.Err).Msg("httptrace: WroteRequest")
+			},
+			GotFirstResponseByte: func() {
+				c.log.Debug().Msg("httptrace: GotFirstResponseByte")
+			},
+		}
+		ctx = httptrace.WithClientTrace(ctx, trace)
 	}
 
 	resp, err := c.http.Do(req.WithContext(ctx))
