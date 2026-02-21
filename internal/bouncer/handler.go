@@ -92,6 +92,14 @@ func makeJobHandler(
 		}
 
 		// Step 4: Persist to bbolt and record LAPI metrics
+		// In dry run, ApplyBan/ApplyUnban already returned without writing to UniFi.
+		// Skip bbolt state mutations and recorder calls to keep state consistent.
+		if cfg.DryRun {
+			log.Info().Str("action", job.Action).Str("ip", job.IP).Bool("ipv6", job.IPv6).
+				Strs("sites", cfg.UnifiSites).Msg("[DRY-RUN] would persist job to bbolt")
+			return nil
+		}
+
 		switch job.Action {
 		case "ban":
 			if err := store.BanRecord(job.IP, job.ExpiresAt, job.IPv6); err != nil {

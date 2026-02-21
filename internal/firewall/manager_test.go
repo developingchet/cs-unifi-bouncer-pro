@@ -352,3 +352,134 @@ func TestApplyBan_OverflowProvisionRule(t *testing.T) {
 type errTest string
 
 func (e errTest) Error() string { return string(e) }
+
+// TestDryRunNoWrites verifies that when DryRun=true, no write operations
+// are sent to the controller. Uses a PanicController that panics on any
+// write method call to ensure the gates are working.
+func TestDryRunNoWrites(t *testing.T) {
+	cfg := defaultManagerConfig()
+	cfg.DryRun = true
+	cfg.FirewallMode = "legacy"
+
+	ctrl := NewPanicController()
+	store := testutil.NewMockStore()
+	namer := managerTestNamer(t)
+	mgr := NewManager(cfg, ctrl, store, namer, zerolog.Nop())
+
+	ctx := context.Background()
+
+	// EnsureInfrastructure should NOT panic (dry run gates all writes)
+	if err := mgr.EnsureInfrastructure(ctx, []string{testSite}); err != nil {
+		t.Fatalf("EnsureInfrastructure: %v", err)
+	}
+
+	// Populate bbolt with a fake ban entry so reconcile has something to do
+	if err := store.BanRecord("203.0.113.42", time.Now().Add(1*time.Hour), false); err != nil {
+		t.Fatalf("BanRecord: %v", err)
+	}
+
+	// Reconcile should NOT panic (dry run gates all writes)
+	result, err := mgr.Reconcile(ctx, []string{testSite})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Reconcile returned nil result")
+	}
+
+	// ApplyBan should NOT panic (dry run gates writes)
+	if err := mgr.ApplyBan(ctx, testSite, "198.51.100.1", false); err != nil {
+		t.Fatalf("ApplyBan: %v", err)
+	}
+
+	// ApplyUnban should NOT panic (dry run gates writes)
+	if err := mgr.ApplyUnban(ctx, testSite, "203.0.113.42", false); err != nil {
+		t.Fatalf("ApplyUnban: %v", err)
+	}
+
+	// Verify that bbolt was never written to in dry run
+	bans, err := store.BanList()
+	if err != nil {
+		t.Fatalf("BanList: %v", err)
+	}
+	// Should still only have the one entry we manually added (ApplyBan/ApplyUnban didn't write)
+	if len(bans) != 1 {
+		t.Errorf("BanList had %d entries, want 1 (only the pre-existing one)", len(bans))
+	}
+}
+
+// PanicController implements controller.Controller and panics
+// on any write method to verify that DryRun gates are preventing writes.
+type PanicController struct{}
+
+func NewPanicController() *PanicController {
+	return &PanicController{}
+}
+
+func (pc *PanicController) ListFirewallGroups(ctx context.Context, site string) ([]controller.FirewallGroup, error) {
+	return []controller.FirewallGroup{}, nil
+}
+
+func (pc *PanicController) CreateFirewallGroup(ctx context.Context, site string, g controller.FirewallGroup) (controller.FirewallGroup, error) {
+	panic("DryRun gate failed: CreateFirewallGroup called")
+}
+
+func (pc *PanicController) UpdateFirewallGroup(ctx context.Context, site string, g controller.FirewallGroup) error {
+	panic("DryRun gate failed: UpdateFirewallGroup called")
+}
+
+func (pc *PanicController) DeleteFirewallGroup(ctx context.Context, site string, id string) error {
+	panic("DryRun gate failed: DeleteFirewallGroup called")
+}
+
+func (pc *PanicController) ListFirewallRules(ctx context.Context, site string) ([]controller.FirewallRule, error) {
+	return []controller.FirewallRule{}, nil
+}
+
+func (pc *PanicController) CreateFirewallRule(ctx context.Context, site string, r controller.FirewallRule) (controller.FirewallRule, error) {
+	panic("DryRun gate failed: CreateFirewallRule called")
+}
+
+func (pc *PanicController) UpdateFirewallRule(ctx context.Context, site string, r controller.FirewallRule) error {
+	panic("DryRun gate failed: UpdateFirewallRule called")
+}
+
+func (pc *PanicController) DeleteFirewallRule(ctx context.Context, site string, id string) error {
+	panic("DryRun gate failed: DeleteFirewallRule called")
+}
+
+func (pc *PanicController) ListZonePolicies(ctx context.Context, site string) ([]controller.ZonePolicy, error) {
+	return []controller.ZonePolicy{}, nil
+}
+
+func (pc *PanicController) CreateZonePolicy(ctx context.Context, site string, p controller.ZonePolicy) (controller.ZonePolicy, error) {
+	panic("DryRun gate failed: CreateZonePolicy called")
+}
+
+func (pc *PanicController) UpdateZonePolicy(ctx context.Context, site string, p controller.ZonePolicy) error {
+	panic("DryRun gate failed: UpdateZonePolicy called")
+}
+
+func (pc *PanicController) DeleteZonePolicy(ctx context.Context, site string, id string) error {
+	panic("DryRun gate failed: DeleteZonePolicy called")
+}
+
+func (pc *PanicController) ReorderZonePolicies(ctx context.Context, site string, orderedIDs []string) error {
+	panic("DryRun gate failed: ReorderZonePolicies called")
+}
+
+func (pc *PanicController) ListZones(ctx context.Context, site string) ([]controller.Zone, error) {
+	return []controller.Zone{}, nil
+}
+
+func (pc *PanicController) HasFeature(ctx context.Context, site string, feature string) (bool, error) {
+	return false, nil
+}
+
+func (pc *PanicController) Ping(ctx context.Context) error {
+	return nil
+}
+
+func (pc *PanicController) Close() error {
+	return nil
+}

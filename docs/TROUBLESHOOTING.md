@@ -388,6 +388,38 @@ Expected: `200` (stream starts) or `401` (wrong key).
 
 When something is not working and the cause is unclear, follow these steps in order:
 
+### Test against a real controller without making changes
+
+`DRY_RUN=true` is the safe way to validate configuration and observe decision
+processing against a live UniFi endpoint. The bouncer will:
+
+- Connect and authenticate to both UniFi and CrowdSec LAPI
+- Read existing firewall state (groups, rules/policies)
+- Log every action it *would* perform, prefixed with `[DRY-RUN]`
+- Make **zero write requests** to UniFi and **no changes to bbolt**
+
+```bash
+# Add DRY_RUN to your .env
+echo "DRY_RUN=true" >> .env
+docker compose up -d --force-recreate cs-unifi-bouncer-pro
+
+# Inject a test decision and watch the logs
+docker exec crowdsec cscli decisions add -i 203.0.113.42 -t ban -d 1h -r "dry run test"
+docker logs -f cs-unifi-bouncer-pro | grep -E "DRY-RUN|203.0.113.42"
+```
+
+Expected log lines (exact field order may vary):
+```json
+{"level":"info","site":"default","mode":"legacy","msg":"[DRY-RUN] would ensure legacy firewall rules for all shards"}
+{"level":"info","site":"default","ip":"203.0.113.42","ipv6":false,"msg":"[DRY-RUN] would apply ban"}
+{"level":"info","action":"ban","ip":"203.0.113.42","msg":"[DRY-RUN] would persist job to bbolt"}
+```
+
+Nothing will appear in the UniFi firewall console, and bbolt will contain zero
+entries. When you are satisfied, remove `DRY_RUN=true` from `.env` and restart
+normally — the daemon will start with a clean state and apply all active CrowdSec
+decisions from scratch.
+
 **1. Check container health:**
 
 ```bash

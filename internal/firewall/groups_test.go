@@ -43,7 +43,7 @@ func newBboltStore(t *testing.T) storage.Store {
 // newV4ShardManager creates a new v4 ShardManager with a small capacity.
 func newV4ShardManager(t *testing.T, capacity int, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
-	return NewShardManager(testSite, false, capacity, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil)
+	return NewShardManager(testSite, false, capacity, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false)
 }
 
 // TestEnsureShards_FirstRun verifies that an empty store causes the first shard

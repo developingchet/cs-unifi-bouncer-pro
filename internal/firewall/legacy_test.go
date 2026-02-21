@@ -23,7 +23,7 @@ func newTestLegacyManager(ctrl controller.Controller, store storage.Store, namer
 
 func ensuredV4Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
-	sm := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil)
+	sm := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false)
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
@@ -32,7 +32,7 @@ func ensuredV4Shard(t *testing.T, ctrl controller.Controller, store storage.Stor
 
 func ensuredV6Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
-	sm := NewShardManager(testSite, true, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil)
+	sm := NewShardManager(testSite, true, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false)
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}

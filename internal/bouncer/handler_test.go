@@ -226,3 +226,64 @@ func TestJobHandler_DryRun(t *testing.T) {
 		t.Errorf("DryRun mode should not return error, got %v", err)
 	}
 }
+
+// TestJobHandler_DryRunNoBboltWrites verifies that in DRY_RUN mode, the handler
+// does not write bans to bbolt (store.BanRecord/BanDelete are skipped).
+func TestJobHandler_DryRunNoBboltWrites(t *testing.T) {
+	store := testutil.NewMockStore()
+	ctrl := testutil.NewMockController()
+	cfg := &config.Config{
+		UnifiSites:        []string{"default"},
+		RateLimitMaxCalls: 0,
+		RateLimitWindow:   time.Minute,
+		BanTTL:            24 * time.Hour,
+		DryRun:            true,
+	}
+	fwMgr := &mockFirewallManager{}
+
+	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
+
+	// Execute a ban job in dry run
+	job := pool.SyncJob{
+		Action:    "ban",
+		IP:        "203.0.113.100",
+		IPv6:      false,
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+	}
+	if err := handler(context.Background(), job); err != nil {
+		t.Fatalf("handler in dry run: %v", err)
+	}
+
+	// Verify the IP is NOT in bbolt (DRY_RUN skips BanRecord)
+	exists, err := store.BanExists("203.0.113.100")
+	if err != nil {
+		t.Fatalf("BanExists: %v", err)
+	}
+	if exists {
+		t.Error("DRY_RUN should not write to bbolt; ban should not exist")
+	}
+
+	// Also test a delete job (unban)
+	// First, manually put something in bbolt to simulate a pre-existing ban
+	if err := store.BanRecord("198.51.100.1", time.Now().Add(time.Hour), false); err != nil {
+		t.Fatalf("BanRecord setup: %v", err)
+	}
+
+	deleteJob := pool.SyncJob{
+		Action: "delete",
+		IP:     "198.51.100.1",
+		IPv6:   false,
+	}
+	if err := handler(context.Background(), deleteJob); err != nil {
+		t.Fatalf("delete handler in dry run: %v", err)
+	}
+
+	// Verify the IP is still in bbolt (DRY_RUN skips BanDelete)
+	exists, err = store.BanExists("198.51.100.1")
+	if err != nil {
+		t.Fatalf("BanExists after delete attempt: %v", err)
+	}
+	if !exists {
+		t.Error("DRY_RUN should not delete from bbolt; ban should still exist")
+	}
+}

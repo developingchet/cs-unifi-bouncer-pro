@@ -108,7 +108,7 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		v6Cap := m.cfg.GroupCapacityV6
 
 		v4 := NewShardManager(site, false, v4Cap, m.namer, m.ctrl, m.store, m.log,
-			m.cfg.APIShardDelay, m.flushSem)
+			m.cfg.APIShardDelay, m.flushSem, m.cfg.DryRun)
 		if err := v4.EnsureShards(ctx); err != nil {
 			return fmt.Errorf("ensure v4 shards for site %s: %w", site, err)
 		}
@@ -119,7 +119,7 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 
 		if m.cfg.EnableIPv6 {
 			v6 := NewShardManager(site, true, v6Cap, m.namer, m.ctrl, m.store, m.log,
-				m.cfg.APIShardDelay, m.flushSem)
+				m.cfg.APIShardDelay, m.flushSem, m.cfg.DryRun)
 			if err := v6.EnsureShards(ctx); err != nil {
 				return fmt.Errorf("ensure v6 shards for site %s: %w", site, err)
 			}
@@ -146,12 +146,22 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 
 		switch mode {
 		case "legacy":
-			if err := m.legacyMgr.EnsureRules(ctx, site, v4Mgr, v6Mgr); err != nil {
-				return fmt.Errorf("ensure legacy rules for site %s: %w", site, err)
+			if m.cfg.DryRun {
+				m.log.Info().Str("site", site).Str("mode", "legacy").
+					Msg("[DRY-RUN] would ensure legacy firewall rules for all shards")
+			} else {
+				if err := m.legacyMgr.EnsureRules(ctx, site, v4Mgr, v6Mgr); err != nil {
+					return fmt.Errorf("ensure legacy rules for site %s: %w", site, err)
+				}
 			}
 		case "zone":
-			if err := m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr); err != nil {
-				return fmt.Errorf("ensure zone policies for site %s: %w", site, err)
+			if m.cfg.DryRun {
+				m.log.Info().Str("site", site).Str("mode", "zone").
+					Msg("[DRY-RUN] would ensure zone policies for all shards")
+			} else {
+				if err := m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr); err != nil {
+					return fmt.Errorf("ensure zone policies for site %s: %w", site, err)
+				}
 			}
 		}
 	}
@@ -316,18 +326,22 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 		}
 	}
 
-	// Flush all dirty shards
-	if err := v4Mgr.FlushDirty(ctx); err != nil {
-		errs = append(errs, err)
-	}
-	if v6Mgr != nil {
-		if err := v6Mgr.FlushDirty(ctx); err != nil {
+	if m.cfg.DryRun {
+		if added > 0 || removed > 0 {
+			m.log.Info().Str("site", site).Int("would_add", added).Int("would_remove", removed).
+				Msg("[DRY-RUN] reconcile diff computed; no changes written to UniFi")
+		}
+	} else {
+		if err := v4Mgr.FlushDirty(ctx); err != nil {
 			errs = append(errs, err)
 		}
+		if v6Mgr != nil {
+			if err := v6Mgr.FlushDirty(ctx); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		m.pruneEmptyTailShards(ctx, site, v4Mgr, v6Mgr)
 	}
-
-	// Prune empty tail shards after flush
-	m.pruneEmptyTailShards(ctx, site, v4Mgr, v6Mgr)
 
 	return
 }
@@ -371,6 +385,12 @@ func (m *managerImpl) scheduleBatchFlush(ctx context.Context, site string) {
 
 // ensureNewShardInfrastructure provisions the firewall rule/policy for a newly created shard.
 func (m *managerImpl) ensureNewShardInfrastructure(ctx context.Context, site string, ipv6 bool, shardIdx int, sm *ShardManager) error {
+	if m.cfg.DryRun {
+		m.log.Info().Str("site", site).Bool("ipv6", ipv6).Int("shard", shardIdx).
+			Msg("[DRY-RUN] would provision firewall rule/policy for new shard")
+		return nil
+	}
+
 	// Apply delay before the API call (the group was just created; give the UDM a moment)
 	if m.cfg.APIShardDelay > 0 {
 		select {
@@ -399,6 +419,10 @@ func (m *managerImpl) ensureNewShardInfrastructure(ctx context.Context, site str
 
 // pruneEmptyTailShards deletes empty trailing shards (group + rule/policy) for both families.
 func (m *managerImpl) pruneEmptyTailShards(ctx context.Context, site string, v4, v6 *ShardManager) {
+	if m.cfg.DryRun {
+		return
+	}
+
 	mode := m.cachedMode(site)
 
 	type entry struct {

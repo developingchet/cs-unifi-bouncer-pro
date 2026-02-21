@@ -25,6 +25,7 @@ type ShardManager struct {
 	log        zerolog.Logger
 	flushDelay time.Duration
 	flushSem   chan struct{} // shared semaphore; nil = unlimited
+	dryRun     bool
 
 	// In-memory shadow of each shard's members
 	shards []shard // index == shard number
@@ -47,7 +48,7 @@ type flushSnapshot struct {
 // NewShardManager creates a ShardManager. Call EnsureShards to initialize from the API.
 func NewShardManager(site string, ipv6 bool, capacity int, namer *Namer,
 	ctrl controller.Controller, store storage.Store, log zerolog.Logger,
-	flushDelay time.Duration, flushSem chan struct{}) *ShardManager {
+	flushDelay time.Duration, flushSem chan struct{}, dryRun bool) *ShardManager {
 	return &ShardManager{
 		site:       site,
 		ipv6:       ipv6,
@@ -58,6 +59,7 @@ func NewShardManager(site string, ipv6 bool, capacity int, namer *Namer,
 		log:        log,
 		flushDelay: flushDelay,
 		flushSem:   flushSem,
+		dryRun:     dryRun,
 	}
 }
 
@@ -237,6 +239,16 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 	}
 	sm.mu.Unlock()
 
+	if sm.dryRun {
+		for _, snap := range snapshots {
+			sm.log.Info().
+				Str("shard", snap.name).
+				Int("member_count", len(snap.members)).
+				Msg("[DRY-RUN] would flush firewall group")
+		}
+		return nil
+	}
+
 	// --- Phase 2: flush each snapshot without holding the lock ---
 	var firstErr error
 	for i, snap := range snapshots {
@@ -375,6 +387,16 @@ func (sm *ShardManager) createShard(ctx context.Context, idx int) error {
 	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: idx, Site: sm.site})
 	if err != nil {
 		return err
+	}
+
+	if sm.dryRun {
+		sm.log.Info().Str("name", name).Bool("ipv6", sm.ipv6).Int("shard", idx).
+			Msg("[DRY-RUN] would create firewall group shard")
+		sm.shards = append(sm.shards, shard{
+			unifiID: "dry-run-no-id",
+			members: make(map[string]struct{}),
+		})
+		return nil
 	}
 
 	groupType := "address-group"

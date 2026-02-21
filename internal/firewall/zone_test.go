@@ -38,7 +38,7 @@ func newTestZoneManager(ctrl controller.Controller, store storage.Store, namer *
 func ensuredZoneV4Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
 	namer := zoneTestNamer(t)
-	sm := NewShardManager(testSite, false, 5, namer, ctrl, store, zerolog.Nop(), 0, nil)
+	sm := NewShardManager(testSite, false, 5, namer, ctrl, store, zerolog.Nop(), 0, nil, false)
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards (v4): %v", err)
 	}
@@ -49,7 +49,7 @@ func ensuredZoneV4Shard(t *testing.T, ctrl controller.Controller, store storage.
 func ensuredZoneV6Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
 	namer := zoneTestNamer(t)
-	sm := NewShardManager(testSite, true, 5, namer, ctrl, store, zerolog.Nop(), 0, nil)
+	sm := NewShardManager(testSite, true, 5, namer, ctrl, store, zerolog.Nop(), 0, nil, false)
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards (v6): %v", err)
 	}
