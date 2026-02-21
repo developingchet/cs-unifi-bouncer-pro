@@ -76,7 +76,7 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 		},
 		TLSClientConfig:       tlsCfg,
 		TLSHandshakeTimeout:   10 * time.Second,
-		ForceAttemptHTTP2:     false, // UniFi controllers do not support HTTP/2
+		ForceAttemptHTTP2:     true, // enable HTTP/2 ALPN negotiation; server falls back to HTTP/1.1 if unsupported
 		MaxIdleConns:          10,
 		IdleConnTimeout:       90 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
