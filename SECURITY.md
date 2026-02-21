@@ -85,7 +85,9 @@ The allowlist is grouped into three categories:
 | `epoll_create1` / `epoll_ctl` / `epoll_pwait` / `epoll_wait` | Go netpoller event loop |
 | `read` / `write` / `writev` / `pread64` / `pwrite64` | File and socket reads/writes |
 | `openat` / `fstat` / `fstatfs` / `newfstatat` / `statx` / `stat` | File access (bbolt database, config) |
-| `flock` / `fsync` / `ftruncate` | bbolt ACID write path |
+| `flock` | bbolt acquires `LOCK_EX\|LOCK_NB` advisory lock on `bouncer.db` at open time |
+| `fallocate` | bbolt pre-allocates disk space on database creation and growth |
+| `fsync` / `ftruncate` | bbolt ACID write path |
 | `lseek` / `getdents64` / `readlinkat` | bbolt and `/etc/os-release` detection |
 | `unlinkat` | bbolt compaction (temp file replacement) |
 | `pipe2` | Internal Go runtime wakeup pipes |

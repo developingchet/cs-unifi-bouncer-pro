@@ -28,6 +28,7 @@
         "exit",
         "exit_group",
         "execve",
+        "fallocate",
         "fchmod",
         "fcntl",
         "flock",

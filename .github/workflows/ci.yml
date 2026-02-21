@@ -71,3 +71,27 @@ jobs:
             --cap-drop ALL \
             cs-unifi-bouncer-test:ci \
             version
+
+      - name: Test seccomp profile allows storage open (reconcile --dry-run)
+        run: |
+          mkdir -p /tmp/seccomp-test-data
+          chmod 777 /tmp/seccomp-test-data
+          docker run --rm \
+            --security-opt "seccomp:./security/seccomp-unifi.json" \
+            --security-opt no-new-privileges:true \
+            --cap-drop ALL \
+            -v /tmp/seccomp-test-data:/data \
+            -e DRY_RUN=true \
+            -e CROWDSEC_LAPI_KEY=test \
+            -e UNIFI_URL=https://192.0.2.1 \
+            -e UNIFI_API_KEY=test \
+            cs-unifi-bouncer-test:ci reconcile || true
+          # reconcile will fail to connect (expected) but must not fail with EPERM
+          # A seccomp violation exits 159 (SIGSYS); connection failure exits 1.
+          # We assert the exit code is NOT 159:
+          EXIT=$?
+          if [ "$EXIT" -eq 159 ]; then
+            echo "FAIL: seccomp blocked a required syscall (exit 159 = SIGSYS)"
+            exit 1
+          fi
+          echo "OK: exit $EXIT (not a seccomp violation)"

@@ -5,6 +5,7 @@ FROM golang:1.24-alpine AS builder
 RUN apk add --no-cache git ca-certificates tzdata
 
 WORKDIR /src
+RUN mkdir -p /data-init
 COPY go.mod go.sum ./
 RUN go mod download
 
@@ -20,6 +21,7 @@ RUN GOARM=${TARGETVARIANT#v} CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH}
     -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
     -o /out/cs-unifi-bouncer-pro \
     ./cmd/bouncer
+RUN mkdir -p /out/data-init
 
 # Stage 2: Distroless runtime
 FROM gcr.io/distroless/static-debian12:nonroot
@@ -39,8 +41,7 @@ LABEL org.opencontainers.image.title="cs-unifi-bouncer-pro" \
 
 COPY --from=builder /out/cs-unifi-bouncer-pro /cs-unifi-bouncer-pro
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-
-VOLUME ["/data"]
+COPY --from=builder --chown=65532:65532 /out/data-init /data
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD ["/cs-unifi-bouncer-pro", "healthcheck"]

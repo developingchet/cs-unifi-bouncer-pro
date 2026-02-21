@@ -8,7 +8,9 @@ Common issues and solutions for cs-unifi-bouncer-pro.
   - [Configuration validation error](#configuration-validation-error)
   - [LAPI connection refused at startup](#lapi-connection-refused-at-startup)
   - [UniFi controller unreachable at startup](#unifi-controller-unreachable-at-startup)
-  - [Volume permission denied](#volume-permission-denied)
+  - [Storage fails to open on first start](#storage-fails-to-open-on-first-start)
+    - [`permission denied` — volume ownership wrong](#permission-denied--volume-ownership-wrong)
+    - [`operation not permitted` — seccomp blocked `flock`](#operation-not-permitted--seccomp-blocked-flock)
   - [Seccomp profile blocks container startup](#seccomp-profile-blocks-container-startup)
 - [No Bans Being Applied](#no-bans-being-applied)
   - [No decisions in CrowdSec](#no-decisions-in-crowdsec)
@@ -100,30 +102,54 @@ All three must be set and non-empty. `UNIFI_URL` and `CROWDSEC_LAPI_URL` must in
 
 ---
 
-### Volume permission denied
+### Storage fails to open on first start
+
+Two distinct errors can appear when the container starts for the first time.
+Both are fixed automatically in images built after the fix was released.
+
+#### `permission denied` — volume ownership wrong
 
 **Symptom:**
 
 ```json
-{"level":"error","error":"open /data/bouncer.db: permission denied","msg":"fatal"}
+{"level":"error","error":"open storage: open bbolt at /data/bouncer.db: open /data/bouncer.db: permission denied","msg":"fatal"}
 ```
 
-**Cause:** The named volume was created with root ownership before the image embedded `/data` with UID 65532 ownership.
+The named volume was initialised with root ownership. The container runs as UID 65532 and cannot write to it.
 
-**Fix (one-time, only for volumes created before this was corrected):**
+**Fix** — find the exact volume name and chown it:
 
 ```bash
-# Find the volume name (compose project prefix + "bouncer-data")
-docker volume ls | grep bouncer-data
-
-# Repair ownership — replace <volume-name> with the actual name
-docker run --rm -v <volume-name>:/data alpine chown 65532:65532 /data
-
-# Restart
-docker compose up -d
+docker volume ls | grep bouncer
+# use the full name from above (includes the compose project prefix):
+docker run --rm -v <full-volume-name>:/data busybox chown -R 65532:65532 /data
+docker compose up -d --force-recreate cs-unifi-bouncer-pro
 ```
 
-Fresh installs do not require this fix.
+#### `operation not permitted` — seccomp blocked `flock`
+
+**Symptom:**
+
+```json
+{"level":"error","error":"open storage: operation not permitted","msg":"fatal"}
+```
+
+This error appears *after* the ownership fix. bbolt calls `flock()` to lock the
+database file; an older seccomp profile did not permit this syscall.
+
+**Fix** — pull the latest image which includes the corrected seccomp profile:
+
+```bash
+docker compose pull cs-unifi-bouncer-pro
+docker compose up -d --force-recreate cs-unifi-bouncer-pro
+```
+
+If you are pinned to an older image, update your local `security/seccomp-unifi.json`
+to add `"flock"` and `"fallocate"` to the `SCMP_ACT_ALLOW` names array, then:
+
+```bash
+docker compose up -d --force-recreate cs-unifi-bouncer-pro
+```
 
 ---
 
