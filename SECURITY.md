@@ -83,11 +83,11 @@ The allowlist is grouped into three categories:
 | `sendto` / `sendmsg` / `recvfrom` / `recvmsg` | Socket I/O |
 | `setsockopt` / `getsockopt` / `getsockname` | Socket configuration |
 | `epoll_create1` / `epoll_ctl` / `epoll_pwait` / `epoll_wait` | Go netpoller event loop |
-| `read` / `write` / `writev` / `pread64` / `pwrite64` | File and socket reads/writes |
+| `read` / `readv` / `write` / `writev` / `pread64` / `pwrite64` | File and socket reads/writes (vectored and positional variants) |
 | `openat` / `fstat` / `fstatfs` / `newfstatat` / `statx` / `stat` | File access (bbolt database, config) |
 | `flock` | bbolt acquires `LOCK_EX\|LOCK_NB` advisory lock on `bouncer.db` at open time |
 | `fallocate` | bbolt pre-allocates disk space on database creation and growth |
-| `fsync` / `ftruncate` | bbolt ACID write path |
+| `fsync` / `fdatasync` / `ftruncate` | bbolt ACID write path; `fdatasync` flushes data faster than full `fsync` |
 | `lseek` / `getdents64` / `readlinkat` | bbolt and `/etc/os-release` detection |
 | `unlinkat` | bbolt compaction (temp file replacement) |
 | `pipe2` | Internal Go runtime wakeup pipes |
@@ -96,12 +96,14 @@ The allowlist is grouped into three categories:
 
 | Syscall | Reason |
 |---|---|
-| `mmap` / `mprotect` / `munmap` / `madvise` | Go heap allocator |
+| `mmap` / `mprotect` / `munmap` | Go heap allocator and bbolt mmap mode (database file memory mapping) |
+| `madvise` | bbolt calls `madvise(MADV_RANDOM)` after mmap at database open to disable read-ahead |
+| `msync` | bbolt flushes dirty mmap pages to disk on every commit using `msync(MS_SYNC)` for ACID guarantees |
 | `brk` | Initial heap growth |
 | `futex` | Goroutine mutex and channel synchronization |
 | `sched_getaffinity` / `sched_yield` | GOMAXPROCS detection and cooperative scheduling |
 | `nanosleep` / `clock_gettime` / `gettimeofday` | Timers (decision TTL, rate limiter, batch window) |
-| `getrandom` | TLS nonce generation |
+| `getrandom` | Go `crypto/rand` entropy source; required for TLS client handshakes in both UniFi HTTPS and CrowdSec LAPI connections |
 | `tgkill` | Go runtime sends signals to specific threads for preemption |
 | `exit` / `exit_group` / `restart_syscall` | Process and goroutine teardown |
 | `wait4` | Used by Go test runner; inert in production |

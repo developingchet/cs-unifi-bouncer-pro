@@ -126,7 +126,7 @@ docker run --rm -v <full-volume-name>:/data busybox chown -R 65532:65532 /data
 docker compose up -d --force-recreate cs-unifi-bouncer-pro
 ```
 
-#### `operation not permitted` — seccomp blocked `flock`
+#### `operation not permitted` — seccomp blocked a storage syscall
 
 **Symptom:**
 
@@ -134,8 +134,10 @@ docker compose up -d --force-recreate cs-unifi-bouncer-pro
 {"level":"error","error":"open storage: operation not permitted","msg":"fatal"}
 ```
 
-This error appears *after* the ownership fix. bbolt calls `flock()` to lock the
-database file; an older seccomp profile did not permit this syscall.
+bbolt's storage layer (mmap-based database) requires several syscalls beyond basic
+file I/O: `flock` (advisory locking), `fallocate` (pre-allocation), `madvise` (mmap hint),
+`msync` (commit flush), and `getrandom` (TLS entropy for HTTPS connections).
+Older versions of the seccomp profile were missing some of these.
 
 **Fix** — pull the latest image which includes the corrected seccomp profile:
 
@@ -144,8 +146,21 @@ docker compose pull cs-unifi-bouncer-pro
 docker compose up -d --force-recreate cs-unifi-bouncer-pro
 ```
 
-If you are pinned to an older image, update your local `security/seccomp-unifi.json`
-to add `"flock"` and `"fallocate"` to the `SCMP_ACT_ALLOW` names array, then:
+If you are using a custom or pinned seccomp profile, ensure these syscalls are
+present in the `SCMP_ACT_ALLOW` names array within `security/seccomp-unifi.json`:
+
+```json
+"fallocate",
+"fdatasync",
+"flock",
+"getrandom",
+"madvise",
+"msync",
+"pwrite64",
+"readv"
+```
+
+Then rebuild your image:
 
 ```bash
 docker compose up -d --force-recreate cs-unifi-bouncer-pro
