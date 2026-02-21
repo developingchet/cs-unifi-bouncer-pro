@@ -46,6 +46,7 @@ UNIFI_URL=https://192.168.1.1
 UNIFI_API_KEY=your-api-key-here        # Settings → Control Plane → API Keys
 CROWDSEC_LAPI_KEY=paste-key-here       # from step 1
 EOF
+docker network create crowdsec_net 2>/dev/null || true
 
 # 4. Start
 docker compose -f docker-compose.standalone.yml up -d
@@ -238,7 +239,7 @@ Worker pool (1–64 goroutines, bounded queue)
     ├── 1. Idempotency check  (bbolt bans bucket)
     ├── 2. API rate gate      (bbolt rate bucket, sliding window)
     ├── 3. Firewall manager   (ApplyBan / ApplyUnban)
-    └── 4. Persist to bbolt  (BanRecord / BanDelete)
+    └── 4. Persist to bbolt  (BanRecord / BanDelete — skipped in DRY_RUN)
     │
     ▼
 UniFi controller (HTTPS REST API)

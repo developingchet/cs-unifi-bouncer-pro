@@ -42,7 +42,7 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 VOLUME ["/data"]
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD ["/cs-unifi-bouncer-pro", "healthcheck"]
 
 # Expose Prometheus metrics and health endpoints

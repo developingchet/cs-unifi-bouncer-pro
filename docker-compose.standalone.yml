@@ -40,15 +40,17 @@ services:
     networks:
       - crowdsec_net
     healthcheck:
-      test: ["/cs-unifi-bouncer-pro", "healthcheck"]
+      test: ["CMD", "/cs-unifi-bouncer-pro", "healthcheck"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
 volumes:
   bouncer-data:
 
+# Create once if it doesn't exist:
+#   docker network create crowdsec_net
 networks:
   crowdsec_net:
     external: true
