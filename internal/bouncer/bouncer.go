@@ -58,6 +58,7 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 		QueueDepth: cfg.PoolQueueDepth,
 		MaxRetries: cfg.PoolMaxRetries,
 		RetryBase:  cfg.PoolRetryBase,
+		DryRun:     cfg.DryRun,
 	}, handler, log)
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)

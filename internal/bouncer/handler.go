@@ -58,7 +58,11 @@ func makeJobHandler(
 			}
 			if !allowed {
 				metrics.JobsDropped.WithLabelValues("rate_limited").Inc()
-				log.Warn().Str("ip", job.IP).Msg("rate limited: re-enqueue")
+				rateLimitMsg := "rate limited: re-enqueue"
+				if cfg.DryRun {
+					rateLimitMsg = "[DRY-RUN] rate limited: re-enqueue"
+				}
+				log.Warn().Str("ip", job.IP).Msg(rateLimitMsg)
 				return fmt.Errorf("rate limited") // triggers retry with backoff
 			}
 		}

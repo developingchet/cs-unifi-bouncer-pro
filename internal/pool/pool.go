@@ -32,6 +32,7 @@ type Config struct {
 	QueueDepth int
 	MaxRetries int
 	RetryBase  time.Duration
+	DryRun     bool
 }
 
 // Pool is a configurable worker pool with bounded retry logic.
@@ -79,7 +80,11 @@ func (p *Pool) Enqueue(job SyncJob) bool {
 		return true
 	default:
 		metrics.JobsDropped.WithLabelValues("buffer_full").Inc()
-		p.log.Warn().Str("ip", job.IP).Str("action", job.Action).Msg("job dropped: queue full")
+		msg := "job dropped: queue full"
+		if p.cfg.DryRun {
+			msg = "[DRY-RUN] job dropped: queue full"
+		}
+		p.log.Warn().Str("ip", job.IP).Str("action", job.Action).Msg(msg)
 		return false
 	}
 }
@@ -124,8 +129,12 @@ func (p *Pool) processWithRetry(ctx context.Context, job SyncJob, log zerolog.Lo
 	for attempt := 0; attempt <= p.cfg.MaxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := p.backoff(attempt - 1)
+			retryMsg := "retrying job"
+			if p.cfg.DryRun {
+				retryMsg = "[DRY-RUN] retrying job"
+			}
 			log.Warn().Str("ip", job.IP).Int("attempt", attempt).
-				Dur("backoff", backoff).Msg("retrying job")
+				Dur("backoff", backoff).Msg(retryMsg)
 			select {
 			case <-ctx.Done():
 				metrics.JobsProcessed.WithLabelValues(job.Action, "error").Inc()
@@ -140,8 +149,12 @@ func (p *Pool) processWithRetry(ctx context.Context, job SyncJob, log zerolog.Lo
 				continue
 			}
 			metrics.JobsProcessed.WithLabelValues(job.Action, "error").Inc()
+			failMsg := "job failed: max retries exceeded"
+			if p.cfg.DryRun {
+				failMsg = "[DRY-RUN] job failed: max retries exceeded"
+			}
 			log.Error().Err(err).Str("ip", job.IP).
-				Int("max_retries", p.cfg.MaxRetries).Msg("job failed: max retries exceeded")
+				Int("max_retries", p.cfg.MaxRetries).Msg(failMsg)
 			return
 		}
 
