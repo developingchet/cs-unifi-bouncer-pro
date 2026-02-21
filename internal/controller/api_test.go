@@ -282,7 +282,7 @@ func TestCreateFirewallRule(t *testing.T) {
 
 func TestListZonePolicies(t *testing.T) {
 	const site = "default"
-	expectedPath := fmt.Sprintf("/proxy/network/api/s/%s/rest/firewall-policy", site)
+	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-policies", site)
 
 	respBody := makeAPIResp(
 		apiPolicy{
@@ -290,11 +290,14 @@ func TestListZonePolicies(t *testing.T) {
 			Name:      "block-wan-in",
 			Enabled:   true,
 			Action:    "BLOCK",
-			SrcZone:   "wan",
-			DstZone:   "internal",
 			IPVersion: "IPV4",
-			MatchIPs:  []apiMatch{{FirewallGroupID: "grp1", Negate: false}},
-			Priority:  100,
+			Source: apiPolicySource{
+				ZoneID:    "wan-zone-id",
+				IPGroupID: "grp1",
+			},
+			Destination: apiPolicyDestination{
+				ZoneID: "internal-zone-id",
+			},
 		},
 	)
 
@@ -321,8 +324,11 @@ func TestListZonePolicies(t *testing.T) {
 	if p.ID != "p1" {
 		t.Errorf("expected ID=p1, got %q", p.ID)
 	}
-	if p.SrcZone != "wan" {
-		t.Errorf("expected SrcZone=wan, got %q", p.SrcZone)
+	if p.SrcZone != "wan-zone-id" {
+		t.Errorf("expected SrcZone=wan-zone-id, got %q", p.SrcZone)
+	}
+	if p.DstZone != "internal-zone-id" {
+		t.Errorf("expected DstZone=internal-zone-id, got %q", p.DstZone)
 	}
 	if len(p.MatchIPs) != 1 || p.MatchIPs[0].FirewallGroupID != "grp1" {
 		t.Errorf("unexpected MatchIPs: %+v", p.MatchIPs)
@@ -331,14 +337,23 @@ func TestListZonePolicies(t *testing.T) {
 
 func TestCreateZonePolicy(t *testing.T) {
 	const site = "default"
-	expectedPath := fmt.Sprintf("/proxy/network/api/s/%s/rest/firewall-policy", site)
+	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-policies", site)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != expectedPath {
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
 		}
-		created := apiPolicy{ID: "policy-abc", Name: "block-wan", SrcZone: "wan", DstZone: "internal"}
+		created := apiPolicy{
+			ID:   "policy-abc",
+			Name: "block-wan",
+			Source: apiPolicySource{
+				ZoneID: "wan-zone-id",
+			},
+			Destination: apiPolicyDestination{
+				ZoneID: "internal-zone-id",
+			},
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(makeAPIResp(created))
@@ -346,7 +361,7 @@ func TestCreateZonePolicy(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(srv.URL, "api-key")
-	input := ZonePolicy{Name: "block-wan", Action: "BLOCK", SrcZone: "wan", DstZone: "internal", IPVersion: "IPV4"}
+	input := ZonePolicy{Name: "block-wan", Action: "BLOCK", SrcZone: "wan-zone-id", DstZone: "internal-zone-id", IPVersion: "IPV4"}
 
 	got, err := createZonePolicy(context.Background(), c, site, input)
 	if err != nil {
@@ -355,15 +370,22 @@ func TestCreateZonePolicy(t *testing.T) {
 	if got.ID != "policy-abc" {
 		t.Errorf("expected ID=policy-abc, got %q", got.ID)
 	}
-	if got.SrcZone != "wan" {
-		t.Errorf("expected SrcZone=wan, got %q", got.SrcZone)
+	if got.SrcZone != "wan-zone-id" {
+		t.Errorf("expected SrcZone=wan-zone-id, got %q", got.SrcZone)
+	}
+	if got.DstZone != "internal-zone-id" {
+		t.Errorf("expected DstZone=internal-zone-id, got %q", got.DstZone)
 	}
 }
 
 func TestReorderZonePolicies(t *testing.T) {
 	const site = "default"
-	expectedPath := fmt.Sprintf("/proxy/network/api/s/%s/rest/firewall-policy/order", site)
-	orderedIDs := []string{"p3", "p1", "p2"}
+	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-policies/batch-reorder", site)
+	req := ZonePolicyReorderRequest{
+		SourceZoneID:        "wan-zone-id",
+		DestinationZoneID:   "internal-zone-id",
+		BeforePredefinedIDs: []string{"p-predefined-1"},
+	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut || r.URL.Path != expectedPath {
@@ -371,32 +393,19 @@ func TestReorderZonePolicies(t *testing.T) {
 			return
 		}
 
-		// Verify the body contains the correct IDs in order.
+		// Verify the body contains the correct fields.
 		var body map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "bad body", http.StatusBadRequest)
 			return
 		}
-		idsRaw, ok := body["ids"]
-		if !ok {
-			http.Error(w, "missing ids field", http.StatusBadRequest)
+		if body["source_zone_id"] != req.SourceZoneID {
+			http.Error(w, "wrong source_zone_id", http.StatusBadRequest)
 			return
 		}
-		// JSON numbers unmarshal as []interface{} with string elements.
-		idsSlice, ok := idsRaw.([]interface{})
-		if !ok {
-			http.Error(w, "ids is not an array", http.StatusBadRequest)
+		if body["destination_zone_id"] != req.DestinationZoneID {
+			http.Error(w, "wrong destination_zone_id", http.StatusBadRequest)
 			return
-		}
-		if len(idsSlice) != len(orderedIDs) {
-			http.Error(w, fmt.Sprintf("expected %d ids, got %d", len(orderedIDs), len(idsSlice)), http.StatusBadRequest)
-			return
-		}
-		for i, id := range idsSlice {
-			if s, ok := id.(string); !ok || s != orderedIDs[i] {
-				http.Error(w, fmt.Sprintf("ids[%d]: expected %q, got %v", i, orderedIDs[i], id), http.StatusBadRequest)
-				return
-			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -407,7 +416,7 @@ func TestReorderZonePolicies(t *testing.T) {
 
 	c := newTestClient(srv.URL, "api-key")
 
-	if err := reorderZonePolicies(context.Background(), c, site, orderedIDs); err != nil {
+	if err := reorderZonePolicies(context.Background(), c, site, req); err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
 }

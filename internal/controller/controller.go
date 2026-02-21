@@ -39,13 +39,21 @@ type ZonePolicy struct {
 	DstZone     string
 	IPVersion   string // "IPV4", "IPV6", "BOTH"
 	MatchIPs    []MatchSet
-	Priority    int
+	Predefined  bool // true for built-in policies managed by UniFi
 }
 
 // MatchSet references a firewall group within a policy.
 type MatchSet struct {
 	FirewallGroupID string
 	Negate          bool
+}
+
+// ZonePolicyReorderRequest specifies how to reorder zone policies for a specific zone pair.
+type ZonePolicyReorderRequest struct {
+	SourceZoneID        string
+	DestinationZoneID   string
+	BeforePredefinedIDs []string // policy IDs to insert bouncer policies before
+	AfterPredefinedIDs  []string // policy IDs to insert bouncer policies after
 }
 
 // Zone represents a UniFi network zone (topology discovery).
@@ -73,7 +81,7 @@ type Controller interface {
 	CreateZonePolicy(ctx context.Context, site string, p ZonePolicy) (ZonePolicy, error)
 	UpdateZonePolicy(ctx context.Context, site string, p ZonePolicy) error
 	DeleteZonePolicy(ctx context.Context, site string, id string) error
-	ReorderZonePolicies(ctx context.Context, site string, orderedIDs []string) error
+	ReorderZonePolicies(ctx context.Context, site string, req ZonePolicyReorderRequest) error
 
 	// Zones (read-only — topology discovery)
 	ListZones(ctx context.Context, site string) ([]Zone, error)

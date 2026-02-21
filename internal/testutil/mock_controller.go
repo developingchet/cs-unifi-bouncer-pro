@@ -277,7 +277,7 @@ func (m *MockController) DeleteZonePolicy(ctx context.Context, site string, id s
 	return nil
 }
 
-func (m *MockController) ReorderZonePolicies(ctx context.Context, site string, orderedIDs []string) error {
+func (m *MockController) ReorderZonePolicies(ctx context.Context, site string, req controller.ZonePolicyReorderRequest) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls["ReorderZonePolicies"]++

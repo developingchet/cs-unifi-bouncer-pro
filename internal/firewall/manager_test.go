@@ -464,7 +464,7 @@ func (pc *PanicController) DeleteZonePolicy(ctx context.Context, site string, id
 	panic("DryRun gate failed: DeleteZonePolicy called")
 }
 
-func (pc *PanicController) ReorderZonePolicies(ctx context.Context, site string, orderedIDs []string) error {
+func (pc *PanicController) ReorderZonePolicies(ctx context.Context, site string, req controller.ZonePolicyReorderRequest) error {
 	panic("DryRun gate failed: ReorderZonePolicies called")
 }
 

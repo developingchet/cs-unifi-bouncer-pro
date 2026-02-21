@@ -86,10 +86,18 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 	start := time.Now()
 	c.session.SetAuthHeader(req)
 
+	if c.cfg.Debug {
+		c.log.Debug().Str("method", req.Method).Str("url", req.URL.String()).Msg("unifi api request")
+	}
+
 	resp, err := c.http.Do(req.WithContext(ctx))
 	elapsed := time.Since(start)
 
 	if err != nil {
+		if c.cfg.Debug {
+			c.log.Debug().Str("method", req.Method).Str("url", req.URL.String()).
+				Err(err).Dur("elapsed", elapsed).Msg("unifi api request failed")
+		}
 		metrics.APICalls.WithLabelValues(endpoint, "error").Inc()
 		return nil, err
 	}
@@ -97,6 +105,11 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 	statusLabel := fmt.Sprintf("%dxx", resp.StatusCode/100)
 	metrics.APICalls.WithLabelValues(endpoint, statusLabel).Inc()
 	metrics.APIDuration.WithLabelValues(endpoint).Observe(elapsed.Seconds())
+
+	if c.cfg.Debug {
+		c.log.Debug().Str("method", req.Method).Str("url", req.URL.String()).
+			Int("status", resp.StatusCode).Dur("elapsed", elapsed).Msg("unifi api response")
+	}
 
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
@@ -211,8 +224,8 @@ func (c *unifiClient) DeleteZonePolicy(ctx context.Context, site string, id stri
 	return deleteZonePolicy(ctx, c, site, id)
 }
 
-func (c *unifiClient) ReorderZonePolicies(ctx context.Context, site string, orderedIDs []string) error {
-	return reorderZonePolicies(ctx, c, site, orderedIDs)
+func (c *unifiClient) ReorderZonePolicies(ctx context.Context, site string, req ZonePolicyReorderRequest) error {
+	return reorderZonePolicies(ctx, c, site, req)
 }
 
 // ---- Zones -----------------------------------------------------------------

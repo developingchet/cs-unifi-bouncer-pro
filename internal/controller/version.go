@@ -121,7 +121,7 @@ func ruleEndpoint(base, site string) string {
 }
 
 func zonePolicyEndpoint(base, site string) string {
-	return fmt.Sprintf("%s/proxy/network/api/s/%s/rest/firewall-policy", base, site)
+	return fmt.Sprintf("%s/proxy/network/v2/api/site/%s/firewall-policies", base, site)
 }
 
 func zoneEndpoint(base, site string) string {

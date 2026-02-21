@@ -213,7 +213,11 @@ func TestMockController_ZonePolicies(t *testing.T) {
 
 	t.Run("reorder records call", func(t *testing.T) {
 		m := testutil.NewMockController()
-		if err := m.ReorderZonePolicies(ctx, site, []string{"a", "b"}); err != nil {
+		req := controller.ZonePolicyReorderRequest{
+			SourceZoneID:      "zone-src",
+			DestinationZoneID: "zone-dst",
+		}
+		if err := m.ReorderZonePolicies(ctx, site, req); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if m.Calls("ReorderZonePolicies") != 1 {
@@ -370,7 +374,9 @@ func TestMockController_ErrorInjection(t *testing.T) {
 		},
 		{
 			"ReorderZonePolicies",
-			func(m *testutil.MockController) error { return m.ReorderZonePolicies(ctx, site, nil) },
+			func(m *testutil.MockController) error {
+				return m.ReorderZonePolicies(ctx, site, controller.ZonePolicyReorderRequest{})
+			},
 		},
 		{
 			"ListZones",

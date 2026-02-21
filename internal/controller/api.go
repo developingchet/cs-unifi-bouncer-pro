@@ -30,22 +30,29 @@ type apiRule struct {
 	SrcFirewallGroupIDs []string `json:"src_firewallgroup_ids"`
 }
 
-type apiPolicy struct {
-	ID          string     `json:"_id,omitempty"`
-	Name        string     `json:"name"`
-	Enabled     bool       `json:"enabled"`
-	Action      string     `json:"action"`
-	Description string     `json:"description"`
-	SrcZone     string     `json:"src_zone"`
-	DstZone     string     `json:"dst_zone"`
-	IPVersion   string     `json:"ip_version"`
-	MatchIPs    []apiMatch `json:"match_ips"`
-	Priority    int        `json:"priority"`
+type apiPolicySource struct {
+	ZoneID             string `json:"zone_id"`
+	IPGroupID          string `json:"ip_group_id,omitempty"`
+	MatchingTarget     string `json:"matching_target,omitempty"` // "ANY" or "IP"
+	MatchingTargetType string `json:"matching_target_type,omitempty"` // "ANY" or "OBJECT"
+	MatchOppositeIPs   bool   `json:"match_opposite_ips"`
 }
 
-type apiMatch struct {
-	FirewallGroupID string `json:"firewall_group_id"`
-	Negate          bool   `json:"negate"`
+type apiPolicyDestination struct {
+	ZoneID         string `json:"zone_id"`
+	MatchingTarget string `json:"matching_target,omitempty"` // "ANY"
+}
+
+type apiPolicy struct {
+	ID          string               `json:"_id,omitempty"`
+	Name        string               `json:"name,omitempty"`
+	Enabled     bool                 `json:"enabled"`
+	Action      string               `json:"action,omitempty"`
+	Description string               `json:"description,omitempty"`
+	IPVersion   string               `json:"ip_version,omitempty"`
+	Source      apiPolicySource      `json:"source"`
+	Destination apiPolicyDestination `json:"destination"`
+	Predefined  bool                 `json:"predefined,omitempty"`
 }
 
 type apiZone struct {
@@ -282,9 +289,12 @@ func listZonePolicies(ctx context.Context, c *unifiClient, site string) ([]ZoneP
 		if err := json.Unmarshal(raw, &p); err != nil {
 			continue
 		}
-		matchSets := make([]MatchSet, 0, len(p.MatchIPs))
-		for _, m := range p.MatchIPs {
-			matchSets = append(matchSets, MatchSet{FirewallGroupID: m.FirewallGroupID, Negate: m.Negate})
+		var matchSets []MatchSet
+		if p.Source.IPGroupID != "" {
+			matchSets = []MatchSet{{
+				FirewallGroupID: p.Source.IPGroupID,
+				Negate:          p.Source.MatchOppositeIPs,
+			}}
 		}
 		policies = append(policies, ZonePolicy{
 			ID:          p.ID,
@@ -292,31 +302,41 @@ func listZonePolicies(ctx context.Context, c *unifiClient, site string) ([]ZoneP
 			Enabled:     p.Enabled,
 			Action:      p.Action,
 			Description: p.Description,
-			SrcZone:     p.SrcZone,
-			DstZone:     p.DstZone,
+			SrcZone:     p.Source.ZoneID,
+			DstZone:     p.Destination.ZoneID,
 			IPVersion:   p.IPVersion,
 			MatchIPs:    matchSets,
-			Priority:    p.Priority,
+			Predefined:  p.Predefined,
 		})
 	}
 	return policies, nil
 }
 
 func createZonePolicy(ctx context.Context, c *unifiClient, site string, p ZonePolicy) (ZonePolicy, error) {
-	matchIPs := make([]apiMatch, 0, len(p.MatchIPs))
-	for _, m := range p.MatchIPs {
-		matchIPs = append(matchIPs, apiMatch{FirewallGroupID: m.FirewallGroupID, Negate: m.Negate})
+	src := apiPolicySource{
+		ZoneID: p.SrcZone,
+	}
+	if len(p.MatchIPs) > 0 {
+		src.IPGroupID = p.MatchIPs[0].FirewallGroupID
+		src.MatchOppositeIPs = p.MatchIPs[0].Negate
+		if src.IPGroupID != "" {
+			src.MatchingTarget = "IP"
+			src.MatchingTargetType = "OBJECT"
+		}
+	} else {
+		src.MatchingTarget = "ANY"
 	}
 	payload := apiPolicy{
 		Name:        p.Name,
 		Enabled:     p.Enabled,
 		Action:      p.Action,
 		Description: p.Description,
-		SrcZone:     p.SrcZone,
-		DstZone:     p.DstZone,
 		IPVersion:   p.IPVersion,
-		MatchIPs:    matchIPs,
-		Priority:    p.Priority,
+		Source:      src,
+		Destination: apiPolicyDestination{
+			ZoneID:         p.DstZone,
+			MatchingTarget: "ANY",
+		},
 	}
 	raw, err := doPOST(ctx, c, zonePolicyEndpoint(c.cfg.BaseURL, site), "create-policy", payload)
 	if err != nil {
@@ -326,13 +346,22 @@ func createZonePolicy(ctx context.Context, c *unifiClient, site string, p ZonePo
 	if err := json.Unmarshal(raw, &created); err != nil {
 		return ZonePolicy{}, err
 	}
-	return ZonePolicy{ID: created.ID, Name: created.Name, SrcZone: created.SrcZone, DstZone: created.DstZone}, nil
+	return ZonePolicy{ID: created.ID, Name: created.Name, SrcZone: created.Source.ZoneID, DstZone: created.Destination.ZoneID}, nil
 }
 
 func updateZonePolicy(ctx context.Context, c *unifiClient, site string, p ZonePolicy) error {
-	matchIPs := make([]apiMatch, 0, len(p.MatchIPs))
-	for _, m := range p.MatchIPs {
-		matchIPs = append(matchIPs, apiMatch{FirewallGroupID: m.FirewallGroupID, Negate: m.Negate})
+	src := apiPolicySource{
+		ZoneID: p.SrcZone,
+	}
+	if len(p.MatchIPs) > 0 {
+		src.IPGroupID = p.MatchIPs[0].FirewallGroupID
+		src.MatchOppositeIPs = p.MatchIPs[0].Negate
+		if src.IPGroupID != "" {
+			src.MatchingTarget = "IP"
+			src.MatchingTargetType = "OBJECT"
+		}
+	} else {
+		src.MatchingTarget = "ANY"
 	}
 	payload := apiPolicy{
 		ID:          p.ID,
@@ -340,11 +369,12 @@ func updateZonePolicy(ctx context.Context, c *unifiClient, site string, p ZonePo
 		Enabled:     p.Enabled,
 		Action:      p.Action,
 		Description: p.Description,
-		SrcZone:     p.SrcZone,
-		DstZone:     p.DstZone,
 		IPVersion:   p.IPVersion,
-		MatchIPs:    matchIPs,
-		Priority:    p.Priority,
+		Source:      src,
+		Destination: apiPolicyDestination{
+			ZoneID:         p.DstZone,
+			MatchingTarget: "ANY",
+		},
 	}
 	url := zonePolicyEndpoint(c.cfg.BaseURL, site) + "/" + p.ID
 	return doPUT(ctx, c, url, "update-policy", payload)
@@ -355,20 +385,25 @@ func deleteZonePolicy(ctx context.Context, c *unifiClient, site, id string) erro
 	return doDELETE(ctx, c, url, "delete-policy")
 }
 
-func reorderZonePolicies(ctx context.Context, c *unifiClient, site string, orderedIDs []string) error {
-	url := zonePolicyEndpoint(c.cfg.BaseURL, site) + "/reorder"
-	payload := map[string]interface{}{"ids": orderedIDs}
+func reorderZonePolicies(ctx context.Context, c *unifiClient, site string, req ZonePolicyReorderRequest) error {
+	url := zonePolicyEndpoint(c.cfg.BaseURL, site) + "/batch-reorder"
+	payload := map[string]interface{}{
+		"source_zone_id":        req.SourceZoneID,
+		"destination_zone_id":   req.DestinationZoneID,
+		"before_predefined_ids":  req.BeforePredefinedIDs,
+		"after_predefined_ids":   req.AfterPredefinedIDs,
+	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 	return c.withReauth(ctx, func() error {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(b))
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(b))
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := c.apiDo(ctx, req, "reorder-policies")
+		httpReq.Header.Set("Content-Type", "application/json")
+		resp, err := c.apiDo(ctx, httpReq, "reorder-policies")
 		if err != nil {
 			return err
 		}
