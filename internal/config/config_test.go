@@ -11,6 +11,27 @@ func setEnv(t *testing.T, key, val string) {
 	t.Setenv(key, val)
 }
 
+func TestStripEnvQuotes(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"'https://example.com'", "https://example.com"},
+		{`"https://example.com"`, "https://example.com"},
+		{"https://example.com", "https://example.com"}, // no quotes — unchanged
+		{"'mismatched\"", "'mismatched\""},             // unpaired — unchanged
+		{"''", ""},                                     // empty quoted string
+		{"'", "'"},                                     // single char — unchanged
+		{"", ""},                                       // empty — unchanged
+		{"'nested 'quotes''", "nested 'quotes'"},       // only outer pair stripped
+	}
+	for _, tc := range cases {
+		if got := stripEnvQuotes(tc.in); got != tc.want {
+			t.Errorf("stripEnvQuotes(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestLoadMissingRequired(t *testing.T) {
 	// Clear any env vars that might be set
 	os.Unsetenv("UNIFI_URL")
@@ -183,6 +204,30 @@ func TestMultiSiteConfig(t *testing.T) {
 	}
 	if cfg.UnifiSites[1] != "homelab" {
 		t.Errorf("second site: got %q", cfg.UnifiSites[1])
+	}
+}
+
+func TestLoad_QuotedEnvValues(t *testing.T) {
+	setEnv(t, "CROWDSEC_LAPI_KEY", "'test-key'")
+	setEnv(t, "CROWDSEC_LAPI_URL", "'http://crowdsec:8080'")
+	setEnv(t, "UNIFI_URL", "'https://192.168.1.1'")
+	setEnv(t, "UNIFI_API_KEY", `"test-api-key"`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load with quoted values: %v", err)
+	}
+	if cfg.CrowdSecLAPIKey != "test-key" {
+		t.Errorf("CrowdSecLAPIKey: got %q, want %q", cfg.CrowdSecLAPIKey, "test-key")
+	}
+	if cfg.CrowdSecLAPIURL != "http://crowdsec:8080" {
+		t.Errorf("CrowdSecLAPIURL: got %q, want %q", cfg.CrowdSecLAPIURL, "http://crowdsec:8080")
+	}
+	if cfg.UnifiURL != "https://192.168.1.1" {
+		t.Errorf("UnifiURL: got %q, want %q", cfg.UnifiURL, "https://192.168.1.1")
+	}
+	if cfg.UnifiAPIKey != "test-api-key" {
+		t.Errorf("UnifiAPIKey: got %q, want %q", cfg.UnifiAPIKey, "test-api-key")
 	}
 }
 

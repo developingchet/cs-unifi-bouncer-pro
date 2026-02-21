@@ -121,6 +121,52 @@ func (c *Config) ParseZonePairs() ([]ZonePair, error) {
 	return pairs, nil
 }
 
+// sanitise removes a single layer of matching surrounding quotes from all string
+// fields and string slice elements. This normalises values from Docker --env-file
+// which does not strip shell quoting.
+func (c *Config) sanitise() {
+	c.UnifiURL = stripEnvQuotes(c.UnifiURL)
+	c.UnifiUsername = stripEnvQuotes(c.UnifiUsername)
+	c.UnifiPassword = stripEnvQuotes(c.UnifiPassword)
+	c.UnifiAPIKey = stripEnvQuotes(c.UnifiAPIKey)
+	c.UnifiCACert = stripEnvQuotes(c.UnifiCACert)
+	c.CrowdSecLAPIURL = stripEnvQuotes(c.CrowdSecLAPIURL)
+	c.CrowdSecLAPIKey = stripEnvQuotes(c.CrowdSecLAPIKey)
+	c.FirewallMode = stripEnvQuotes(c.FirewallMode)
+	c.FirewallBlockAction = stripEnvQuotes(c.FirewallBlockAction)
+	c.LegacyRulesetV4 = stripEnvQuotes(c.LegacyRulesetV4)
+	c.LegacyRulesetV6 = stripEnvQuotes(c.LegacyRulesetV6)
+	c.GroupNameTemplate = stripEnvQuotes(c.GroupNameTemplate)
+	c.RuleNameTemplate = stripEnvQuotes(c.RuleNameTemplate)
+	c.PolicyNameTemplate = stripEnvQuotes(c.PolicyNameTemplate)
+	c.ObjectDescription = stripEnvQuotes(c.ObjectDescription)
+	c.DataDir = stripEnvQuotes(c.DataDir)
+	c.LogLevel = stripEnvQuotes(c.LogLevel)
+	c.LogFormat = stripEnvQuotes(c.LogFormat)
+	c.MetricsAddr = stripEnvQuotes(c.MetricsAddr)
+	c.HealthAddr = stripEnvQuotes(c.HealthAddr)
+
+	// Slice fields: strip each element
+	for i, s := range c.UnifiSites {
+		c.UnifiSites[i] = stripEnvQuotes(s)
+	}
+	for i, s := range c.CrowdSecOrigins {
+		c.CrowdSecOrigins[i] = stripEnvQuotes(s)
+	}
+	for i, s := range c.BlockWhitelist {
+		c.BlockWhitelist[i] = stripEnvQuotes(s)
+	}
+	for i, s := range c.BlockScenarioExclude {
+		c.BlockScenarioExclude[i] = stripEnvQuotes(s)
+	}
+	for i, s := range c.ZonePairs {
+		c.ZonePairs[i] = stripEnvQuotes(s)
+	}
+	for i, s := range c.ZoneConnectionStates {
+		c.ZoneConnectionStates[i] = stripEnvQuotes(s)
+	}
+}
+
 // defaults sets sensible default values.
 func defaults() map[string]interface{} {
 	return map[string]interface{}{
@@ -170,6 +216,21 @@ func defaults() map[string]interface{} {
 	}
 }
 
+// stripEnvQuotes removes a single layer of matching surrounding single or double
+// quotes from s. This normalises values set via Docker --env-file, which does not
+// strip shell quoting. Only symmetric pairs are stripped: 'x' → x, "x" → x.
+// Unpaired or mismatched quotes are left as-is.
+func stripEnvQuotes(s string) string {
+	if len(s) < 2 {
+		return s
+	}
+	if (s[0] == '\'' && s[len(s)-1] == '\'') ||
+		(s[0] == '"' && s[len(s)-1] == '"') {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
 // Load reads configuration from environment variables, applying _FILE secret injection.
 func Load() (*Config, error) {
 	// Use "." as delimiter so that env vars with "_" in their names are
@@ -208,6 +269,9 @@ func Load() (*Config, error) {
 	cfg.BlockWhitelist = splitCSV(k.String("block_whitelist"))
 	cfg.ZonePairs = splitCSV(k.String("zone_pairs"))
 	cfg.ZoneConnectionStates = splitCSV(k.String("zone_connection_states"))
+
+	// Strip Docker env-file quoting from all string values
+	cfg.sanitise()
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -330,6 +394,8 @@ func injectFileSecrets(k *koanf.Koanf) error {
 		if filePath == "" {
 			continue
 		}
+		// Strip quotes from file path in case it was quoted in Docker --env-file
+		filePath = stripEnvQuotes(filePath)
 		content, err := os.ReadFile(filePath)
 		if err != nil {
 			return fmt.Errorf("reading secret file for %s (%s): %w", key, filePath, err)
