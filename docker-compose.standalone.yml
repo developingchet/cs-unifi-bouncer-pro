@@ -37,8 +37,6 @@ services:
     ports:
       - "127.0.0.1:9090:9090"
       - "127.0.0.1:8081:8081"
-    networks:
-      - crowdsec_net
     healthcheck:
       test: ["CMD", "/cs-unifi-bouncer-pro", "healthcheck"]
       interval: 30s
@@ -48,9 +46,3 @@ services:
 
 volumes:
   bouncer-data:
-
-# Create once if it doesn't exist:
-#   docker network create crowdsec_net
-networks:
-  crowdsec_net:
-    external: true

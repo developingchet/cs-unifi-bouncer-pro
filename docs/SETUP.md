@@ -63,12 +63,13 @@ chmod 600 .env
 
 For all available configuration options, see [CONFIGURATION.md](CONFIGURATION.md).
 
-### Step 4: Create the Docker Network (if not already present)
+### Step 4: Start
 
-```bash
-docker network create crowdsec_net 2>/dev/null || true
-docker network connect crowdsec_net crowdsec 2>/dev/null || true
-```
+The bouncer needs to reach both your CrowdSec LAPI and your UniFi controller. Ensure that:
+- `CROWDSEC_LAPI_URL` (defaults to `http://crowdsec:8080`) is reachable from inside the bouncer container
+- `UNIFI_URL` is reachable from inside the bouncer container
+
+If CrowdSec is in a separate container, you may need to connect them to the same Docker network, or use an IP address instead of a hostname.
 
 ### Step 5: Start
 
@@ -188,22 +189,18 @@ UNIFI_PASSWORD=yourpassword
 # Leave UNIFI_API_KEY unset or commented out
 ```
 
-### Step 4: Configure Docker Networking
+### Step 4: Ensure Network Connectivity
 
-The bouncer must be on the same Docker network as CrowdSec to reach the LAPI. The default `docker-compose.yml` uses an external network named `crowdsec_net`:
+The bouncer must reach **both** your CrowdSec LAPI and your UniFi controller from inside the container.
 
-```bash
-# Check if the network already exists
-docker network ls | grep crowdsec_net
+**For `CROWDSEC_LAPI_URL`**, common values are:
+- `http://crowdsec:8080` — if CrowdSec is in Docker Compose and on the same network (no specific network name required — use your default bridge)
+- `http://192.168.1.100:8080` — if CrowdSec is on the Docker host, use the host IP
+- `http://host.docker.internal:8080` — Docker Desktop trick to reach the host from inside a container
 
-# Create it if it does not exist
-docker network create crowdsec_net
+**For `UNIFI_URL`**, similarly ensure it's reachable — typically `https://192.168.1.1` or a hostname like `https://unifi.local`.
 
-# Add CrowdSec to it if it is not already connected
-docker network connect crowdsec_net crowdsec
-```
-
-If your CrowdSec setup uses a different network name, update `CROWDSEC_LAPI_URL` and the network name in `docker-compose.yml`.
+If both are on the same Docker network naturally (via docker-compose service names), no additional network configuration is needed. If they are on different networks or different hosts, adjust the URLs accordingly.
 
 ### Step 5: Pull the Docker Image
 

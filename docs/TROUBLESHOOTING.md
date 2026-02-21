@@ -70,14 +70,18 @@ All three must be set and non-empty. `UNIFI_URL` and `CROWDSEC_LAPI_URL` must in
 
 **Fix:**
 
-1. Verify `CROWDSEC_LAPI_URL=http://crowdsec:8080` (use the service name, not `localhost`)
-2. Confirm the bouncer and CrowdSec are on the same Docker network:
+1. Verify `CROWDSEC_LAPI_URL` is set correctly and reachable:
+   - If CrowdSec is a Docker service on the same compose file, use its service name: `http://crowdsec:8080`
+   - If CrowdSec is on the Docker host, use host IP: `http://192.168.1.100:8080` (or `http://host.docker.internal:8080` on Docker Desktop)
+   - If CrowdSec is on a different host, use its IP or hostname
+2. Test connectivity from inside the bouncer container:
    ```bash
-   docker network inspect crowdsec_net | grep -A2 '"Name"'
+   docker exec cs-unifi-bouncer-pro sh -c 'curl -v http://your-crowdsec-url:8080/api/v1/decisions?ip=1.1.1.1'
    ```
-3. Test connectivity from the bouncer container:
+   This will fail with a 401 (missing auth), but a successful connection proves reachability.
+3. Check the bouncer logs:
    ```bash
-   docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro healthcheck
+   docker logs cs-unifi-bouncer-pro
    ```
 
 ---

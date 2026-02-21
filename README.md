@@ -45,8 +45,8 @@ cat > .env <<'EOF'
 UNIFI_URL=https://192.168.1.1
 UNIFI_API_KEY=your-api-key-here        # Settings → Control Plane → API Keys
 CROWDSEC_LAPI_KEY=paste-key-here       # from step 1
+# Ensure CROWDSEC_LAPI_URL is reachable from the container (defaults to http://crowdsec:8080)
 EOF
-docker network create crowdsec_net 2>/dev/null || true
 
 # 4. Start
 docker compose -f docker-compose.standalone.yml up -d
