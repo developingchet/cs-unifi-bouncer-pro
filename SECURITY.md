@@ -51,6 +51,21 @@ The Docker image is hardened by default:
 - Self-signed certificate support via `UNIFI_CA_CERT` (avoid disabling verification in production)
 - HTTP timeouts configured via `UNIFI_HTTP_TIMEOUT` (default 15 s) and `SESSION_REAUTH_TIMEOUT`
 
+## Connectivity Timeout Root Cause (resolved)
+
+Two issues combined to cause a 15-second timeout on UniFi API requests:
+
+1. **IPv6 happy eyeballs stall** — Go's `net.Dialer` with `network="tcp"` races
+   IPv4 and IPv6 simultaneously. On hosts with IPv6 interfaces but no IPv6 route
+   to the controller, the IPv6 attempt stalls silently for the full 15s timeout.
+   Fixed by `ENABLE_IPV6=false` (default) which forces `tcp4` dialing.
+
+2. **Missing `futex_waitv` syscall** — Go 1.21+ uses `futex_waitv` on kernel
+   5.16+ as an optimized goroutine park/unpark mechanism. Without it, every
+   goroutine yield during network I/O (TLS handshake, waiting for response)
+   silently blocks. On kernel 6.8 with Go 1.24 this caused all network operations
+   to hang until `http.Client.Timeout` fired at exactly 15 seconds.
+
 ### Seccomp profile
 
 The profile (`security/seccomp-unifi.json`) uses `SCMP_ACT_ERRNO` as the default
@@ -74,6 +89,7 @@ The allowlist is grouped into three categories:
 | `set_robust_list` | Kernel robust futex list — registered per-thread by the Go runtime |
 | `sigaltstack` | Alternate signal stack — set up per-thread by the Go runtime |
 | `rt_sigaction` / `rt_sigprocmask` / `rt_sigreturn` | Signal handling for goroutine preemption and panic recovery |
+| `capget` / `capset` | Required by runc at container init to check/set capabilities. Without it the container fails to start with "unable to get capability version" |
 
 #### Network and I/O (core bouncer functionality)
 
@@ -82,8 +98,10 @@ The allowlist is grouped into three categories:
 | `socket` / `bind` / `connect` / `listen` / `accept4` | TCP/HTTPS to UniFi controller and CrowdSec LAPI |
 | `sendto` / `sendmsg` / `recvfrom` / `recvmsg` | Socket I/O |
 | `setsockopt` / `getsockopt` / `getsockname` | Socket configuration |
+| `getpeername` | Called after `connect()` completes to verify the remote endpoint address |
 | `epoll_create1` / `epoll_ctl` / `epoll_pwait` / `epoll_pwait2` / `epoll_wait` | Go netpoller event loop; `epoll_pwait2` is the newer variant (kernel 5.11+) used by Go 1.21+ for scalable async I/O |
 | `pselect6` | Go's netpoller fallback selector on systems without epoll support |
+| `ppoll` | Netpoller fallback, used alongside `epoll_pwait` |
 | `read` / `readv` / `write` / `writev` / `pread64` / `pwrite64` | File and socket reads/writes (vectored and positional variants) |
 | `openat` / `fstat` / `fstatfs` / `newfstatat` / `statx` / `stat` | File access (bbolt database, config) |
 | `flock` | bbolt acquires `LOCK_EX\|LOCK_NB` advisory lock on `bouncer.db` at open time |
@@ -102,8 +120,9 @@ The allowlist is grouped into three categories:
 | `msync` | bbolt flushes dirty mmap pages to disk on every commit using `msync(MS_SYNC)` for ACID guarantees |
 | `brk` | Initial heap growth |
 | `futex` | Goroutine mutex and channel synchronization |
+| `futex_waitv` | Go 1.21+ goroutine scheduler optimization for kernel ≥ 5.16. Used for park/unpark during all I/O waits including TLS. **Root cause of 15s timeout.** |
 | `sched_getaffinity` / `sched_yield` | GOMAXPROCS detection and cooperative scheduling |
-| `nanosleep` / `clock_gettime` / `gettimeofday` | Timers (decision TTL, rate limiter, batch window) |
+| `nanosleep` / `clock_gettime` / `clock_nanosleep` / `gettimeofday` | Timers (decision TTL, rate limiter, batch window); `clock_nanosleep` is used by Go runtime timer implementation |
 | `timerfd_create` / `timerfd_settime` / `timerfd_gettime` | Go's timer implementation; `timerfd` is the kernel interface backing Go's efficient timer heap |
 | `getrandom` | Go `crypto/rand` entropy source; required for TLS client handshakes in both UniFi HTTPS and CrowdSec LAPI connections |
 | `tgkill` | Go runtime sends signals to specific threads for preemption |
