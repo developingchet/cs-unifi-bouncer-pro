@@ -82,7 +82,8 @@ The allowlist is grouped into three categories:
 | `socket` / `bind` / `connect` / `listen` / `accept4` | TCP/HTTPS to UniFi controller and CrowdSec LAPI |
 | `sendto` / `sendmsg` / `recvfrom` / `recvmsg` | Socket I/O |
 | `setsockopt` / `getsockopt` / `getsockname` | Socket configuration |
-| `epoll_create1` / `epoll_ctl` / `epoll_pwait` / `epoll_wait` | Go netpoller event loop |
+| `epoll_create1` / `epoll_ctl` / `epoll_pwait` / `epoll_pwait2` / `epoll_wait` | Go netpoller event loop; `epoll_pwait2` is the newer variant (kernel 5.11+) used by Go 1.21+ for scalable async I/O |
+| `pselect6` | Go's netpoller fallback selector on systems without epoll support |
 | `read` / `readv` / `write` / `writev` / `pread64` / `pwrite64` | File and socket reads/writes (vectored and positional variants) |
 | `openat` / `fstat` / `fstatfs` / `newfstatat` / `statx` / `stat` | File access (bbolt database, config) |
 | `flock` | bbolt acquires `LOCK_EX\|LOCK_NB` advisory lock on `bouncer.db` at open time |
@@ -103,6 +104,7 @@ The allowlist is grouped into three categories:
 | `futex` | Goroutine mutex and channel synchronization |
 | `sched_getaffinity` / `sched_yield` | GOMAXPROCS detection and cooperative scheduling |
 | `nanosleep` / `clock_gettime` / `gettimeofday` | Timers (decision TTL, rate limiter, batch window) |
+| `timerfd_create` / `timerfd_settime` / `timerfd_gettime` | Go's timer implementation; `timerfd` is the kernel interface backing Go's efficient timer heap |
 | `getrandom` | Go `crypto/rand` entropy source; required for TLS client handshakes in both UniFi HTTPS and CrowdSec LAPI connections |
 | `tgkill` | Go runtime sends signals to specific threads for preemption |
 | `exit` / `exit_group` / `restart_syscall` | Process and goroutine teardown |
