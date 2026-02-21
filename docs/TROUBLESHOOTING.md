@@ -106,6 +106,59 @@ All three must be set and non-empty. `UNIFI_URL` and `CROWDSEC_LAPI_URL` must in
 
 ---
 
+### Connection timeout to UniFi controller (TCP stall on IPv6)
+
+**Symptom:** The bouncer attempts to connect but hangs indefinitely, or times out after `UNIFI_HTTP_TIMEOUT`:
+
+```json
+{"level":"error","error":"context deadline exceeded","msg":"controller ping failed"}
+```
+
+This is often accompanied by curl hangs from inside the container:
+
+```bash
+docker exec cs-unifi-bouncer-pro sh -c 'timeout 5 curl -v https://192.168.1.1'
+# Times out after 5 seconds with no output after "TCP_NODELAY set"
+```
+
+**Cause:** This is usually caused by Go's happy eyeballs algorithm attempting an IPv6 TCP connection to the UniFi controller when the host has IPv6 network interfaces but no working IPv6 route to the controller. The IPv6 SYN silently stalls (not rejected, just unreachable), and Go waits for a long timeout before falling back to IPv4. This can take 20+ seconds per connection attempt.
+
+**Fix:** Set `ENABLE_IPV6=false` in your `.env` (this is already the default):
+
+```bash
+# Verify ENABLE_IPV6 is not set to true
+grep ENABLE_IPV6 .env
+# Should output nothing or "ENABLE_IPV6=false"
+```
+
+If it is set to `true`, change it to `false`:
+
+```bash
+sed -i 's/ENABLE_IPV6=true/ENABLE_IPV6=false/' .env
+docker compose up -d --force-recreate cs-unifi-bouncer-pro
+```
+
+**Important distinction:** `ENABLE_IPV6` controls whether the HTTP client uses IPv6 to reach the UniFi controller (connection dial behavior). This is separate from `FIREWALL_ENABLE_IPV6`, which controls whether IPv6 firewall rules are created in UniFi. These are independent settings.
+
+To verify the fix, enable debug logging and watch for `tcp4` in the trace:
+
+```bash
+echo "UNIFI_API_DEBUG=true" >> .env
+docker compose up -d --force-recreate cs-unifi-bouncer-pro
+docker logs cs-unifi-bouncer-pro | grep -E "ConnectStart|tcp"
+```
+
+Expected output (with `ENABLE_IPV6=false`):
+
+```
+ConnectStart network=tcp4
+ConnectDone
+```
+
+If you see `tcp` (dual-stack) or `tcp6` attempts, `ENABLE_IPV6` is incorrectly set to `true`.
+
+---
+
 ### Storage fails to open on first start
 
 Two distinct errors can appear when the container starts for the first time.
