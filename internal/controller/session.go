@@ -44,6 +44,11 @@ func newSessionManager(cfg AuthConfig, httpClient *http.Client, log zerolog.Logg
 // EnsureAuth is called by client.go only when a 401 response is detected.
 // The mutex ensures only one of N workers executes Login concurrently.
 func (s *sessionManager) EnsureAuth(ctx context.Context) error {
+	// API key auth requires no login — key is sent per-request via SetAuthHeader.
+	if s.cfg.APIKey != "" {
+		return nil
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

@@ -104,6 +104,16 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 	start := time.Now()
 	c.session.SetAuthHeader(req)
 
+	// UniFi Network API requires these headers on every request.
+	// Without Accept: application/json the reverse proxy may return HTML or stall.
+	if req.Header.Get("Accept") == "" {
+		req.Header.Set("Accept", "application/json")
+	}
+	if req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	}
+	req.Header.Set("User-Agent", "cs-unifi-bouncer-pro")
+
 	if c.cfg.Debug {
 		c.log.Debug().Str("method", req.Method).Str("url", req.URL.String()).Msg("unifi api request")
 	}
