@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -52,7 +53,24 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 		tlsCfg.RootCAs = pool
 	}
 
-	transport := &http.Transport{TLSClientConfig: tlsCfg}
+	// Build transport based on DefaultTransport to inherit all production-safe
+	// defaults (DialContext with keepalive, TLSHandshakeTimeout, IdleConnTimeout,
+	// etc.) while applying custom TLS configuration.
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialer.DialContext,
+		TLSClientConfig:       tlsCfg,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ForceAttemptHTTP2:     false, // UniFi controllers do not support HTTP/2
+		MaxIdleConns:          10,
+		IdleConnTimeout:       90 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DisableKeepAlives:     false,
+	}
 	httpClient := &http.Client{
 		Transport: transport,
 		Timeout:   cfg.Timeout,
