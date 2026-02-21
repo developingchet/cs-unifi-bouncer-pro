@@ -38,13 +38,13 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 |----------|---------|----------|-------------|
 | `UNIFI_URL` | — | **Yes** | Controller URL including scheme, e.g. `https://192.168.1.1` or `https://unifi.local:8443` |
 | `UNIFI_API_KEY` | — | One of API key or user/pass | UniFi API key. Takes precedence over username/password. `_FILE` variant supported. |
-| `UNIFI_USERNAME` | — | One of API key or user/pass | Local admin username |
+| `UNIFI_USERNAME` | — | One of API key or user/pass | Local admin username. `_FILE` variant supported. |
 | `UNIFI_PASSWORD` | — | One of API key or user/pass | Local admin password. `_FILE` variant supported. |
 | `UNIFI_VERIFY_TLS` | `false` | No | Verify the controller's TLS certificate. Set to `true` only when the controller has a valid CA-signed cert or `UNIFI_CA_CERT` is provided. |
 | `UNIFI_CA_CERT` | — | No | Path to a PEM CA certificate for self-signed controller certs. |
 | `UNIFI_HTTP_TIMEOUT` | `15s` | No | HTTP request timeout for UniFi API calls. |
 | `UNIFI_API_DEBUG` | `false` | No | Log raw HTTP request/response bodies (verbose; do not use in production). |
-| `ENABLE_IPV6` | `false` | No | Enable IPv6 dialing for the HTTP client. Set to `true` only if your controller is reachable over IPv6 with a working network path. |
+| `ENABLE_IPV6` | `false` | No | Enable IPv6 dialing for the HTTP client. Set to `true` only if your controller is reachable over IPv6 with a working network path. This is separate from `FIREWALL_ENABLE_IPV6`. |
 
 ### Authentication priority
 
@@ -76,10 +76,10 @@ UNIFI_SITES=default,homelab,iot
 |----------|---------|----------|-------------|
 | `FIREWALL_MODE` | `auto` | No | `auto`, `legacy`, or `zone` |
 | `FIREWALL_BLOCK_ACTION` | `drop` | No | Block action for legacy rules: `drop` or `reject` |
-| `FIREWALL_ENABLE_IPV6` | `true` | No | Create separate IPv6 firewall groups and rules |
-| `FIREWALL_GROUP_CAPACITY` | `10000` | No | Maximum IPs per firewall group shard |
-| `FIREWALL_GROUP_CAPACITY_V4` | — | No | Override capacity for IPv4 groups |
-| `FIREWALL_GROUP_CAPACITY_V6` | — | No | Override capacity for IPv6 groups |
+| `FIREWALL_ENABLE_IPV6` | `true` | No | Create separate IPv6 firewall groups and rules. Distinct from `ENABLE_IPV6` which controls HTTP client IPv6 dialing. |
+| `FIREWALL_GROUP_CAPACITY` | `10000` | No | Maximum IPs per firewall group shard (used if family-specific overrides are not set) |
+| `FIREWALL_GROUP_CAPACITY_V4` | — | No | Override capacity for IPv4 groups (takes precedence over `FIREWALL_GROUP_CAPACITY`) |
+| `FIREWALL_GROUP_CAPACITY_V6` | — | No | Override capacity for IPv6 groups (takes precedence over `FIREWALL_GROUP_CAPACITY`) |
 | `FIREWALL_BATCH_WINDOW` | `500ms` | No | Accumulate group member changes for this duration before issuing a single API update |
 | `FIREWALL_API_SHARD_DELAY` | `250ms` | No | Minimum pause between consecutive write calls (`PUT /rest/firewallgroup`, rule/policy `POST`/`DELETE`). Prevents the UDM from stacking back-to-back ruleset regenerations. Set `0` to disable. |
 | `FIREWALL_FLUSH_CONCURRENCY` | `1` | No | Maximum concurrent `PUT /rest/firewallgroup` calls in-flight across all sites and address families. `1` = fully serialized (recommended). Increase only for multi-site setups where faster bulk updates are needed. |
