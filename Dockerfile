@@ -17,7 +17,7 @@ ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 RUN GOARM=${TARGETVARIANT#v} CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath \
-    -ldflags="-s -w -X main.Version=${VERSION}" \
+    -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
     -o /out/cs-unifi-bouncer-pro \
     ./cmd/bouncer
 
@@ -42,7 +42,7 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 VOLUME ["/data"]
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD ["/cs-unifi-bouncer-pro", "healthcheck"]
 
 # Expose Prometheus metrics and health endpoints

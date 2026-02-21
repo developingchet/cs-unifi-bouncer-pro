@@ -181,7 +181,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 |----------|---------|-------------|
 | `LOG_LEVEL` | `info` | `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `panic` |
 | `LOG_FORMAT` | `json` | `json` or `text` |
-| `DRY_RUN` | `false` | Process decisions and log actions without calling the UniFi API |
+| `DRY_RUN` | `false` | Safe testing mode. The bouncer connects to both the UniFi controller and CrowdSec LAPI, reads all existing state, and logs every action it *would* take — but makes zero write requests (no `POST`, `PUT`, or `DELETE` to UniFi) and does not mutate bbolt state. Reads (`GET`) are still performed so the diff output is meaningful. Turning off dry run after a dry run session starts cleanly with no phantom bbolt entries. |
 | `METRICS_ENABLED` | `true` | Expose Prometheus metrics endpoint |
 | `METRICS_ADDR` | `:9090` | Listen address for `/metrics` |
 | `HEALTH_ADDR` | `:8081` | Listen address for `/healthz` and `/readyz` |
