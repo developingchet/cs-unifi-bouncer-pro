@@ -12,6 +12,7 @@ require (
 	github.com/spf13/cobra v1.8.1
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	go.etcd.io/bbolt v1.3.10
+	golang.org/x/net v0.37.0
 	golang.org/x/sync v0.15.0
 )
 
@@ -57,7 +58,6 @@ require (
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.mongodb.org/mongo-driver v1.12.1 // indirect
-	golang.org/x/net v0.37.0 // indirect
 	golang.org/x/sys v0.31.0 // indirect
 	golang.org/x/xerrors v0.0.0-20231012003039-104605ab7028 // indirect
 	google.golang.org/protobuf v1.36.3 // indirect

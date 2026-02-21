@@ -28,7 +28,7 @@ type sessionManager struct {
 	mu         sync.Mutex
 	cfg        AuthConfig
 	http       *http.Client
-	cookie     string // session cookie value (username/password auth)
+	csrfToken  string // cached from X-Csrf-Token response header
 	lastReauth time.Time
 	log        zerolog.Logger
 }
@@ -80,11 +80,24 @@ func (s *sessionManager) SetAuthHeader(req *http.Request) {
 	defer s.mu.Unlock()
 
 	if s.cfg.APIKey != "" {
-		req.Header.Set("X-API-Key", s.cfg.APIKey)
+		req.Header.Set("X-Api-Key", s.cfg.APIKey)
 		return
 	}
-	if s.cookie != "" {
-		req.Header.Set("Cookie", s.cookie)
+	// For cookie-based auth, send the CSRF token from the last response header.
+	// The cookie jar automatically sends cookies set during login.
+	if s.csrfToken != "" {
+		req.Header.Set("X-Csrf-Token", s.csrfToken)
+	}
+}
+
+// UpdateFromResponse extracts the CSRF token from the response header and stores it.
+// This is called after every API response to handle CSRF token rotation.
+func (s *sessionManager) UpdateFromResponse(resp *http.Response) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if token := resp.Header.Get("X-Csrf-Token"); token != "" {
+		s.csrfToken = token
 	}
 }
 
@@ -121,16 +134,7 @@ func (s *sessionManager) login(ctx context.Context) error {
 		return &ErrUnauthorized{Msg: fmt.Sprintf("login returned HTTP %d", resp.StatusCode)}
 	}
 
-	// Extract the session cookie (reset first so re-auth doesn't accumulate stale values)
-	s.cookie = ""
-	for _, c := range resp.Cookies() {
-		if c.Name == "TOKEN" || c.Name == "unifises" || c.Name == "csrf_token" {
-			if s.cookie == "" {
-				s.cookie = c.Name + "=" + c.Value
-			} else {
-				s.cookie += "; " + c.Name + "=" + c.Value
-			}
-		}
-	}
+	// Cookies are automatically managed by the cookie jar (set via Set-Cookie headers).
+	// SetAuthHeader extracts the csrf_token from the jar and sends it as X-CSRF-Token header.
 	return nil
 }

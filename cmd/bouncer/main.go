@@ -77,7 +77,7 @@ func runDaemon() error {
 	log.Info().
 		Str("bouncer_type", capabilities.BouncerType).
 		Str("layer", capabilities.Layer).
-		Bool("ipv4", true).Bool("ipv6", true).
+		Bool("ipv4", true).Bool("ipv6", cfg.FirewallEnableIPv6).
 		Bool("captcha", capabilities.SupportsCaptcha).
 		Bool("appsec", capabilities.SupportsAppSec).
 		Msg("bouncer capabilities")

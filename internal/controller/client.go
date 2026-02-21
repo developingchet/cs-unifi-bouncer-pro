@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptrace"
 	"os"
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/rs/zerolog"
+	"golang.org/x/net/publicsuffix"
 )
 
 // ClientConfig holds parameters for constructing a UniFi HTTP client.
@@ -80,9 +82,16 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 		ExpectContinueTimeout: 1 * time.Second,
 		DisableKeepAlives:     false,
 	}
+
+	jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	if err != nil {
+		return nil, fmt.Errorf("create cookie jar: %w", err)
+	}
+
 	httpClient := &http.Client{
 		Transport: transport,
 		Timeout:   cfg.Timeout,
+		Jar:       jar,
 	}
 
 	c := &unifiClient{
@@ -167,6 +176,9 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 		metrics.APICalls.WithLabelValues(endpoint, "error").Inc()
 		return nil, err
 	}
+
+	// Extract CSRF token from response header for cookie-based auth.
+	c.session.UpdateFromResponse(resp)
 
 	statusLabel := fmt.Sprintf("%dxx", resp.StatusCode/100)
 	metrics.APICalls.WithLabelValues(endpoint, statusLabel).Inc()
