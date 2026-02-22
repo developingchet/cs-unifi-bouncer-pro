@@ -74,6 +74,13 @@ type proxyPolicyMatch struct {
 	PortMatchingType   string   `json:"port_matching_type,omitempty"`
 }
 
+// apiFirewallZone is the wire type returned by
+// GET /proxy/network/v2/api/site/{site}/firewall-zones.
+type apiFirewallZone struct {
+	ID   string `json:"_id"`
+	Name string `json:"name"`
+}
+
 // --- Generic HTTP helpers ---------------------------------------------------
 
 func doGET(ctx context.Context, c *unifiClient, url, endpoint string) ([]json.RawMessage, error) {
@@ -480,4 +487,23 @@ func updateZonePolicy(ctx context.Context, c *unifiClient, site string, p ZonePo
 func deleteZonePolicy(ctx context.Context, c *unifiClient, site, id string) error {
 	url := proxyPolicyEndpoint(c.cfg.BaseURL, site) + "/" + id
 	return doDELETE(ctx, c, url, "delete-policy")
+}
+
+// listFirewallZones fetches all firewall zones from the proxy v2 API.
+// Returns ErrNotFound on controllers that do not support this endpoint.
+func listFirewallZones(ctx context.Context, c *unifiClient, site string) ([]Zone, error) {
+	url := fmt.Sprintf("%s/proxy/network/v2/api/site/%s/firewall-zones", c.cfg.BaseURL, site)
+	data, err := doGETv2(ctx, c, url, "list-zones")
+	if err != nil {
+		return nil, err
+	}
+	zones := make([]Zone, 0, len(data))
+	for _, raw := range data {
+		var z apiFirewallZone
+		if err := json.Unmarshal(raw, &z); err != nil {
+			continue
+		}
+		zones = append(zones, Zone{ID: z.ID, Name: z.Name})
+	}
+	return zones, nil
 }

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -145,12 +146,40 @@ func getZoneID(ctx context.Context, c *unifiClient, site, zoneName string) (stri
 		return zoneName, nil
 	}
 
-	// No zone list API available on UDM Pro Max 10.x — return clear error
+	// Attempt to resolve the name via the firewall-zones list API.
+	zones, err := listFirewallZones(ctx, c, site)
+	if err != nil {
+		var nf *ErrNotFound
+		if errors.As(err, &nf) {
+			return "", fmt.Errorf(
+				"zone %q cannot be resolved: this controller does not support the zone list API. "+
+					"Set ZONE_PAIRS to use zone UUIDs directly, e.g. ZONE_PAIRS=%s->%s. "+
+					"Find zone UUIDs in: GET /proxy/network/v2/api/site/default/firewall-policies (source.zone_id / destination.zone_id fields)",
+				zoneName, zoneName, zoneName,
+			)
+		}
+		return "", fmt.Errorf("list firewall zones for site %q: %w", site, err)
+	}
+
+	// Populate the full name→ID cache for this site.
+	c.cacheMu.Lock()
+	if c.zoneIDCache[site] == nil {
+		c.zoneIDCache[site] = make(map[string]string)
+	}
+	for _, z := range zones {
+		c.zoneIDCache[site][z.Name] = z.ID
+		c.zoneIDCache[site][z.ID] = z.ID // also cache ID→ID for future fast-paths
+	}
+	c.cacheMu.Unlock()
+
+	if id, ok := c.zoneIDCache[site][zoneName]; ok {
+		return id, nil
+	}
 	return "", fmt.Errorf(
-		"zone %q cannot be resolved: no zone list API available on this controller. "+
+		"zone %q not found on this controller (checked %d zones). "+
 			"Set ZONE_PAIRS to use zone UUIDs directly, e.g. ZONE_PAIRS=%s->%s. "+
 			"Find zone UUIDs in: GET /proxy/network/v2/api/site/default/firewall-policies (source.zone_id / destination.zone_id fields)",
-		zoneName, zoneName, zoneName,
+		zoneName, len(zones), zoneName, zoneName,
 	)
 }
 

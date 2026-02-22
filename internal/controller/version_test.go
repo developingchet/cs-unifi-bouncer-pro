@@ -252,13 +252,94 @@ func TestGetZoneID_MongoObjectID(t *testing.T) {
 }
 
 func TestGetZoneID_NameFails(t *testing.T) {
-	c := newTestClient("https://example.invalid", "api-key")
+	const site = "default"
+	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-zones", site)
 
-	_, err := getZoneID(context.Background(), c, "default", "Internal")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == expectedPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	_, err := getZoneID(context.Background(), c, site, "Internal")
 	if err == nil {
-		t.Fatal("expected error for non-ObjectID zone name")
+		t.Fatal("expected error for non-ObjectID zone name on controller without zone list API")
 	}
 	if got := err.Error(); !strings.Contains(got, "cannot be resolved") || !strings.Contains(got, "ZONE_PAIRS") {
+		t.Fatalf("unexpected error message: %q", got)
+	}
+}
+
+func TestGetZoneID_NameResolvedFromZoneList(t *testing.T) {
+	const site = "default"
+	const wantID = "67a8cc9efe6c6350dfa4dcc8"
+	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-zones", site)
+
+	zoneList := makeBareArray(
+		apiFirewallZone{ID: "67a8cc9efe6c6350dfa4dcc7", Name: "WAN"},
+		apiFirewallZone{ID: wantID, Name: "Internal"},
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != expectedPath {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(zoneList)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+
+	got, err := getZoneID(context.Background(), c, site, "Internal")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if got != wantID {
+		t.Fatalf("expected zone ID %q, got %q", wantID, got)
+	}
+
+	// Verify cache was populated.
+	c.cacheMu.RLock()
+	cached := c.zoneIDCache[site]["Internal"]
+	c.cacheMu.RUnlock()
+	if cached != wantID {
+		t.Errorf("cache entry for %q = %q, want %q", "Internal", cached, wantID)
+	}
+}
+
+func TestGetZoneID_NameFails_ZoneNotInList(t *testing.T) {
+	const site = "default"
+	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-zones", site)
+
+	zoneList := makeBareArray(
+		apiFirewallZone{ID: "67a8cc9efe6c6350dfa4dcc7", Name: "WAN"},
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != expectedPath {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(zoneList)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+
+	_, err := getZoneID(context.Background(), c, site, "Internal")
+	if err == nil {
+		t.Fatal("expected error when zone name is absent from zone list")
+	}
+	if got := err.Error(); !strings.Contains(got, "not found") || !strings.Contains(got, "ZONE_PAIRS") {
 		t.Fatalf("unexpected error message: %q", got)
 	}
 }
