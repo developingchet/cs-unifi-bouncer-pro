@@ -472,6 +472,26 @@ func (pc *PanicController) ListZones(ctx context.Context, site string) ([]contro
 	return []controller.Zone{}, nil
 }
 
+func (pc *PanicController) ListTrafficMatchingLists(ctx context.Context, siteID string) ([]controller.TrafficMatchingList, error) {
+	return []controller.TrafficMatchingList{}, nil
+}
+
+func (pc *PanicController) CreateTrafficMatchingList(ctx context.Context, siteID string, list controller.TrafficMatchingList) (controller.TrafficMatchingList, error) {
+	panic("DryRun gate failed: CreateTrafficMatchingList called")
+}
+
+func (pc *PanicController) UpdateTrafficMatchingList(ctx context.Context, siteID string, list controller.TrafficMatchingList) error {
+	panic("DryRun gate failed: UpdateTrafficMatchingList called")
+}
+
+func (pc *PanicController) DeleteTrafficMatchingList(ctx context.Context, siteID, id string) error {
+	panic("DryRun gate failed: DeleteTrafficMatchingList called")
+}
+
+func (pc *PanicController) GetSiteID(ctx context.Context, siteName string) (string, error) {
+	return "", nil
+}
+
 func (pc *PanicController) HasFeature(ctx context.Context, site string, feature string) (bool, error) {
 	return false, nil
 }

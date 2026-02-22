@@ -38,6 +38,32 @@ func makeAPIResp(items ...interface{}) []byte {
 	return b
 }
 
+// makeBareArray encodes items as a bare JSON array (for v2 API responses).
+func makeBareArray(items ...interface{}) []byte {
+	data := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		b, err := json.Marshal(item)
+		if err != nil {
+			panic(fmt.Sprintf("makeBareArray: marshal failed: %v", err))
+		}
+		data = append(data, json.RawMessage(b))
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		panic(fmt.Sprintf("makeBareArray: marshal array failed: %v", err))
+	}
+	return b
+}
+
+// makeBareObject encodes an item as a bare JSON object (for v2 API single-object responses).
+func makeBareObject(item interface{}) []byte {
+	b, err := json.Marshal(item)
+	if err != nil {
+		panic(fmt.Sprintf("makeBareObject: marshal failed: %v", err))
+	}
+	return b
+}
+
 // ---- Firewall Groups -------------------------------------------------------
 
 func TestListFirewallGroups(t *testing.T) {
@@ -281,21 +307,23 @@ func TestCreateFirewallRule(t *testing.T) {
 // ---- Zone Policies ---------------------------------------------------------
 
 func TestListZonePolicies(t *testing.T) {
-	const site = "default"
-	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-policies", site)
+	const siteID = "site-uuid-123"
+	expectedPath := fmt.Sprintf("/v1/sites/%s/firewall/policies", siteID)
 
 	respBody := makeAPIResp(
-		apiPolicy{
+		apiV1Policy{
 			ID:        "p1",
 			Name:      "block-wan-in",
 			Enabled:   true,
-			Action:    "BLOCK",
-			IPVersion: "IPV4",
-			Source: apiPolicySource{
-				ZoneID:    "wan-zone-id",
-				IPGroupID: "grp1",
+			Action:    apiV1PolicyAction{Type: "BLOCK"},
+			IPProtocolScope: apiV1IPProtocolScope{IPVersion: "IPV4"},
+			Source: apiV1PolicySource{
+				ZoneID: "wan-zone-id",
+				TrafficFilter: apiV1TrafficFilter{
+					IPGroupIDs: []string{"grp1"},
+				},
 			},
-			Destination: apiPolicyDestination{
+			Destination: apiV1PolicyDestination{
 				ZoneID: "internal-zone-id",
 			},
 		},
@@ -313,7 +341,7 @@ func TestListZonePolicies(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(srv.URL, "api-key")
-	policies, err := listZonePolicies(context.Background(), c, site)
+	policies, err := listZonePolicies(context.Background(), c, siteID)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -330,27 +358,27 @@ func TestListZonePolicies(t *testing.T) {
 	if p.DstZone != "internal-zone-id" {
 		t.Errorf("expected DstZone=internal-zone-id, got %q", p.DstZone)
 	}
-	if len(p.MatchIPs) != 1 || p.MatchIPs[0].FirewallGroupID != "grp1" {
-		t.Errorf("unexpected MatchIPs: %+v", p.MatchIPs)
+	if len(p.TrafficMatchingListIDs) != 1 || p.TrafficMatchingListIDs[0] != "grp1" {
+		t.Errorf("unexpected TrafficMatchingListIDs: %+v", p.TrafficMatchingListIDs)
 	}
 }
 
 func TestCreateZonePolicy(t *testing.T) {
-	const site = "default"
-	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-policies", site)
+	const siteID = "site-uuid-456"
+	expectedPath := fmt.Sprintf("/v1/sites/%s/firewall/policies", siteID)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != expectedPath {
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
 		}
-		created := apiPolicy{
+		created := apiV1Policy{
 			ID:   "policy-abc",
 			Name: "block-wan",
-			Source: apiPolicySource{
+			Source: apiV1PolicySource{
 				ZoneID: "wan-zone-id",
 			},
-			Destination: apiPolicyDestination{
+			Destination: apiV1PolicyDestination{
 				ZoneID: "internal-zone-id",
 			},
 		}
@@ -363,7 +391,7 @@ func TestCreateZonePolicy(t *testing.T) {
 	c := newTestClient(srv.URL, "api-key")
 	input := ZonePolicy{Name: "block-wan", Action: "BLOCK", SrcZone: "wan-zone-id", DstZone: "internal-zone-id", IPVersion: "IPV4"}
 
-	got, err := createZonePolicy(context.Background(), c, site, input)
+	got, err := createZonePolicy(context.Background(), c, siteID, input)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}

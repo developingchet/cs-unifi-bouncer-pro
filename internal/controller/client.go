@@ -37,6 +37,7 @@ type unifiClient struct {
 	http         *http.Client
 	session      *sessionManager
 	featureCache map[string]map[string]bool // site -> feature -> bool
+	siteIDCache  map[string]string          // site name -> UUID
 	log          zerolog.Logger
 }
 
@@ -98,6 +99,7 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 		cfg:          cfg,
 		http:         httpClient,
 		featureCache: make(map[string]map[string]bool),
+		siteIDCache:  make(map[string]string),
 		log:          log,
 	}
 
@@ -287,29 +289,89 @@ func (c *unifiClient) DeleteFirewallRule(ctx context.Context, site string, id st
 // ---- Zone Policies ---------------------------------------------------------
 
 func (c *unifiClient) ListZonePolicies(ctx context.Context, site string) ([]ZonePolicy, error) {
-	return listZonePolicies(ctx, c, site)
+	siteID, err := c.GetSiteID(ctx, site)
+	if err != nil {
+		return nil, err
+	}
+	return listZonePolicies(ctx, c, siteID)
 }
 
 func (c *unifiClient) CreateZonePolicy(ctx context.Context, site string, p ZonePolicy) (ZonePolicy, error) {
-	return createZonePolicy(ctx, c, site, p)
+	siteID, err := c.GetSiteID(ctx, site)
+	if err != nil {
+		return ZonePolicy{}, err
+	}
+	return createZonePolicy(ctx, c, siteID, p)
 }
 
 func (c *unifiClient) UpdateZonePolicy(ctx context.Context, site string, p ZonePolicy) error {
-	return updateZonePolicy(ctx, c, site, p)
+	siteID, err := c.GetSiteID(ctx, site)
+	if err != nil {
+		return err
+	}
+	return updateZonePolicy(ctx, c, siteID, p)
 }
 
 func (c *unifiClient) DeleteZonePolicy(ctx context.Context, site string, id string) error {
-	return deleteZonePolicy(ctx, c, site, id)
+	siteID, err := c.GetSiteID(ctx, site)
+	if err != nil {
+		return err
+	}
+	return deleteZonePolicy(ctx, c, siteID, id)
 }
 
 func (c *unifiClient) ReorderZonePolicies(ctx context.Context, site string, req ZonePolicyReorderRequest) error {
-	return reorderZonePolicies(ctx, c, site, req)
+	siteID, err := c.GetSiteID(ctx, site)
+	if err != nil {
+		return err
+	}
+	return reorderZonePolicies(ctx, c, siteID, req)
 }
 
 // ---- Zones -----------------------------------------------------------------
 
 func (c *unifiClient) ListZones(ctx context.Context, site string) ([]Zone, error) {
 	return listZones(ctx, c, site)
+}
+
+// --- Traffic Matching Lists (v1 API) ----------------------------------------
+
+func (c *unifiClient) ListTrafficMatchingLists(ctx context.Context, site string) ([]TrafficMatchingList, error) {
+	siteID, err := c.GetSiteID(ctx, site)
+	if err != nil {
+		return nil, err
+	}
+	return listTrafficMatchingLists(ctx, c, siteID)
+}
+
+func (c *unifiClient) CreateTrafficMatchingList(ctx context.Context, site string, list TrafficMatchingList) (TrafficMatchingList, error) {
+	siteID, err := c.GetSiteID(ctx, site)
+	if err != nil {
+		return TrafficMatchingList{}, err
+	}
+	return createTrafficMatchingList(ctx, c, siteID, list)
+}
+
+func (c *unifiClient) UpdateTrafficMatchingList(ctx context.Context, site string, list TrafficMatchingList) error {
+	siteID, err := c.GetSiteID(ctx, site)
+	if err != nil {
+		return err
+	}
+	return updateTrafficMatchingList(ctx, c, siteID, list)
+}
+
+func (c *unifiClient) DeleteTrafficMatchingList(ctx context.Context, site, id string) error {
+	siteID, err := c.GetSiteID(ctx, site)
+	if err != nil {
+		return err
+	}
+	return deleteTrafficMatchingList(ctx, c, siteID, id)
+}
+
+// --- Site ID Resolution (v1 API) -------------------------------------------
+
+func (c *unifiClient) GetSiteID(ctx context.Context, siteName string) (string, error) {
+	return getSiteID(ctx, c, siteName)
 }
 
 // ---- Feature Detection -----------------------------------------------------

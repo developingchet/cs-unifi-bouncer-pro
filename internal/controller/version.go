@@ -127,3 +127,21 @@ func zonePolicyEndpoint(base, site string) string {
 func zoneEndpoint(base, site string) string {
 	return fmt.Sprintf("%s/proxy/network/api/s/%s/rest/firewallzone", base, site)
 }
+
+// v1 API endpoints (require siteID UUID, not site name)
+
+func v1SitesEndpoint(base string) string {
+	return fmt.Sprintf("%s/v1/sites", base)
+}
+
+func v1PolicyEndpoint(base, siteID string) string {
+	return fmt.Sprintf("%s/v1/sites/%s/firewall/policies", base, siteID)
+}
+
+func v1TMLEndpoint(base, siteID string) string {
+	return fmt.Sprintf("%s/v1/sites/%s/traffic-matching-lists", base, siteID)
+}
+
+func v1ZoneEndpoint(base, siteID string) string {
+	return fmt.Sprintf("%s/v1/sites/%s/firewall/zones", base, siteID)
+}

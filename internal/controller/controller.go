@@ -30,19 +30,21 @@ type FirewallRule struct {
 
 // ZonePolicy represents a UniFi zone-based firewall policy.
 type ZonePolicy struct {
-	ID          string
-	Name        string
-	Enabled     bool
-	Action      string // "BLOCK"
-	Description string
-	SrcZone     string
-	DstZone     string
-	IPVersion   string // "IPV4", "IPV6", "BOTH"
-	MatchIPs    []MatchSet
-	Predefined  bool // true for built-in policies managed by UniFi
+	ID                      string
+	Name                    string
+	Enabled                 bool
+	Action                  string   // "BLOCK"
+	Description             string
+	SrcZone                 string
+	DstZone                 string
+	IPVersion               string   // "IPV4", "IPV6", "BOTH"
+	TrafficMatchingListIDs  []string // v1 API: ipGroupIds in source.trafficFilter
+	Predefined              bool     // true for built-in policies managed by UniFi
+	ConnectionStateFilter   []string // e.g. ["NEW", "INVALID"]
 }
 
-// MatchSet references a firewall group within a policy.
+// MatchSet is deprecated; kept for backward compatibility.
+// Zone mode now uses TrafficMatchingListIDs instead.
 type MatchSet struct {
 	FirewallGroupID string
 	Negate          bool
@@ -60,6 +62,19 @@ type ZonePolicyReorderRequest struct {
 type Zone struct {
 	ID   string
 	Name string
+}
+
+// TrafficMatchingList is a v1 API Traffic Matching List (used in zone policies).
+type TrafficMatchingList struct {
+	ID    string                    `json:"id,omitempty"`
+	Type  string                    `json:"type"` // "IPV4_ADDRESSES" or "IPV6_ADDRESSES"
+	Name  string                    `json:"name"`
+	Items []TrafficMatchingListItem `json:"items"`
+}
+
+// TrafficMatchingListItem represents a single IP or CIDR in a Traffic Matching List.
+type TrafficMatchingListItem struct {
+	Value string `json:"value"` // IP or CIDR notation
 }
 
 // Controller is the UniFi API seam. All methods accept context for deadline control.
@@ -85,6 +100,15 @@ type Controller interface {
 
 	// Zones (read-only — topology discovery)
 	ListZones(ctx context.Context, site string) ([]Zone, error)
+
+	// Traffic Matching Lists (v1 API — zone mode only)
+	ListTrafficMatchingLists(ctx context.Context, siteID string) ([]TrafficMatchingList, error)
+	CreateTrafficMatchingList(ctx context.Context, siteID string, list TrafficMatchingList) (TrafficMatchingList, error)
+	UpdateTrafficMatchingList(ctx context.Context, siteID string, list TrafficMatchingList) error
+	DeleteTrafficMatchingList(ctx context.Context, siteID string, id string) error
+
+	// Site UUID resolution
+	GetSiteID(ctx context.Context, siteName string) (string, error)
 
 	// Feature Detection
 	HasFeature(ctx context.Context, site string, feature string) (bool, error)

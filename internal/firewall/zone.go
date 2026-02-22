@@ -128,17 +128,17 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 		}
 		firstCreate = false
 
+		// groupID is a Traffic Matching List ID in zone mode
 		policy := controller.ZonePolicy{
-			Name:        policyName,
-			Enabled:     true,
-			Action:      "BLOCK",
-			Description: zm.cfg.Description,
-			SrcZone:     srcZoneID,
-			DstZone:     dstZoneID,
-			IPVersion:   ipVersion,
-			MatchIPs: []controller.MatchSet{
-				{FirewallGroupID: groupID, Negate: false},
-			},
+			Name:                    policyName,
+			Enabled:                 true,
+			Action:                  "BLOCK",
+			Description:             zm.cfg.Description,
+			SrcZone:                 srcZoneID,
+			DstZone:                 dstZoneID,
+			IPVersion:               ipVersion,
+			TrafficMatchingListIDs:  []string{groupID},
+			ConnectionStateFilter:   zm.cfg.ZoneConnectionStates,
 		}
 
 		created, err := zm.ctrl.CreateZonePolicy(ctx, site, policy)
@@ -229,16 +229,15 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 		dstZoneID := zoneMap[pair.Dst]
 
 		policy := controller.ZonePolicy{
-			Name:        policyName,
-			Enabled:     true,
-			Action:      "BLOCK",
-			Description: zm.cfg.Description,
-			SrcZone:     srcZoneID,
-			DstZone:     dstZoneID,
-			IPVersion:   ipVersion,
-			MatchIPs: []controller.MatchSet{
-				{FirewallGroupID: groupID, Negate: false},
-			},
+			Name:                    policyName,
+			Enabled:                 true,
+			Action:                  "BLOCK",
+			Description:             zm.cfg.Description,
+			SrcZone:                 srcZoneID,
+			DstZone:                 dstZoneID,
+			IPVersion:               ipVersion,
+			TrafficMatchingListIDs:  []string{groupID},
+			ConnectionStateFilter:   zm.cfg.ZoneConnectionStates,
 		}
 
 		created, err := zm.ctrl.CreateZonePolicy(ctx, site, policy)
@@ -385,7 +384,7 @@ func (zm *ZoneManager) DeletePolicies(ctx context.Context, site string) error {
 	return nil
 }
 
-// UpdateGroupReference updates zone policies that reference an old group ID with a new one.
+// UpdateGroupReference updates zone policies that reference an old Traffic Matching List ID with a new one.
 func (zm *ZoneManager) UpdateGroupReference(ctx context.Context, site, oldGroupID, newGroupID string) error {
 	policies, err := zm.ctrl.ListZonePolicies(ctx, site)
 	if err != nil {
@@ -393,9 +392,9 @@ func (zm *ZoneManager) UpdateGroupReference(ctx context.Context, site, oldGroupI
 	}
 	for _, p := range policies {
 		needsUpdate := false
-		for i, m := range p.MatchIPs {
-			if m.FirewallGroupID == oldGroupID {
-				p.MatchIPs[i].FirewallGroupID = newGroupID
+		for i, id := range p.TrafficMatchingListIDs {
+			if id == oldGroupID {
+				p.TrafficMatchingListIDs[i] = newGroupID
 				needsUpdate = true
 			}
 		}

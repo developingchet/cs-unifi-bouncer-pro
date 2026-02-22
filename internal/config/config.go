@@ -179,7 +179,7 @@ func defaults() map[string]interface{} {
 		"firewall_enable_ipv6":        true,
 		"enable_ipv6":                 false,
 		"firewall_group_capacity":     10000,
-		"firewall_batch_window":       "500ms",
+		"firewall_batch_window":       "10s",
 		"firewall_api_shard_delay":    "250ms",
 		"firewall_flush_concurrency":  1,
 		"firewall_reconcile_on_start": true,

@@ -33,7 +33,7 @@ type apiRule struct {
 type apiPolicySource struct {
 	ZoneID             string `json:"zone_id"`
 	IPGroupID          string `json:"ip_group_id,omitempty"`
-	MatchingTarget     string `json:"matching_target,omitempty"` // "ANY" or "IP"
+	MatchingTarget     string `json:"matching_target,omitempty"`      // "ANY" or "IP"
 	MatchingTargetType string `json:"matching_target_type,omitempty"` // "ANY" or "OBJECT"
 	MatchOppositeIPs   bool   `json:"match_opposite_ips"`
 }
@@ -57,6 +57,63 @@ type apiPolicy struct {
 
 type apiZone struct {
 	ID   string `json:"_id"`
+	Name string `json:"name"`
+}
+
+// v1 API wire types
+
+type apiSite struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type apiTrafficMatchingListItem struct {
+	Value string `json:"value"`
+}
+
+type apiTrafficMatchingList struct {
+	ID    string                       `json:"id,omitempty"`
+	Type  string                       `json:"type"`
+	Name  string                       `json:"name"`
+	Items []apiTrafficMatchingListItem `json:"items"`
+}
+
+type apiV1TrafficFilter struct {
+	IPGroupIDs []string `json:"ipGroupIds,omitempty"`
+}
+
+type apiV1PolicySource struct {
+	ZoneID        string             `json:"zoneId"`
+	TrafficFilter apiV1TrafficFilter `json:"trafficFilter"`
+}
+
+type apiV1PolicyDestination struct {
+	ZoneID        string             `json:"zoneId"`
+	TrafficFilter apiV1TrafficFilter `json:"trafficFilter"`
+}
+
+type apiV1PolicyAction struct {
+	Type string `json:"type"`
+}
+
+type apiV1IPProtocolScope struct {
+	IPVersion string `json:"ipVersion"`
+}
+
+type apiV1Policy struct {
+	ID                   string                 `json:"id,omitempty"`
+	Name                 string                 `json:"name,omitempty"`
+	Enabled              bool                   `json:"enabled"`
+	Action               apiV1PolicyAction      `json:"action"`
+	Source               apiV1PolicySource      `json:"source"`
+	Destination          apiV1PolicyDestination `json:"destination"`
+	IPProtocolScope      apiV1IPProtocolScope   `json:"ipProtocolScope"`
+	ConnectionStateFilter []string              `json:"connectionStateFilter"`
+	LoggingEnabled       bool                   `json:"loggingEnabled"`
+}
+
+type apiV1Zone struct {
+	ID   string `json:"id"`
 	Name string `json:"name"`
 }
 
@@ -106,6 +163,49 @@ func doPOST(ctx context.Context, c *unifiClient, url, endpoint string, payload i
 		}
 		if len(body.Data) > 0 {
 			result = body.Data[0]
+		}
+		return nil
+	})
+}
+
+func doGETv2(ctx context.Context, c *unifiClient, url, endpoint string) ([]json.RawMessage, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	var result []json.RawMessage
+	return result, c.withReauth(ctx, func() error {
+		resp, err := c.apiDo(ctx, req, endpoint)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("decode response: %w", err)
+		}
+		return nil
+	})
+}
+
+func doPOSTv2(ctx context.Context, c *unifiClient, url, endpoint string, payload interface{}) (json.RawMessage, error) {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	var result json.RawMessage
+	return result, c.withReauth(ctx, func() error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := c.apiDo(ctx, req, endpoint)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("decode response: %w", err)
 		}
 		return nil
 	})
@@ -276,122 +376,271 @@ func deleteFirewallRule(ctx context.Context, c *unifiClient, site, id string) er
 	return doDELETE(ctx, c, url, "delete-rule")
 }
 
-// --- Zone Policies ----------------------------------------------------------
+// --- Zone Policies (v1 API) -------------------------------------------------
 
-func listZonePolicies(ctx context.Context, c *unifiClient, site string) ([]ZonePolicy, error) {
-	data, err := doGET(ctx, c, zonePolicyEndpoint(c.cfg.BaseURL, site), "list-policies")
+// listZonePolicies fetches all zone policies from the v1 API.
+// The siteID parameter must be a UUID (not a site name).
+func listZonePolicies(ctx context.Context, c *unifiClient, siteID string) ([]ZonePolicy, error) {
+	data, err := doGET(ctx, c, v1PolicyEndpoint(c.cfg.BaseURL, siteID), "list-policies")
 	if err != nil {
 		return nil, err
 	}
 	policies := make([]ZonePolicy, 0, len(data))
 	for _, raw := range data {
-		var p apiPolicy
+		var p apiV1Policy
 		if err := json.Unmarshal(raw, &p); err != nil {
 			continue
 		}
-		var matchSets []MatchSet
-		if p.Source.IPGroupID != "" {
-			matchSets = []MatchSet{{
-				FirewallGroupID: p.Source.IPGroupID,
-				Negate:          p.Source.MatchOppositeIPs,
-			}}
-		}
 		policies = append(policies, ZonePolicy{
-			ID:          p.ID,
-			Name:        p.Name,
-			Enabled:     p.Enabled,
-			Action:      p.Action,
-			Description: p.Description,
-			SrcZone:     p.Source.ZoneID,
-			DstZone:     p.Destination.ZoneID,
-			IPVersion:   p.IPVersion,
-			MatchIPs:    matchSets,
-			Predefined:  p.Predefined,
+			ID:                     p.ID,
+			Name:                   p.Name,
+			Enabled:                p.Enabled,
+			Action:                 p.Action.Type,
+			Description:            "",
+			SrcZone:                p.Source.ZoneID,
+			DstZone:                p.Destination.ZoneID,
+			IPVersion:              p.IPProtocolScope.IPVersion,
+			TrafficMatchingListIDs: p.Source.TrafficFilter.IPGroupIDs,
+			Predefined:             false,
+			ConnectionStateFilter:  p.ConnectionStateFilter,
 		})
 	}
 	return policies, nil
 }
 
-func createZonePolicy(ctx context.Context, c *unifiClient, site string, p ZonePolicy) (ZonePolicy, error) {
-	src := apiPolicySource{
-		ZoneID: p.SrcZone,
-	}
-	if len(p.MatchIPs) > 0 {
-		src.IPGroupID = p.MatchIPs[0].FirewallGroupID
-		src.MatchOppositeIPs = p.MatchIPs[0].Negate
-		if src.IPGroupID != "" {
-			src.MatchingTarget = "IP"
-			src.MatchingTargetType = "OBJECT"
-		}
-	} else {
-		src.MatchingTarget = "ANY"
-	}
-	payload := apiPolicy{
-		Name:        p.Name,
-		Enabled:     p.Enabled,
-		Action:      p.Action,
-		Description: p.Description,
-		IPVersion:   p.IPVersion,
-		Source:      src,
-		Destination: apiPolicyDestination{
-			ZoneID:         p.DstZone,
-			MatchingTarget: "ANY",
+// createZonePolicy creates a new zone policy via the v1 API.
+// The siteID parameter must be a UUID (not a site name).
+func createZonePolicy(ctx context.Context, c *unifiClient, siteID string, p ZonePolicy) (ZonePolicy, error) {
+	payload := apiV1Policy{
+		Name:    p.Name,
+		Enabled: p.Enabled,
+		Action: apiV1PolicyAction{
+			Type: p.Action,
 		},
+		Source: apiV1PolicySource{
+			ZoneID: p.SrcZone,
+			TrafficFilter: apiV1TrafficFilter{
+				IPGroupIDs: p.TrafficMatchingListIDs,
+			},
+		},
+		Destination: apiV1PolicyDestination{
+			ZoneID: p.DstZone,
+			TrafficFilter: apiV1TrafficFilter{
+				IPGroupIDs: nil,
+			},
+		},
+		IPProtocolScope: apiV1IPProtocolScope{
+			IPVersion: p.IPVersion,
+		},
+		ConnectionStateFilter: p.ConnectionStateFilter,
+		LoggingEnabled:        false,
 	}
-	raw, err := doPOST(ctx, c, zonePolicyEndpoint(c.cfg.BaseURL, site), "create-policy", payload)
+	raw, err := doPOST(ctx, c, v1PolicyEndpoint(c.cfg.BaseURL, siteID), "create-policy", payload)
 	if err != nil {
 		return ZonePolicy{}, err
 	}
-	var created apiPolicy
+	var created apiV1Policy
 	if err := json.Unmarshal(raw, &created); err != nil {
 		return ZonePolicy{}, err
 	}
-	return ZonePolicy{ID: created.ID, Name: created.Name, SrcZone: created.Source.ZoneID, DstZone: created.Destination.ZoneID}, nil
+	return ZonePolicy{
+		ID:                     created.ID,
+		Name:                   created.Name,
+		Enabled:                created.Enabled,
+		Action:                 created.Action.Type,
+		SrcZone:                created.Source.ZoneID,
+		DstZone:                created.Destination.ZoneID,
+		IPVersion:              created.IPProtocolScope.IPVersion,
+		TrafficMatchingListIDs: created.Source.TrafficFilter.IPGroupIDs,
+		ConnectionStateFilter:  created.ConnectionStateFilter,
+	}, nil
 }
 
-func updateZonePolicy(ctx context.Context, c *unifiClient, site string, p ZonePolicy) error {
-	src := apiPolicySource{
-		ZoneID: p.SrcZone,
-	}
-	if len(p.MatchIPs) > 0 {
-		src.IPGroupID = p.MatchIPs[0].FirewallGroupID
-		src.MatchOppositeIPs = p.MatchIPs[0].Negate
-		if src.IPGroupID != "" {
-			src.MatchingTarget = "IP"
-			src.MatchingTargetType = "OBJECT"
-		}
-	} else {
-		src.MatchingTarget = "ANY"
-	}
-	payload := apiPolicy{
-		ID:          p.ID,
-		Name:        p.Name,
-		Enabled:     p.Enabled,
-		Action:      p.Action,
-		Description: p.Description,
-		IPVersion:   p.IPVersion,
-		Source:      src,
-		Destination: apiPolicyDestination{
-			ZoneID:         p.DstZone,
-			MatchingTarget: "ANY",
+// updateZonePolicy updates an existing zone policy via the v1 API.
+// The siteID parameter must be a UUID (not a site name).
+func updateZonePolicy(ctx context.Context, c *unifiClient, siteID string, p ZonePolicy) error {
+	payload := apiV1Policy{
+		ID:      p.ID,
+		Name:    p.Name,
+		Enabled: p.Enabled,
+		Action: apiV1PolicyAction{
+			Type: p.Action,
 		},
+		Source: apiV1PolicySource{
+			ZoneID: p.SrcZone,
+			TrafficFilter: apiV1TrafficFilter{
+				IPGroupIDs: p.TrafficMatchingListIDs,
+			},
+		},
+		Destination: apiV1PolicyDestination{
+			ZoneID: p.DstZone,
+			TrafficFilter: apiV1TrafficFilter{
+				IPGroupIDs: nil,
+			},
+		},
+		IPProtocolScope: apiV1IPProtocolScope{
+			IPVersion: p.IPVersion,
+		},
+		ConnectionStateFilter: p.ConnectionStateFilter,
+		LoggingEnabled:        false,
 	}
-	url := zonePolicyEndpoint(c.cfg.BaseURL, site) + "/" + p.ID
+	url := v1PolicyEndpoint(c.cfg.BaseURL, siteID) + "/" + p.ID
 	return doPUT(ctx, c, url, "update-policy", payload)
 }
 
-func deleteZonePolicy(ctx context.Context, c *unifiClient, site, id string) error {
-	url := zonePolicyEndpoint(c.cfg.BaseURL, site) + "/" + id
+// deleteZonePolicy deletes a zone policy via the v1 API.
+// The siteID parameter must be a UUID (not a site name).
+func deleteZonePolicy(ctx context.Context, c *unifiClient, siteID, id string) error {
+	url := v1PolicyEndpoint(c.cfg.BaseURL, siteID) + "/" + id
 	return doDELETE(ctx, c, url, "delete-policy")
 }
 
-func reorderZonePolicies(ctx context.Context, c *unifiClient, site string, req ZonePolicyReorderRequest) error {
-	url := zonePolicyEndpoint(c.cfg.BaseURL, site) + "/batch-reorder"
+// --- Traffic Matching Lists (v1 API) -----------------------------------------
+
+// listTrafficMatchingLists fetches all traffic matching lists from the v1 API.
+// The siteID parameter must be a UUID (not a site name).
+func listTrafficMatchingLists(ctx context.Context, c *unifiClient, siteID string) ([]TrafficMatchingList, error) {
+	data, err := doGET(ctx, c, v1TMLEndpoint(c.cfg.BaseURL, siteID), "list-traffic-matching-lists")
+	if err != nil {
+		return nil, err
+	}
+	lists := make([]TrafficMatchingList, 0, len(data))
+	for _, raw := range data {
+		var tml apiTrafficMatchingList
+		if err := json.Unmarshal(raw, &tml); err != nil {
+			continue
+		}
+		items := make([]TrafficMatchingListItem, 0, len(tml.Items))
+		for _, item := range tml.Items {
+			items = append(items, TrafficMatchingListItem{Value: item.Value})
+		}
+		lists = append(lists, TrafficMatchingList{
+			ID:    tml.ID,
+			Type:  tml.Type,
+			Name:  tml.Name,
+			Items: items,
+		})
+	}
+	return lists, nil
+}
+
+// createTrafficMatchingList creates a new traffic matching list via the v1 API.
+// The siteID parameter must be a UUID (not a site name).
+func createTrafficMatchingList(ctx context.Context, c *unifiClient, siteID string, list TrafficMatchingList) (TrafficMatchingList, error) {
+	items := make([]apiTrafficMatchingListItem, 0, len(list.Items))
+	for _, item := range list.Items {
+		items = append(items, apiTrafficMatchingListItem{Value: item.Value})
+	}
+	payload := apiTrafficMatchingList{
+		Type:  list.Type,
+		Name:  list.Name,
+		Items: items,
+	}
+	raw, err := doPOST(ctx, c, v1TMLEndpoint(c.cfg.BaseURL, siteID), "create-traffic-matching-list", payload)
+	if err != nil {
+		return TrafficMatchingList{}, err
+	}
+	var created apiTrafficMatchingList
+	if err := json.Unmarshal(raw, &created); err != nil {
+		return TrafficMatchingList{}, err
+	}
+	outItems := make([]TrafficMatchingListItem, 0, len(created.Items))
+	for _, item := range created.Items {
+		outItems = append(outItems, TrafficMatchingListItem{Value: item.Value})
+	}
+	return TrafficMatchingList{
+		ID:    created.ID,
+		Type:  created.Type,
+		Name:  created.Name,
+		Items: outItems,
+	}, nil
+}
+
+// updateTrafficMatchingList updates an existing traffic matching list via the v1 API.
+// The siteID parameter must be a UUID (not a site name).
+func updateTrafficMatchingList(ctx context.Context, c *unifiClient, siteID string, list TrafficMatchingList) error {
+	items := make([]apiTrafficMatchingListItem, 0, len(list.Items))
+	for _, item := range list.Items {
+		items = append(items, apiTrafficMatchingListItem{Value: item.Value})
+	}
+	payload := apiTrafficMatchingList{
+		ID:    list.ID,
+		Type:  list.Type,
+		Name:  list.Name,
+		Items: items,
+	}
+	url := v1TMLEndpoint(c.cfg.BaseURL, siteID) + "/" + list.ID
+	return doPUT(ctx, c, url, "update-traffic-matching-list", payload)
+}
+
+// deleteTrafficMatchingList deletes a traffic matching list via the v1 API.
+// The siteID parameter must be a UUID (not a site name).
+func deleteTrafficMatchingList(ctx context.Context, c *unifiClient, siteID, id string) error {
+	url := v1TMLEndpoint(c.cfg.BaseURL, siteID) + "/" + id
+	return doDELETE(ctx, c, url, "delete-traffic-matching-list")
+}
+
+// --- Zones (v1 API) ----------------------------------------------------------
+
+// listZonesV1 fetches all zones from the v1 API.
+// The siteID parameter must be a UUID (not a site name).
+func listZonesV1(ctx context.Context, c *unifiClient, siteID string) ([]Zone, error) {
+	data, err := doGET(ctx, c, v1ZoneEndpoint(c.cfg.BaseURL, siteID), "list-zones-v1")
+	if err != nil {
+		return nil, err
+	}
+	zones := make([]Zone, 0, len(data))
+	for _, raw := range data {
+		var z apiV1Zone
+		if err := json.Unmarshal(raw, &z); err != nil {
+			continue
+		}
+		zones = append(zones, Zone{ID: z.ID, Name: z.Name})
+	}
+	return zones, nil
+}
+
+// --- Site ID Resolution (v1 API) --------------------------------------------
+
+// getSiteID resolves a site name to its UUID via the v1 API.
+// Results are cached in the unifiClient to avoid repeated API calls.
+func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, error) {
+	// Check cache
+	if id, ok := c.siteIDCache[siteName]; ok {
+		return id, nil
+	}
+
+	// Fetch all sites
+	data, err := doGET(ctx, c, v1SitesEndpoint(c.cfg.BaseURL), "get-site-id")
+	if err != nil {
+		return "", err
+	}
+
+	// Find matching site by name
+	for _, raw := range data {
+		var site apiSite
+		if err := json.Unmarshal(raw, &site); err != nil {
+			continue
+		}
+		if site.Name == siteName {
+			// Cache and return
+			c.siteIDCache[siteName] = site.ID
+			return site.ID, nil
+		}
+	}
+
+	return "", fmt.Errorf("site %q not found", siteName)
+}
+
+// reorderZonePolicies reorders zone policies via the v1 API.
+// The siteID parameter must be a UUID (not a site name).
+func reorderZonePolicies(ctx context.Context, c *unifiClient, siteID string, req ZonePolicyReorderRequest) error {
+	url := v1PolicyEndpoint(c.cfg.BaseURL, siteID) + "/batch-reorder"
 	payload := map[string]interface{}{
 		"source_zone_id":        req.SourceZoneID,
 		"destination_zone_id":   req.DestinationZoneID,
-		"before_predefined_ids":  req.BeforePredefinedIDs,
-		"after_predefined_ids":   req.AfterPredefinedIDs,
+		"before_predefined_ids": req.BeforePredefinedIDs,
+		"after_predefined_ids":  req.AfterPredefinedIDs,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -412,7 +661,7 @@ func reorderZonePolicies(ctx context.Context, c *unifiClient, site string, req Z
 	})
 }
 
-// --- Zones ------------------------------------------------------------------
+// --- Zones (legacy REST API) ------------------------------------------------
 
 func listZones(ctx context.Context, c *unifiClient, site string) ([]Zone, error) {
 	data, err := doGET(ctx, c, zoneEndpoint(c.cfg.BaseURL, site), "list-zones")
@@ -429,3 +678,4 @@ func listZones(ctx context.Context, c *unifiClient, site string) ([]Zone, error)
 	}
 	return zones, nil
 }
+
