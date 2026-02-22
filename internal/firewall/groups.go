@@ -69,10 +69,7 @@ func NewShardManager(site string, ipv6 bool, capacity int, namer *Namer,
 }
 
 func (sm *ShardManager) shardObjectKind() string {
-	if sm.mode == "zone" {
-		return "traffic matching list shard"
-	}
-	return "firewall group shard"
+	return "firewall group"
 }
 
 // EnsureShards bootstraps group shards: loads from bbolt cache, then reconciles with API.

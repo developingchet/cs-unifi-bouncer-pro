@@ -44,68 +44,10 @@ type ZonePolicy struct {
 	LoggingEnabled         bool
 }
 
-// MatchSet is deprecated; kept for backward compatibility.
-// Zone mode now uses TrafficMatchingListIDs instead.
-type MatchSet struct {
-	FirewallGroupID string
-	Negate          bool
-}
-
-// ZonePolicyReorderRequest specifies how to reorder zone policies for a specific zone pair.
-type ZonePolicyReorderRequest struct {
-	SourceZoneID           string
-	DestinationZoneID      string
-	BeforeSystemDefinedIDs []string // policy IDs evaluated before system-defined policies
-	AfterSystemDefinedIDs  []string // policy IDs evaluated after system-defined policies
-}
-
 // Zone represents a UniFi network zone (topology discovery).
 type Zone struct {
 	ID   string
 	Name string
-}
-
-// TrafficMatchingList is a v1 API Traffic Matching List (used in zone policies).
-type TrafficMatchingList struct {
-	ID    string                    `json:"id,omitempty"`
-	Type  string                    `json:"type"` // "IPV4_ADDRESSES" or "IPV6_ADDRESSES"
-	Name  string                    `json:"name"`
-	Items []TrafficMatchingListItem `json:"items"`
-}
-
-// TrafficMatchingListItem represents a single IP or CIDR in a Traffic Matching List.
-type TrafficMatchingListItem struct {
-	Value string `json:"value"` // IP or CIDR notation
-}
-
-// ZonePolicyPayload mirrors the official v1 API payload for create/update.
-type ZonePolicyPayload struct {
-	Enabled               bool               `json:"enabled"`
-	Name                  string             `json:"name"`
-	Description           string             `json:"description,omitempty"`
-	Action                ZonePolicyAction   `json:"action"`
-	Source                ZonePolicyEndpoint `json:"source"`
-	Destination           ZonePolicyEndpoint `json:"destination"`
-	IPProtocolScope       ZonePolicyIPScope  `json:"ipProtocolScope"`
-	ConnectionStateFilter []string           `json:"connectionStateFilter,omitempty"`
-	LoggingEnabled        bool               `json:"loggingEnabled"`
-}
-
-type ZonePolicyAction struct {
-	Type string `json:"type"` // "BLOCK" or "ALLOW"
-}
-
-type ZonePolicyEndpoint struct {
-	ZoneID        string             `json:"zoneId"`
-	TrafficFilter ZonePolicyTMFilter `json:"trafficFilter"`
-}
-
-type ZonePolicyTMFilter struct {
-	IPGroupIDs []string `json:"ipGroupIds,omitempty"`
-}
-
-type ZonePolicyIPScope struct {
-	IPVersion string `json:"ipVersion"` // "IPV4", "IPV6", or "BOTH"
 }
 
 // Controller is the UniFi API seam. All methods accept context for deadline control.
@@ -127,20 +69,9 @@ type Controller interface {
 	CreateZonePolicy(ctx context.Context, site string, p ZonePolicy) (ZonePolicy, error)
 	UpdateZonePolicy(ctx context.Context, site string, p ZonePolicy) error
 	DeleteZonePolicy(ctx context.Context, site string, id string) error
-	ReorderZonePolicies(ctx context.Context, site string, req ZonePolicyReorderRequest) error
 
-	// Zones (read-only - topology discovery)
-	ListZones(ctx context.Context, site string) ([]Zone, error)
+	// Zones
 	GetZoneID(ctx context.Context, site, zoneName string) (string, error)
-
-	// Traffic Matching Lists (legacy v1 API compatibility)
-	ListTrafficMatchingLists(ctx context.Context, site string) ([]TrafficMatchingList, error)
-	CreateTrafficMatchingList(ctx context.Context, site string, list TrafficMatchingList) (TrafficMatchingList, error)
-	UpdateTrafficMatchingList(ctx context.Context, site string, list TrafficMatchingList) error
-	DeleteTrafficMatchingList(ctx context.Context, site string, id string) error
-
-	// Site UUID resolution
-	GetSiteID(ctx context.Context, siteName string) (string, error)
 
 	// Feature Detection
 	HasFeature(ctx context.Context, site string, feature string) (bool, error)

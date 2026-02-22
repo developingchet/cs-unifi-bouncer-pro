@@ -18,10 +18,6 @@ type MockController struct {
 	rules    map[string][]controller.FirewallRule
 	policies map[string][]controller.ZonePolicy
 	zones    map[string][]controller.Zone
-	tmls     map[string][]controller.TrafficMatchingList
-
-	// Preset site ID mappings
-	siteIDs map[string]string
 
 	// Preset feature detection results per site
 	features map[string]map[string]bool
@@ -43,8 +39,6 @@ func NewMockController() *MockController {
 		rules:    make(map[string][]controller.FirewallRule),
 		policies: make(map[string][]controller.ZonePolicy),
 		zones:    make(map[string][]controller.Zone),
-		tmls:     make(map[string][]controller.TrafficMatchingList),
-		siteIDs:  make(map[string]string),
 		features: make(map[string]map[string]bool),
 		errors:   make(map[string]error),
 		calls:    make(map[string]int),
@@ -77,13 +71,6 @@ func (m *MockController) SetZones(site string, zones []controller.Zone) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.zones[site] = zones
-}
-
-// SetSiteID presets a site-name to site-ID mapping.
-func (m *MockController) SetSiteID(siteName, siteID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.siteIDs[siteName] = siteID
 }
 
 // SetHasFeature presets the feature detection result for a site/feature pair.
@@ -290,23 +277,6 @@ func (m *MockController) DeleteZonePolicy(ctx context.Context, site string, id s
 	return nil
 }
 
-func (m *MockController) ReorderZonePolicies(ctx context.Context, site string, req controller.ZonePolicyReorderRequest) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.calls["ReorderZonePolicies"]++
-	return m.popError("ReorderZonePolicies")
-}
-
-func (m *MockController) ListZones(ctx context.Context, site string) ([]controller.Zone, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.calls["ListZones"]++
-	if err := m.popError("ListZones"); err != nil {
-		return nil, err
-	}
-	return append([]controller.Zone{}, m.zones[site]...), nil
-}
-
 func (m *MockController) GetZoneID(ctx context.Context, siteID, zoneName string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -316,15 +286,6 @@ func (m *MockController) GetZoneID(ctx context.Context, siteID, zoneName string)
 	}
 
 	zones := m.zones[siteID]
-	if len(zones) == 0 {
-		for siteName, id := range m.siteIDs {
-			if id == siteID {
-				zones = m.zones[siteName]
-				break
-			}
-		}
-	}
-
 	for _, z := range zones {
 		if z.Name == zoneName || z.ID == zoneName {
 			return z.ID, nil
@@ -347,82 +308,6 @@ func (m *MockController) HasFeature(ctx context.Context, site string, feature st
 		}
 	}
 	return false, nil
-}
-
-// ListTrafficMatchingLists returns the preset traffic matching lists for a site.
-func (m *MockController) ListTrafficMatchingLists(ctx context.Context, siteID string) ([]controller.TrafficMatchingList, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.calls["ListTrafficMatchingLists"]++
-	if err := m.popError("ListTrafficMatchingLists"); err != nil {
-		return nil, err
-	}
-	return append([]controller.TrafficMatchingList{}, m.tmls[siteID]...), nil
-}
-
-// CreateTrafficMatchingList creates and stores a traffic matching list, returning the created list with an ID.
-func (m *MockController) CreateTrafficMatchingList(ctx context.Context, siteID string, list controller.TrafficMatchingList) (controller.TrafficMatchingList, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.calls["CreateTrafficMatchingList"]++
-	if err := m.popError("CreateTrafficMatchingList"); err != nil {
-		return controller.TrafficMatchingList{}, err
-	}
-	m.nextID++
-	list.ID = fmt.Sprintf("mock-tml-id-%d", m.nextID)
-	m.tmls[siteID] = append(m.tmls[siteID], list)
-	return list, nil
-}
-
-// UpdateTrafficMatchingList updates a traffic matching list (modifies in-place).
-func (m *MockController) UpdateTrafficMatchingList(ctx context.Context, siteID string, list controller.TrafficMatchingList) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.calls["UpdateTrafficMatchingList"]++
-	if err := m.popError("UpdateTrafficMatchingList"); err != nil {
-		return err
-	}
-	tmls := m.tmls[siteID]
-	for i, tml := range tmls {
-		if tml.ID == list.ID {
-			tmls[i] = list
-			return nil
-		}
-	}
-	return nil
-}
-
-// DeleteTrafficMatchingList deletes a traffic matching list by ID.
-func (m *MockController) DeleteTrafficMatchingList(ctx context.Context, siteID, id string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.calls["DeleteTrafficMatchingList"]++
-	if err := m.popError("DeleteTrafficMatchingList"); err != nil {
-		return err
-	}
-	tmls := m.tmls[siteID]
-	for i, tml := range tmls {
-		if tml.ID == id {
-			m.tmls[siteID] = append(tmls[:i], tmls[i+1:]...)
-			return nil
-		}
-	}
-	return nil
-}
-
-// GetSiteID returns the preset site ID for a site name, or an error if not found.
-func (m *MockController) GetSiteID(ctx context.Context, siteName string) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.calls["GetSiteID"]++
-	if err := m.popError("GetSiteID"); err != nil {
-		return "", err
-	}
-	if id, ok := m.siteIDs[siteName]; ok {
-		return id, nil
-	}
-	// Default fallback for tests that do not care about UUID conversion.
-	return siteName, nil
 }
 
 func (m *MockController) Ping(ctx context.Context) error {

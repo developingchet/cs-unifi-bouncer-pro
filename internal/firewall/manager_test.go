@@ -464,36 +464,8 @@ func (pc *PanicController) DeleteZonePolicy(ctx context.Context, site string, id
 	panic("DryRun gate failed: DeleteZonePolicy called")
 }
 
-func (pc *PanicController) ReorderZonePolicies(ctx context.Context, site string, req controller.ZonePolicyReorderRequest) error {
-	panic("DryRun gate failed: ReorderZonePolicies called")
-}
-
-func (pc *PanicController) ListZones(ctx context.Context, site string) ([]controller.Zone, error) {
-	return []controller.Zone{}, nil
-}
-
 func (pc *PanicController) GetZoneID(ctx context.Context, siteID, zoneName string) (string, error) {
 	return zoneName, nil
-}
-
-func (pc *PanicController) ListTrafficMatchingLists(ctx context.Context, siteID string) ([]controller.TrafficMatchingList, error) {
-	return []controller.TrafficMatchingList{}, nil
-}
-
-func (pc *PanicController) CreateTrafficMatchingList(ctx context.Context, siteID string, list controller.TrafficMatchingList) (controller.TrafficMatchingList, error) {
-	panic("DryRun gate failed: CreateTrafficMatchingList called")
-}
-
-func (pc *PanicController) UpdateTrafficMatchingList(ctx context.Context, siteID string, list controller.TrafficMatchingList) error {
-	panic("DryRun gate failed: UpdateTrafficMatchingList called")
-}
-
-func (pc *PanicController) DeleteTrafficMatchingList(ctx context.Context, siteID, id string) error {
-	panic("DryRun gate failed: DeleteTrafficMatchingList called")
-}
-
-func (pc *PanicController) GetSiteID(ctx context.Context, siteName string) (string, error) {
-	return "", nil
 }
 
 func (pc *PanicController) HasFeature(ctx context.Context, site string, feature string) (bool, error) {

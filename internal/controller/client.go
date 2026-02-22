@@ -39,7 +39,6 @@ type unifiClient struct {
 	session      *sessionManager
 	featureCache map[string]map[string]bool // site -> feature -> bool
 	cacheMu      sync.RWMutex
-	siteIDCache  map[string]string            // site name -> UUID
 	zoneIDCache  map[string]map[string]string // site key -> zone input -> zone UUID
 	log          zerolog.Logger
 }
@@ -102,7 +101,6 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 		cfg:          cfg,
 		http:         httpClient,
 		featureCache: make(map[string]map[string]bool),
-		siteIDCache:  make(map[string]string),
 		zoneIDCache:  make(map[string]map[string]string),
 		log:          log,
 	}
@@ -308,58 +306,8 @@ func (c *unifiClient) DeleteZonePolicy(ctx context.Context, site string, id stri
 	return deleteZonePolicy(ctx, c, site, id)
 }
 
-func (c *unifiClient) ReorderZonePolicies(ctx context.Context, site string, req ZonePolicyReorderRequest) error {
-	return reorderZonePolicies(ctx, c, site, req)
-}
-
-// ---- Zones -----------------------------------------------------------------
-
-func (c *unifiClient) ListZones(ctx context.Context, site string) ([]Zone, error) {
-	return listZonesV1(ctx, c, site)
-}
-
 func (c *unifiClient) GetZoneID(ctx context.Context, site, zoneName string) (string, error) {
 	return getZoneID(ctx, c, site, zoneName)
-}
-
-// --- Traffic Matching Lists (v1 API) ----------------------------------------
-
-func (c *unifiClient) ListTrafficMatchingLists(ctx context.Context, site string) ([]TrafficMatchingList, error) {
-	siteID, err := c.GetSiteID(ctx, site)
-	if err != nil {
-		return nil, err
-	}
-	return listTrafficMatchingLists(ctx, c, siteID)
-}
-
-func (c *unifiClient) CreateTrafficMatchingList(ctx context.Context, site string, list TrafficMatchingList) (TrafficMatchingList, error) {
-	siteID, err := c.GetSiteID(ctx, site)
-	if err != nil {
-		return TrafficMatchingList{}, err
-	}
-	return createTrafficMatchingList(ctx, c, siteID, list)
-}
-
-func (c *unifiClient) UpdateTrafficMatchingList(ctx context.Context, site string, list TrafficMatchingList) error {
-	siteID, err := c.GetSiteID(ctx, site)
-	if err != nil {
-		return err
-	}
-	return updateTrafficMatchingList(ctx, c, siteID, list)
-}
-
-func (c *unifiClient) DeleteTrafficMatchingList(ctx context.Context, site, id string) error {
-	siteID, err := c.GetSiteID(ctx, site)
-	if err != nil {
-		return err
-	}
-	return deleteTrafficMatchingList(ctx, c, siteID, id)
-}
-
-// --- Site ID Resolution (v1 API) -------------------------------------------
-
-func (c *unifiClient) GetSiteID(ctx context.Context, siteName string) (string, error) {
-	return getSiteID(ctx, c, siteName)
 }
 
 // ---- Feature Detection -----------------------------------------------------

@@ -210,44 +210,33 @@ func TestMockController_ZonePolicies(t *testing.T) {
 			t.Fatalf("expected 0 policies after delete, got %d", len(pols))
 		}
 	})
-
-	t.Run("reorder records call", func(t *testing.T) {
-		m := testutil.NewMockController()
-		req := controller.ZonePolicyReorderRequest{
-			SourceZoneID:      "zone-src",
-			DestinationZoneID: "zone-dst",
-		}
-		if err := m.ReorderZonePolicies(ctx, site, req); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if m.Calls("ReorderZonePolicies") != 1 {
-			t.Fatal("expected 1 call to ReorderZonePolicies")
-		}
-	})
 }
 
-// TestMockController_Zones covers zone listing.
-func TestMockController_Zones(t *testing.T) {
+// TestMockController_GetZoneID covers zone ID lookup behavior.
+func TestMockController_GetZoneID(t *testing.T) {
 	ctx := context.Background()
 	const site = "default"
 
-	t.Run("preset zones are returned", func(t *testing.T) {
+	t.Run("zone name resolves to ID", func(t *testing.T) {
 		m := testutil.NewMockController()
 		m.SetZones(site, []controller.Zone{{ID: "z1", Name: "WAN"}})
-		zones, err := m.ListZones(ctx, site)
+		id, err := m.GetZoneID(ctx, site, "WAN")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(zones) != 1 || zones[0].Name != "WAN" {
-			t.Fatalf("unexpected zones: %+v", zones)
+		if id != "z1" {
+			t.Fatalf("expected z1, got %q", id)
 		}
 	})
 
-	t.Run("unknown site returns empty", func(t *testing.T) {
+	t.Run("fallback returns input when unknown", func(t *testing.T) {
 		m := testutil.NewMockController()
-		zones, err := m.ListZones(ctx, "other")
-		if err != nil || len(zones) != 0 {
-			t.Fatalf("expected empty, nil; got %v, %v", zones, err)
+		id, err := m.GetZoneID(ctx, "other", "67a8cc9efe6c6350dfa4dcc7")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if id != "67a8cc9efe6c6350dfa4dcc7" {
+			t.Fatalf("expected passthrough ID, got %q", id)
 		}
 	})
 }
@@ -373,14 +362,8 @@ func TestMockController_ErrorInjection(t *testing.T) {
 			func(m *testutil.MockController) error { return m.DeleteZonePolicy(ctx, site, "id") },
 		},
 		{
-			"ReorderZonePolicies",
-			func(m *testutil.MockController) error {
-				return m.ReorderZonePolicies(ctx, site, controller.ZonePolicyReorderRequest{})
-			},
-		},
-		{
-			"ListZones",
-			func(m *testutil.MockController) error { _, err := m.ListZones(ctx, site); return err },
+			"GetZoneID",
+			func(m *testutil.MockController) error { _, err := m.GetZoneID(ctx, site, "zone"); return err },
 		},
 		{
 			"HasFeature",

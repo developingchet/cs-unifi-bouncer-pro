@@ -184,9 +184,6 @@ func TestDefaults(t *testing.T) {
 	if len(cfg.ZonePairs) != 1 || cfg.ZonePairs[0] != "External->Internal" {
 		t.Errorf("default ZonePairs: got %v", cfg.ZonePairs)
 	}
-	if !cfg.ZonePolicyReorder {
-		t.Errorf("default ZonePolicyReorder: expected true, got false")
-	}
 }
 
 func TestMultiSiteConfig(t *testing.T) {

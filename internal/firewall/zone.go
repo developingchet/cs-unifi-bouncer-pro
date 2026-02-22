@@ -16,7 +16,6 @@ import (
 type ZoneConfig struct {
 	ZonePairs            []config.ZonePair
 	ZoneConnectionStates []string
-	PolicyReorder        bool
 	Description          string
 	LogDrops             bool
 	APIWriteDelay        time.Duration
@@ -77,13 +76,6 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 			if err := zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, connectionStates, true, v6Shards); err != nil {
 				return err
 			}
-		}
-	}
-
-	// Reorder once after all families and zone-pairs are ensured.
-	if zm.cfg.PolicyReorder {
-		if err := zm.reorderPolicies(ctx, site); err != nil {
-			zm.log.Warn().Err(err).Str("site", site).Msg("policy reorder failed")
 		}
 	}
 
@@ -314,74 +306,6 @@ func (zm *ZoneManager) DeletePoliciesForShard(ctx context.Context, site string, 
 
 		zm.log.Info().Str("name", policyName).Msg("deleted zone policy for pruned shard")
 	}
-	return nil
-}
-
-// reorderPolicies moves all bouncer-managed policies to the top, per zone-pair.
-func (zm *ZoneManager) reorderPolicies(ctx context.Context, site string) error {
-	allPolicies, err := zm.ctrl.ListZonePolicies(ctx, site)
-	if err != nil {
-		return err
-	}
-
-	stored, err := zm.store.ListPolicies()
-	if err != nil {
-		return err
-	}
-
-	managedIDs := make(map[string]struct{})
-	for _, rec := range stored {
-		if rec.Site == site && rec.Mode == "zone" {
-			managedIDs[rec.UnifiID] = struct{}{}
-		}
-	}
-
-	zoneMap := make(map[string]string)
-	for _, pair := range zm.cfg.ZonePairs {
-		// For UDM Pro Max 10.x, zone names cannot be auto-resolved.
-		// Zone IDs must be 24-char hex ObjectIDs passed directly via ZONE_PAIRS.
-		srcZoneID, err := zm.ctrl.GetZoneID(ctx, site, pair.Src)
-		if err != nil {
-			return fmt.Errorf("resolve source zone %q for reorder: %w", pair.Src, err)
-		}
-		dstZoneID, err := zm.ctrl.GetZoneID(ctx, site, pair.Dst)
-		if err != nil {
-			return fmt.Errorf("resolve destination zone %q for reorder: %w", pair.Dst, err)
-		}
-		zoneMap[pair.Src] = srcZoneID
-		zoneMap[pair.Dst] = dstZoneID
-	}
-
-	// Reorder per zone-pair
-	for _, pair := range zm.cfg.ZonePairs {
-		srcZoneID := zoneMap[pair.Src]
-		dstZoneID := zoneMap[pair.Dst]
-
-		// Filter policies for this zone-pair
-		var bouncerIDs []string
-		for _, p := range allPolicies {
-			if p.SrcZone == srcZoneID && p.DstZone == dstZoneID {
-				if _, ok := managedIDs[p.ID]; ok {
-					bouncerIDs = append(bouncerIDs, p.ID)
-				}
-			}
-		}
-
-		if len(bouncerIDs) == 0 {
-			continue // nothing to reorder for this pair
-		}
-
-		// Reorder so bouncer policies are evaluated before system-defined policies.
-		req := controller.ZonePolicyReorderRequest{
-			SourceZoneID:           srcZoneID,
-			DestinationZoneID:      dstZoneID,
-			BeforeSystemDefinedIDs: bouncerIDs,
-		}
-		if err := zm.ctrl.ReorderZonePolicies(ctx, site, req); err != nil {
-			return fmt.Errorf("reorder zone-pair %s->%s: %w", pair.Src, pair.Dst, err)
-		}
-	}
-
 	return nil
 }
 

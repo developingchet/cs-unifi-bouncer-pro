@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 )
 
 // --- Wire types (JSON mapping to UniFi API responses) -----------------------
@@ -31,105 +30,8 @@ type apiRule struct {
 	SrcFirewallGroupIDs []string `json:"src_firewallgroup_ids"`
 }
 
-type apiPolicySource struct {
-	ZoneID             string `json:"zone_id"`
-	IPGroupID          string `json:"ip_group_id,omitempty"`
-	MatchingTarget     string `json:"matching_target,omitempty"`      // "ANY" or "IP"
-	MatchingTargetType string `json:"matching_target_type,omitempty"` // "ANY" or "OBJECT"
-	MatchOppositeIPs   bool   `json:"match_opposite_ips"`
-}
-
-type apiPolicyDestination struct {
-	ZoneID         string `json:"zone_id"`
-	MatchingTarget string `json:"matching_target,omitempty"` // "ANY"
-}
-
-type apiPolicy struct {
-	ID          string               `json:"_id,omitempty"`
-	Name        string               `json:"name,omitempty"`
-	Enabled     bool                 `json:"enabled"`
-	Action      string               `json:"action,omitempty"`
-	Description string               `json:"description,omitempty"`
-	IPVersion   string               `json:"ip_version,omitempty"`
-	Source      apiPolicySource      `json:"source"`
-	Destination apiPolicyDestination `json:"destination"`
-	Predefined  bool                 `json:"predefined,omitempty"`
-}
-
-type apiZone struct {
-	ID   string `json:"_id"`
-	Name string `json:"name"`
-}
-
-// v1 API wire types
-
-type apiSelfSite struct {
-	ID   string `json:"_id"`
-	Name string `json:"name"`
-}
-
-type apiV1ListResponse struct {
-	Offset     int               `json:"offset"`
-	Limit      int               `json:"limit"`
-	Count      int               `json:"count"`
-	TotalCount int               `json:"totalCount"`
-	Data       []json.RawMessage `json:"data"`
-}
-
-type apiTrafficMatchingListItem struct {
-	Value string `json:"value"`
-}
-
-type apiTrafficMatchingList struct {
-	ID    string                       `json:"id,omitempty"`
-	Type  string                       `json:"type"`
-	Name  string                       `json:"name"`
-	Items []apiTrafficMatchingListItem `json:"items"`
-}
-
-type apiV1TrafficFilter struct {
-	IPGroupIDs []string `json:"ipGroupIds,omitempty"`
-}
-
-type apiV1PolicySource struct {
-	ZoneID        string             `json:"zoneId"`
-	TrafficFilter apiV1TrafficFilter `json:"trafficFilter"`
-}
-
-type apiV1PolicyDestination struct {
-	ZoneID        string             `json:"zoneId"`
-	TrafficFilter apiV1TrafficFilter `json:"trafficFilter"`
-}
-
-type apiV1PolicyAction struct {
-	Type string `json:"type"`
-}
-
-type apiV1IPProtocolScope struct {
-	IPVersion string `json:"ipVersion"`
-}
-
-type apiV1Policy struct {
-	ID                    string                 `json:"id,omitempty"`
-	Name                  string                 `json:"name,omitempty"`
-	Description           string                 `json:"description,omitempty"`
-	Enabled               bool                   `json:"enabled"`
-	Action                apiV1PolicyAction      `json:"action"`
-	Source                apiV1PolicySource      `json:"source"`
-	Destination           apiV1PolicyDestination `json:"destination"`
-	IPProtocolScope       apiV1IPProtocolScope   `json:"ipProtocolScope"`
-	ConnectionStateFilter []string               `json:"connectionStateFilter,omitempty"`
-	LoggingEnabled        bool                   `json:"loggingEnabled"`
-	SystemDefined         bool                   `json:"systemDefined,omitempty"`
-}
-
-type apiV1Zone struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
 // --- Proxy v2 API wire types for zone policies -------------------------------
-// These match the live UDM Pro Max firmware 10.1.85 proxy API
+// These match the live UDM Pro Max firmware 10.1.85 proxy API.
 
 type proxyPolicy struct {
 	ID                    string              `json:"_id,omitempty"`
@@ -161,15 +63,15 @@ type proxyPolicySchedule struct {
 }
 
 type proxyPolicyMatch struct {
-	ZoneID              string   `json:"zone_id"`
-	MatchingTarget      string   `json:"matching_target"`
-	MatchingTargetType  string   `json:"matching_target_type,omitempty"`
-	IPGroupID           string   `json:"ip_group_id,omitempty"`
-	IPs                 []string `json:"ips,omitempty"`
-	MatchMAC            bool     `json:"match_mac,omitempty"`
-	MatchOppositeIPs    bool     `json:"match_opposite_ips,omitempty"`
-	MatchOppositePorts  bool     `json:"match_opposite_ports,omitempty"`
-	PortMatchingType    string   `json:"port_matching_type,omitempty"`
+	ZoneID             string   `json:"zone_id"`
+	MatchingTarget     string   `json:"matching_target"`
+	MatchingTargetType string   `json:"matching_target_type,omitempty"`
+	IPGroupID          string   `json:"ip_group_id,omitempty"`
+	IPs                []string `json:"ips,omitempty"`
+	MatchMAC           bool     `json:"match_mac,omitempty"`
+	MatchOppositeIPs   bool     `json:"match_opposite_ips,omitempty"`
+	MatchOppositePorts bool     `json:"match_opposite_ports,omitempty"`
+	PortMatchingType   string   `json:"port_matching_type,omitempty"`
 }
 
 // --- Generic HTTP helpers ---------------------------------------------------
@@ -193,69 +95,6 @@ func doGET(ctx context.Context, c *unifiClient, url, endpoint string) ([]json.Ra
 		result = body.Data
 		return nil
 	})
-}
-
-func doGETv1Page(ctx context.Context, c *unifiClient, rawURL, endpoint string) (apiV1ListResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return apiV1ListResponse{}, err
-	}
-
-	var page apiV1ListResponse
-	err = c.withReauth(ctx, func() error {
-		resp, err := c.apiDo(ctx, req, endpoint)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
-			return fmt.Errorf("decode response: %w", err)
-		}
-		return nil
-	})
-	return page, err
-}
-
-func listAllV1Pages(ctx context.Context, c *unifiClient, endpointURL, metricEndpoint string) ([]json.RawMessage, error) {
-	const pageLimit = 200
-
-	base, err := url.Parse(endpointURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse endpoint URL: %w", err)
-	}
-
-	offset := 0
-	all := make([]json.RawMessage, 0)
-	for {
-		pageURL := *base
-		query := pageURL.Query()
-		query.Set("offset", fmt.Sprintf("%d", offset))
-		query.Set("limit", fmt.Sprintf("%d", pageLimit))
-		pageURL.RawQuery = query.Encode()
-
-		page, err := doGETv1Page(ctx, c, pageURL.String(), metricEndpoint)
-		if err != nil {
-			return nil, err
-		}
-
-		all = append(all, page.Data...)
-		count := page.Count
-		if count == 0 {
-			count = len(page.Data)
-		}
-
-		// totalCount is authoritative when present; count/len(data) are fallback guards.
-		if page.TotalCount > 0 && offset+count >= page.TotalCount {
-			break
-		}
-		if count == 0 || len(page.Data) == 0 {
-			break
-		}
-
-		offset += count
-	}
-
-	return all, nil
 }
 
 func doPOST(ctx context.Context, c *unifiClient, url, endpoint string, payload interface{}) (json.RawMessage, error) {
@@ -401,7 +240,12 @@ func createFirewallGroup(ctx context.Context, c *unifiClient, site string, g Fir
 	if err := json.Unmarshal(raw, &created); err != nil {
 		return FirewallGroup{}, err
 	}
-	return FirewallGroup{ID: created.ID, Name: created.Name, GroupType: created.GroupType, GroupMembers: created.GroupMembers}, nil
+	return FirewallGroup{
+		ID:           created.ID,
+		Name:         created.Name,
+		GroupType:    created.GroupType,
+		GroupMembers: created.GroupMembers,
+	}, nil
 }
 
 func updateFirewallGroup(ctx context.Context, c *unifiClient, site string, g FirewallGroup) error {
@@ -469,7 +313,13 @@ func createFirewallRule(ctx context.Context, c *unifiClient, site string, r Fire
 	if err := json.Unmarshal(raw, &created); err != nil {
 		return FirewallRule{}, err
 	}
-	return FirewallRule{ID: created.ID, Name: created.Name, RuleIndex: created.RuleIndex, Action: created.Action, Ruleset: created.Ruleset}, nil
+	return FirewallRule{
+		ID:        created.ID,
+		Name:      created.Name,
+		RuleIndex: created.RuleIndex,
+		Action:    created.Action,
+		Ruleset:   created.Ruleset,
+	}, nil
 }
 
 func updateFirewallRule(ctx context.Context, c *unifiClient, site string, r FirewallRule) error {
@@ -498,15 +348,13 @@ func deleteFirewallRule(ctx context.Context, c *unifiClient, site, id string) er
 
 // proxyPolicyFromModel builds a proxyPolicy from a ZonePolicy model.
 func proxyPolicyFromModel(p ZonePolicy) proxyPolicy {
-	// Connection state handling
 	connStateType := "ALL"
 	connStates := []string{}
 	if len(p.ConnectionStateFilter) > 0 {
 		connStateType = "CUSTOM"
-		connStates = p.ConnectionStateFilter // already uppercased by normalizeConnectionStates
+		connStates = p.ConnectionStateFilter
 	}
 
-	// Source endpoint — use IP_GROUP reference when we have a group ID
 	src := proxyPolicyMatch{
 		ZoneID:             p.SrcZone,
 		IPs:                []string{},
@@ -516,9 +364,9 @@ func proxyPolicyFromModel(p ZonePolicy) proxyPolicy {
 		PortMatchingType:   "ANY",
 	}
 	if len(p.TrafficMatchingListIDs) > 0 && p.TrafficMatchingListIDs[0] != "" {
-		src.MatchingTarget     = "IP"
+		src.MatchingTarget = "IP"
 		src.MatchingTargetType = "OBJECT"
-		src.IPGroupID          = p.TrafficMatchingListIDs[0] // firewall group _id
+		src.IPGroupID = p.TrafficMatchingListIDs[0]
 	} else {
 		src.MatchingTarget = "ANY"
 	}
@@ -530,7 +378,7 @@ func proxyPolicyFromModel(p ZonePolicy) proxyPolicy {
 		PortMatchingType:   "ANY",
 	}
 
-	ipVersion := p.IPVersion // "IPV4", "IPV6", "BOTH"
+	ipVersion := p.IPVersion
 	if ipVersion == "" {
 		ipVersion = "IPV4"
 	}
@@ -632,151 +480,4 @@ func updateZonePolicy(ctx context.Context, c *unifiClient, site string, p ZonePo
 func deleteZonePolicy(ctx context.Context, c *unifiClient, site, id string) error {
 	url := proxyPolicyEndpoint(c.cfg.BaseURL, site) + "/" + id
 	return doDELETE(ctx, c, url, "delete-policy")
-}
-
-// --- Traffic Matching Lists (v1 API) -----------------------------------------
-
-// listTrafficMatchingLists fetches all traffic matching lists from the v1 API.
-// The siteID parameter must be a UUID (not a site name).
-func listTrafficMatchingLists(ctx context.Context, c *unifiClient, siteID string) ([]TrafficMatchingList, error) {
-	endpointURL := fmt.Sprintf("%s/v1/sites/%s/traffic-matching-lists", c.cfg.BaseURL, siteID)
-	data, err := listAllV1Pages(ctx, c, endpointURL, "list-traffic-matching-lists")
-	if err != nil {
-		return nil, err
-	}
-	lists := make([]TrafficMatchingList, 0, len(data))
-	for _, raw := range data {
-		var tml apiTrafficMatchingList
-		if err := json.Unmarshal(raw, &tml); err != nil {
-			continue
-		}
-		items := make([]TrafficMatchingListItem, 0, len(tml.Items))
-		for _, item := range tml.Items {
-			items = append(items, TrafficMatchingListItem{Value: item.Value})
-		}
-		lists = append(lists, TrafficMatchingList{
-			ID:    tml.ID,
-			Type:  tml.Type,
-			Name:  tml.Name,
-			Items: items,
-		})
-	}
-	return lists, nil
-}
-
-// createTrafficMatchingList creates a new traffic matching list via the v1 API.
-// The siteID parameter must be a UUID (not a site name).
-func createTrafficMatchingList(ctx context.Context, c *unifiClient, siteID string, list TrafficMatchingList) (TrafficMatchingList, error) {
-	items := make([]apiTrafficMatchingListItem, 0, len(list.Items))
-	for _, item := range list.Items {
-		items = append(items, apiTrafficMatchingListItem{Value: item.Value})
-	}
-	payload := apiTrafficMatchingList{
-		Type:  list.Type,
-		Name:  list.Name,
-		Items: items,
-	}
-	endpointURL := fmt.Sprintf("%s/v1/sites/%s/traffic-matching-lists", c.cfg.BaseURL, siteID)
-	raw, err := doPOSTv2(ctx, c, endpointURL, "create-traffic-matching-list", payload)
-	if err != nil {
-		return TrafficMatchingList{}, err
-	}
-	var created apiTrafficMatchingList
-	if err := json.Unmarshal(raw, &created); err != nil {
-		return TrafficMatchingList{}, err
-	}
-	outItems := make([]TrafficMatchingListItem, 0, len(created.Items))
-	for _, item := range created.Items {
-		outItems = append(outItems, TrafficMatchingListItem{Value: item.Value})
-	}
-	return TrafficMatchingList{
-		ID:    created.ID,
-		Type:  created.Type,
-		Name:  created.Name,
-		Items: outItems,
-	}, nil
-}
-
-// updateTrafficMatchingList updates an existing traffic matching list via the v1 API.
-// The siteID parameter must be a UUID (not a site name).
-func updateTrafficMatchingList(ctx context.Context, c *unifiClient, siteID string, list TrafficMatchingList) error {
-	items := make([]apiTrafficMatchingListItem, 0, len(list.Items))
-	for _, item := range list.Items {
-		items = append(items, apiTrafficMatchingListItem{Value: item.Value})
-	}
-	payload := apiTrafficMatchingList{
-		ID:    list.ID,
-		Type:  list.Type,
-		Name:  list.Name,
-		Items: items,
-	}
-	url := fmt.Sprintf("%s/v1/sites/%s/traffic-matching-lists/%s", c.cfg.BaseURL, siteID, list.ID)
-	return doPUT(ctx, c, url, "update-traffic-matching-list", payload)
-}
-
-// deleteTrafficMatchingList deletes a traffic matching list via the v1 API.
-// The siteID parameter must be a UUID (not a site name).
-func deleteTrafficMatchingList(ctx context.Context, c *unifiClient, siteID, id string) error {
-	url := fmt.Sprintf("%s/v1/sites/%s/traffic-matching-lists/%s", c.cfg.BaseURL, siteID, id)
-	return doDELETE(ctx, c, url, "delete-traffic-matching-list")
-}
-
-// --- Zones (v1 API) ----------------------------------------------------------
-
-// listZonesV1 is not supported on UDM 10.x controllers because no zone list API is available.
-func listZonesV1(_ context.Context, _ *unifiClient, _ string) ([]Zone, error) {
-	return nil, fmt.Errorf(
-		"zone list API is unavailable on this controller; resolve zone UUIDs from "+
-			"GET /proxy/network/v2/api/site/default/firewall-policies (source.zone_id / destination.zone_id)",
-	)
-}
-
-// --- Site ID Resolution (v1 API) --------------------------------------------
-
-// getSiteID resolves a site name to its UUID.
-// Results are cached in the unifiClient to avoid repeated API calls.
-func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, error) {
-	c.cacheMu.RLock()
-	if id, ok := c.siteIDCache[siteName]; ok {
-		c.cacheMu.RUnlock()
-		return id, nil
-	}
-	c.cacheMu.RUnlock()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, selfSitesEndpoint(c.cfg.BaseURL), nil)
-	if err != nil {
-		return "", err
-	}
-
-	var body apiResponse
-	err = c.withReauth(ctx, func() error {
-		resp, err := c.apiDo(ctx, req, "get-site-id")
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			return fmt.Errorf("decode response: %w", err)
-		}
-		return nil
-	})
-	if err != nil {
-		return "", fmt.Errorf("fetch sites: %w", err)
-	}
-
-	for _, raw := range body.Data {
-		var site apiSelfSite
-		if err := json.Unmarshal(raw, &site); err != nil {
-			continue
-		}
-		if site.Name == siteName || site.ID == siteName {
-			c.cacheMu.Lock()
-			c.siteIDCache[site.Name] = site.ID
-			c.siteIDCache[siteName] = site.ID
-			c.cacheMu.Unlock()
-			return site.ID, nil
-		}
-	}
-
-	return "", fmt.Errorf("site %q not found in self/sites response", siteName)
 }

@@ -135,7 +135,6 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 |----------|---------|-------------|
 | `ZONE_PAIRS` | `External->Internal` | Comma-separated `src->dst` zone pairs. `External`/`Internal` are the default UniFi 8.x names — check Settings → Firewall → Zones if you renamed them. |
 | `ZONE_CONNECTION_STATES` | `new,invalid` | Connection states the policies match (normalized to uppercase before API calls) |
-| `ZONE_POLICY_REORDER` | `true` | Reorder policies to place block rules at the top |
 
 ### Object naming
 

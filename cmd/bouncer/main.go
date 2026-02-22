@@ -144,7 +144,6 @@ func runDaemon() error {
 		ZoneCfg: firewall.ZoneConfig{
 			ZonePairs:            zonePairs,
 			ZoneConnectionStates: cfg.ZoneConnectionStates,
-			PolicyReorder:        cfg.ZonePolicyReorder,
 			Description:          cfg.ObjectDescription,
 			LogDrops:             cfg.FirewallLogDrops,
 			APIWriteDelay:        cfg.FirewallAPIShardDelay,
@@ -342,7 +341,6 @@ func reconcileCmd() *cobra.Command {
 				ZoneCfg: firewall.ZoneConfig{
 					ZonePairs:            zonePairs,
 					ZoneConnectionStates: cfg.ZoneConnectionStates,
-					PolicyReorder:        cfg.ZonePolicyReorder,
 					Description:          cfg.ObjectDescription,
 					LogDrops:             cfg.FirewallLogDrops,
 					APIWriteDelay:        cfg.FirewallAPIShardDelay,

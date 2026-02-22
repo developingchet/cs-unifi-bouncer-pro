@@ -169,30 +169,6 @@ func TestZoneManager_EnsurePolicies_IPv6(t *testing.T) {
 	}
 }
 
-// TestZoneManager_PolicyReorder verifies that when PolicyReorder=true,
-// EnsurePolicies calls ReorderZonePolicies.
-func TestZoneManager_PolicyReorder(t *testing.T) {
-	ctrl := testutil.NewMockController()
-	store := testutil.NewMockStore()
-	namer := zoneTestNamer(t)
-
-	v4 := ensuredZoneV4Shard(t, ctrl, store)
-
-	zm := NewZoneManager(ZoneConfig{
-		ZonePairs:     []config.ZonePair{{Src: "wan", Dst: "lan"}},
-		PolicyReorder: true,
-		Description:   "test",
-	}, namer, ctrl, store, zerolog.Nop())
-
-	if err := zm.EnsurePolicies(context.Background(), testSite, v4, nil); err != nil {
-		t.Fatalf("EnsurePolicies: %v", err)
-	}
-
-	if got := ctrl.Calls("ReorderZonePolicies"); got < 1 {
-		t.Errorf("ReorderZonePolicies calls: got %d, want >= 1", got)
-	}
-}
-
 // TestZoneManager_EnsurePolicies_RecreatesDeleted verifies that when a policy
 // record exists in the store but is absent from the API, it is recreated.
 func TestZoneManager_EnsurePolicies_RecreatesDeleted(t *testing.T) {

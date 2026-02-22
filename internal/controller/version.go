@@ -110,38 +110,11 @@ func ruleEndpoint(base, site string) string {
 	return fmt.Sprintf("%s/proxy/network/api/s/%s/rest/firewallrule", base, site)
 }
 
-func zoneEndpoint(base, site string) string {
-	return fmt.Sprintf("%s/proxy/network/api/s/%s/rest/firewallzone", base, site)
-}
-
 // Proxy v2 API endpoints (site name, not UUID).
 // These match the UDM Pro Max firmware 10.1.85 proxy API.
 
 func proxyPolicyEndpoint(base, site string) string {
 	return fmt.Sprintf("%s/proxy/network/v2/api/site/%s/firewall-policies", base, site)
-}
-
-func proxyPolicyReorderEndpoint(base, site string) string {
-	return fmt.Sprintf("%s/proxy/network/v2/api/site/%s/firewall-policies/batch-reorder", base, site)
-}
-
-// selfSitesEndpoint is still used for site UUID resolution.
-func selfSitesEndpoint(base string) string {
-	return fmt.Sprintf("%s/proxy/network/api/self/sites", base)
-}
-
-// --- Zone Policy Reordering (proxy v2 API) ---------------------------------
-
-// reorderZonePolicies reorders zone policies via the proxy v2 API.
-// The site parameter is a site name (not a UUID).
-func reorderZonePolicies(ctx context.Context, c *unifiClient, site string, req ZonePolicyReorderRequest) error {
-	payload := map[string]interface{}{
-		"source_zone_id":      req.SourceZoneID,
-		"destination_zone_id": req.DestinationZoneID,
-		"before_policy_ids":   req.BeforeSystemDefinedIDs,
-	}
-	url := proxyPolicyReorderEndpoint(c.cfg.BaseURL, site)
-	return doPUT(ctx, c, url, "reorder-policies", payload)
 }
 
 // --- Zone ID Resolution (proxy v2 API) -------------------------------------
