@@ -661,12 +661,28 @@ func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, er
 	}
 	c.cacheMu.RUnlock()
 
-	data, err := doGET(ctx, c, selfSitesEndpoint(c.cfg.BaseURL), "get-site-id")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, selfSitesEndpoint(c.cfg.BaseURL), nil)
 	if err != nil {
 		return "", err
 	}
 
-	for _, raw := range data {
+	var body apiResponse
+	err = c.withReauth(ctx, func() error {
+		resp, err := c.apiDo(ctx, req, "get-site-id")
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			return fmt.Errorf("decode response: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("fetch sites: %w", err)
+	}
+
+	for _, raw := range body.Data {
 		var site apiSelfSite
 		if err := json.Unmarshal(raw, &site); err != nil {
 			continue
@@ -680,7 +696,7 @@ func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, er
 		}
 	}
 
-	return "", fmt.Errorf("site %q not found", siteName)
+	return "", fmt.Errorf("site %q not found in self/sites response", siteName)
 }
 
 // getZoneID resolves a zone name to its UUID for a given site UUID.

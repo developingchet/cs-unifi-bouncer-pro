@@ -561,6 +561,67 @@ func TestReorderZonePolicies(t *testing.T) {
 	}
 }
 
+func TestGetSiteID_UsesLegacySelfSitesEnvelope(t *testing.T) {
+	const siteName = "default"
+	const siteID = "7f3a92d8b1c4e06f5a9b8c2d"
+	const expectedPath = "/proxy/network/api/self/sites"
+
+	requestCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != expectedPath {
+			http.Error(w, fmt.Sprintf("unexpected %s %s", r.Method, r.URL.Path), http.StatusBadRequest)
+			return
+		}
+		requestCount++
+
+		resp := struct {
+			Meta struct {
+				RC string `json:"rc"`
+			} `json:"meta"`
+			Data []interface{} `json:"data"`
+		}{
+			Data: []interface{}{
+				map[string]interface{}{
+					"_id":  siteID,
+					"name": siteName,
+					"desc": "Default",
+				},
+			},
+		}
+		resp.Meta.RC = "ok"
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			http.Error(w, "encode response failed", http.StatusInternalServerError)
+			return
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+
+	got, err := getSiteID(context.Background(), c, siteName)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if got != siteID {
+		t.Fatalf("expected site ID %q, got %q", siteID, got)
+	}
+
+	// Second lookup should hit cache and avoid a second self/sites call.
+	gotCached, err := getSiteID(context.Background(), c, siteName)
+	if err != nil {
+		t.Fatalf("expected no error from cached lookup, got %v", err)
+	}
+	if gotCached != siteID {
+		t.Fatalf("expected cached site ID %q, got %q", siteID, gotCached)
+	}
+	if requestCount != 1 {
+		t.Fatalf("expected 1 request to self/sites due cache, got %d", requestCount)
+	}
+}
+
 // ---- Additional edge-case coverage ----------------------------------------
 
 // TestListFirewallGroups_VerifiesFields checks that group fields are mapped correctly.
