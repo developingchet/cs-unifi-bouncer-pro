@@ -69,6 +69,9 @@ func NewShardManager(site string, ipv6 bool, capacity int, namer *Namer,
 }
 
 func (sm *ShardManager) shardObjectKind() string {
+	if sm.mode == "zone" {
+		return "traffic matching list"
+	}
 	return "firewall group"
 }
 
@@ -83,14 +86,28 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 		return fmt.Errorf("list groups from store: %w", err)
 	}
 
-	// Fetch current state from UniFi.
-	apiGroups, err := sm.ctrl.ListFirewallGroups(ctx, sm.site)
-	if err != nil {
-		return fmt.Errorf("list firewall groups from API: %w", err)
-	}
-	apiGroupByID := make(map[string]controller.FirewallGroup, len(apiGroups))
-	for _, g := range apiGroups {
-		apiGroupByID[g.ID] = g
+	// Fetch current state from UniFi (dispatched by mode).
+	// In zone mode, use TML API; in legacy mode, use firewall groups.
+	var apiGroupByID map[string]controller.FirewallGroup
+	var apiTMLByName map[string]controller.TrafficMatchingList
+	if sm.mode == "zone" {
+		tmls, err := sm.ctrl.ListTrafficMatchingLists(ctx, sm.site)
+		if err != nil {
+			return fmt.Errorf("list traffic matching lists from API: %w", err)
+		}
+		apiTMLByName = make(map[string]controller.TrafficMatchingList, len(tmls))
+		for _, t := range tmls {
+			apiTMLByName[t.Name] = t
+		}
+	} else {
+		apiGroups, err := sm.ctrl.ListFirewallGroups(ctx, sm.site)
+		if err != nil {
+			return fmt.Errorf("list firewall groups from API: %w", err)
+		}
+		apiGroupByID = make(map[string]controller.FirewallGroup, len(apiGroups))
+		for _, g := range apiGroups {
+			apiGroupByID[g.ID] = g
+		}
 	}
 
 	// Rebuild shard slice from bbolt records
@@ -118,11 +135,24 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 		foundInAPI := false
 
 		// Prefer live API data over stale bbolt cache.
-		if apiGroup, exists := apiGroupByID[rec.UnifiID]; exists {
-			for _, m := range apiGroup.GroupMembers {
-				members[m] = struct{}{}
+		// In zone mode, match by name (TMLs have stable UUIDs stored in bbolt already).
+		// In legacy mode, match by ID.
+		if sm.mode == "zone" {
+			if tml, exists := apiTMLByName[name]; exists {
+				for _, item := range tml.Items {
+					members[item.Value] = struct{}{}
+				}
+				// Update bbolt record with current TML ID in case it changed.
+				rec.UnifiID = tml.ID
+				foundInAPI = true
 			}
-			foundInAPI = true
+		} else {
+			if apiGroup, exists := apiGroupByID[rec.UnifiID]; exists {
+				for _, m := range apiGroup.GroupMembers {
+					members[m] = struct{}{}
+				}
+				foundInAPI = true
+			}
 		}
 
 		if foundInAPI {
@@ -232,6 +262,10 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 	if sm.ipv6 {
 		groupType = "ipv6-address-group"
 	}
+	tmlType := "IPV4_ADDRESSES"
+	if sm.ipv6 {
+		tmlType = "IPV6_ADDRESSES"
+	}
 	objectKind := sm.shardObjectKind()
 
 	// --- Phase 1: snapshot dirty shards under lock, clear dirty flags ---
@@ -306,12 +340,27 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 			}
 		}
 
-		putErr := sm.ctrl.UpdateFirewallGroup(ctx, sm.site, controller.FirewallGroup{
-			ID:           snap.unifiID,
-			Name:         snap.name,
-			GroupType:    groupType,
-			GroupMembers: snap.members,
-		})
+		var putErr error
+		if sm.mode == "zone" {
+			items := make([]controller.TrafficMatchingListItem, 0, len(snap.members))
+			for _, m := range snap.members {
+				items = append(items, controller.TrafficMatchingListItem{Value: m})
+			}
+			putErr = sm.ctrl.UpdateTrafficMatchingList(ctx, sm.site, controller.TrafficMatchingList{
+				ID:        snap.unifiID,
+				Name:      snap.name,
+				Type:      tmlType,
+				GroupType: groupType,
+				Items:     items,
+			})
+		} else {
+			putErr = sm.ctrl.UpdateFirewallGroup(ctx, sm.site, controller.FirewallGroup{
+				ID:           snap.unifiID,
+				Name:         snap.name,
+				GroupType:    groupType,
+				GroupMembers: snap.members,
+			})
+		}
 
 		// Release semaphore slot
 		if sm.flushSem != nil {
@@ -383,7 +432,11 @@ func (sm *ShardManager) RemoveTail() error {
 }
 
 // DeleteShardObject deletes the backing UniFi object for a shard ID.
+// In zone mode this deletes a Traffic Matching List; in legacy mode a FirewallGroup.
 func (sm *ShardManager) DeleteShardObject(ctx context.Context, unifiID string) error {
+	if sm.mode == "zone" {
+		return sm.ctrl.DeleteTrafficMatchingList(ctx, sm.site, unifiID)
+	}
 	return sm.ctrl.DeleteFirewallGroup(ctx, sm.site, unifiID)
 }
 
@@ -412,7 +465,8 @@ func (sm *ShardManager) AllMembers() []string {
 	return all
 }
 
-// createShard creates a new empty group shard in UniFi and registers it in bbolt.
+// createShard creates a new empty shard in UniFi and registers it in bbolt.
+// In zone mode this creates a Traffic Matching List; in legacy mode a FirewallGroup.
 func (sm *ShardManager) createShard(ctx context.Context, idx int) error {
 	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: idx, Site: sm.site})
 	if err != nil {
@@ -431,20 +485,40 @@ func (sm *ShardManager) createShard(ctx context.Context, idx int) error {
 		return nil
 	}
 
-	groupType := "address-group"
-	if sm.ipv6 {
-		groupType = "ipv6-address-group"
-	}
+	var createdID string
 
-	created, err := sm.ctrl.CreateFirewallGroup(ctx, sm.site, controller.FirewallGroup{
-		Name:         name,
-		GroupType:    groupType,
-		GroupMembers: []string{},
-	})
-	if err != nil {
-		return fmt.Errorf("create shard %s: %w", name, err)
+	if sm.mode == "zone" {
+		tmlType := "IPV4_ADDRESSES"
+		groupType := "address-group"
+		if sm.ipv6 {
+			tmlType = "IPV6_ADDRESSES"
+			groupType = "ipv6-address-group"
+		}
+		created, err := sm.ctrl.CreateTrafficMatchingList(ctx, sm.site, controller.TrafficMatchingList{
+			Name:      name,
+			Type:      tmlType,
+			GroupType: groupType,
+			Items:     []controller.TrafficMatchingListItem{},
+		})
+		if err != nil {
+			return fmt.Errorf("create shard %s: %w", name, err)
+		}
+		createdID = created.ID
+	} else {
+		groupType := "address-group"
+		if sm.ipv6 {
+			groupType = "ipv6-address-group"
+		}
+		created, err := sm.ctrl.CreateFirewallGroup(ctx, sm.site, controller.FirewallGroup{
+			Name:         name,
+			GroupType:    groupType,
+			GroupMembers: []string{},
+		})
+		if err != nil {
+			return fmt.Errorf("create shard %s: %w", name, err)
+		}
+		createdID = created.ID
 	}
-	createdID := created.ID
 
 	sm.shards = append(sm.shards, shard{
 		unifiID: createdID,

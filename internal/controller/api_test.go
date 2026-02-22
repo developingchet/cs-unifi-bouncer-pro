@@ -64,6 +64,34 @@ func makeBareObject(item interface{}) []byte {
 	return b
 }
 
+// makeV1Page encodes items in the integration v1 page envelope.
+func makeV1Page(items ...interface{}) []byte {
+	data := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		b, err := json.Marshal(item)
+		if err != nil {
+			panic(fmt.Sprintf("makeV1Page: marshal failed: %v", err))
+		}
+		data = append(data, json.RawMessage(b))
+	}
+	page := struct {
+		Offset     int               `json:"offset"`
+		Limit      int               `json:"limit"`
+		Count      int               `json:"count"`
+		TotalCount int               `json:"totalCount"`
+		Data       []json.RawMessage `json:"data"`
+	}{
+		Count:      len(data),
+		TotalCount: len(data),
+		Data:       data,
+	}
+	b, err := json.Marshal(page)
+	if err != nil {
+		panic(fmt.Sprintf("makeV1Page: marshal page failed: %v", err))
+	}
+	return b
+}
+
 // ---- Firewall Groups -------------------------------------------------------
 
 func TestListFirewallGroups(t *testing.T) {
@@ -304,38 +332,32 @@ func TestCreateFirewallRule(t *testing.T) {
 	}
 }
 
-// ---- Zone Policies ---------------------------------------------------------
+// ---- Zone Policies (integration v1) ----------------------------------------
 
 func TestListZonePolicies(t *testing.T) {
-	const site = "default"
-	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-policies", site)
+	const siteID = testSiteUUID
+	expectedPath := fmt.Sprintf("/proxy/network/integration/v1/sites/%s/firewall/policies", siteID)
 
-	respBody := makeBareArray(
-		proxyPolicy{
-			ID:                  "p1",
-			Name:                "block-wan-in",
-			Enabled:             true,
-			Action:              "BLOCK",
-			IPVersion:           "IPV4",
-			ConnectionStateType: "CUSTOM",
-			ConnectionStates:    []string{"NEW", "INVALID"},
-			Schedule: proxyPolicySchedule{
-				Mode:         "ALWAYS",
-				RepeatOnDays: []string{},
-				TimeAllDay:   false,
+	tmlID := "dddddddd-0000-4000-8000-dddddddddddd"
+	respBody := makeV1Page(
+		apiV1Policy{
+			ID:      "p1",
+			Enabled: true,
+			Name:    "block-wan-in",
+			Action:  apiV1PolicyAction{Type: "BLOCK"},
+			Source: apiV1PolicySrc{
+				ZoneID: testZoneExternal,
+				TrafficFilter: &apiV1TrafficFilter{
+					Type: "IP_ADDRESS",
+					IPAddressFilter: &apiV1IPAddressFilter{
+						Type:                  "TRAFFIC_MATCHING_LIST",
+						TrafficMatchingListID: tmlID,
+					},
+				},
 			},
-			Source: proxyPolicyMatch{
-				ZoneID:             "wan-zone-id",
-				MatchingTarget:     "IP",
-				MatchingTargetType: "OBJECT",
-				IPGroupID:          "grp1",
-				PortMatchingType:   "ANY",
-			},
-			Destination: proxyPolicyMatch{
-				ZoneID:           "internal-zone-id",
-				MatchingTarget:   "ANY",
-				PortMatchingType: "ANY",
-			},
+			Destination:     apiV1PolicyDst{ZoneID: testZoneInternal},
+			IPProtocolScope: apiV1IPScope{IPVersion: "IPV4"},
+			ConnectionStateFilter: []string{"NEW", "INVALID"},
 		},
 	)
 
@@ -351,7 +373,7 @@ func TestListZonePolicies(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(srv.URL, "api-key")
-	policies, err := listZonePolicies(context.Background(), c, site)
+	policies, err := listZonePoliciesV1(context.Background(), c, siteID)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -362,20 +384,22 @@ func TestListZonePolicies(t *testing.T) {
 	if p.ID != "p1" {
 		t.Errorf("expected ID=p1, got %q", p.ID)
 	}
-	if p.SrcZone != "wan-zone-id" {
-		t.Errorf("expected SrcZone=wan-zone-id, got %q", p.SrcZone)
+	if p.SrcZone != testZoneExternal {
+		t.Errorf("expected SrcZone=%q, got %q", testZoneExternal, p.SrcZone)
 	}
-	if p.DstZone != "internal-zone-id" {
-		t.Errorf("expected DstZone=internal-zone-id, got %q", p.DstZone)
+	if p.DstZone != testZoneInternal {
+		t.Errorf("expected DstZone=%q, got %q", testZoneInternal, p.DstZone)
 	}
-	if len(p.TrafficMatchingListIDs) != 1 || p.TrafficMatchingListIDs[0] != "grp1" {
+	if len(p.TrafficMatchingListIDs) != 1 || p.TrafficMatchingListIDs[0] != tmlID {
 		t.Errorf("unexpected TrafficMatchingListIDs: %+v", p.TrafficMatchingListIDs)
 	}
 }
 
 func TestCreateZonePolicy(t *testing.T) {
-	const site = "default"
-	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-policies", site)
+	const siteID = testSiteUUID
+	expectedPath := fmt.Sprintf("/proxy/network/integration/v1/sites/%s/firewall/policies", siteID)
+
+	tmlID := "dddddddd-0000-4000-8000-dddddddddddd"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != expectedPath {
@@ -391,34 +415,26 @@ func TestCreateZonePolicy(t *testing.T) {
 			http.Error(w, "missing policy name", http.StatusBadRequest)
 			return
 		}
-		if body["schedule"] == nil {
-			http.Error(w, "missing required schedule", http.StatusBadRequest)
-			return
-		}
-		created := proxyPolicy{
-			ID:        "policy-abc",
-			Name:      "block-wan",
-			Enabled:   true,
-			Action:    "BLOCK",
-			IPVersion: "IPV4",
-			Schedule: proxyPolicySchedule{
-				Mode:         "ALWAYS",
-				RepeatOnDays: []string{},
-				TimeAllDay:   false,
+		created := apiV1Policy{
+			ID:      "policy-abc",
+			Enabled: true,
+			Name:    "block-wan",
+			Action:  apiV1PolicyAction{Type: "BLOCK"},
+			Source: apiV1PolicySrc{
+				ZoneID: testZoneExternal,
+				TrafficFilter: &apiV1TrafficFilter{
+					Type: "IP_ADDRESS",
+					IPAddressFilter: &apiV1IPAddressFilter{
+						Type:                  "TRAFFIC_MATCHING_LIST",
+						TrafficMatchingListID: tmlID,
+					},
+				},
 			},
-			Source: proxyPolicyMatch{
-				ZoneID:             "wan-zone-id",
-				MatchingTarget:     "IP",
-				MatchingTargetType: "OBJECT",
-				IPGroupID:          "grp1",
-			},
-			Destination: proxyPolicyMatch{
-				ZoneID:         "internal-zone-id",
-				MatchingTarget: "ANY",
-			},
+			Destination:     apiV1PolicyDst{ZoneID: testZoneInternal},
+			IPProtocolScope: apiV1IPScope{IPVersion: "IPV4"},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write(makeBareObject(created))
 	}))
 	defer srv.Close()
@@ -428,24 +444,156 @@ func TestCreateZonePolicy(t *testing.T) {
 		Name:                   "block-wan",
 		Enabled:                true,
 		Action:                 "BLOCK",
-		SrcZone:                "wan-zone-id",
-		DstZone:                "internal-zone-id",
+		SrcZone:                testZoneExternal,
+		DstZone:                testZoneInternal,
 		IPVersion:              "IPV4",
-		TrafficMatchingListIDs: []string{"grp1"},
+		TrafficMatchingListIDs: []string{tmlID},
 	}
 
-	got, err := createZonePolicy(context.Background(), c, site, input)
+	got, err := createZonePolicyV1(context.Background(), c, siteID, input)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
 	if got.ID != "policy-abc" {
 		t.Errorf("expected ID=policy-abc, got %q", got.ID)
 	}
-	if got.SrcZone != "wan-zone-id" {
-		t.Errorf("expected SrcZone=wan-zone-id, got %q", got.SrcZone)
+	if got.SrcZone != testZoneExternal {
+		t.Errorf("expected SrcZone=%q, got %q", testZoneExternal, got.SrcZone)
 	}
-	if got.DstZone != "internal-zone-id" {
-		t.Errorf("expected DstZone=internal-zone-id, got %q", got.DstZone)
+	if got.DstZone != testZoneInternal {
+		t.Errorf("expected DstZone=%q, got %q", testZoneInternal, got.DstZone)
+	}
+}
+
+// ---- Site ID Resolution (integration v1) ------------------------------------
+
+func TestGetSiteID_Found(t *testing.T) {
+	const siteName = "default"
+	expectedPath := "/proxy/network/integration/v1/sites"
+
+	respBody := makeV1Page(
+		apiSiteV1{ID: testSiteUUID, InternalReference: siteName, Name: "Default"},
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != expectedPath {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(respBody)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	got, err := getSiteID(context.Background(), c, siteName)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if got != testSiteUUID {
+		t.Errorf("expected siteID=%q, got %q", testSiteUUID, got)
+	}
+}
+
+func TestGetSiteID_NotFound(t *testing.T) {
+	respBody := makeV1Page() // empty list — site not found
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(respBody)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	_, err := getSiteID(context.Background(), c, "nonexistent")
+	if err == nil {
+		t.Fatal("expected error when site is not in list, got nil")
+	}
+}
+
+// ---- Traffic Matching Lists (integration v1) --------------------------------
+
+func TestListTMLs(t *testing.T) {
+	const siteID = testSiteUUID
+	expectedPath := fmt.Sprintf("/proxy/network/integration/v1/sites/%s/traffic-matching-lists", siteID)
+
+	tmlID := "dddddddd-0000-4000-8000-dddddddddddd"
+	respBody := makeV1Page(
+		apiTMLV1{
+			ID:    tmlID,
+			Type:  "IPV4_ADDRESSES",
+			Name:  "crowdsec-block-v4-0",
+			Items: []apiTMLItemV1{{Type: "IP_ADDRESS", Value: "1.2.3.4"}},
+		},
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != expectedPath {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(respBody)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	tmls, err := listTMLs(context.Background(), c, siteID)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if len(tmls) != 1 {
+		t.Fatalf("expected 1 TML, got %d", len(tmls))
+	}
+	if tmls[0].ID != tmlID {
+		t.Errorf("expected ID=%q, got %q", tmlID, tmls[0].ID)
+	}
+	if tmls[0].Name != "crowdsec-block-v4-0" {
+		t.Errorf("expected Name=crowdsec-block-v4-0, got %q", tmls[0].Name)
+	}
+	if len(tmls[0].Items) != 1 || tmls[0].Items[0].Value != "1.2.3.4" {
+		t.Errorf("unexpected items: %+v", tmls[0].Items)
+	}
+}
+
+func TestCreateTML(t *testing.T) {
+	const siteID = testSiteUUID
+	expectedPath := fmt.Sprintf("/proxy/network/integration/v1/sites/%s/traffic-matching-lists", siteID)
+
+	tmlID := "dddddddd-0000-4000-8000-dddddddddddd"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != expectedPath {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		created := apiTMLV1{
+			ID:    tmlID,
+			Type:  "IPV4_ADDRESSES",
+			Name:  "crowdsec-block-v4-0",
+			Items: []apiTMLItemV1{},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write(makeBareObject(created))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	input := TrafficMatchingList{
+		Type: "IPV4_ADDRESSES",
+		Name: "crowdsec-block-v4-0",
+	}
+
+	got, err := createTML(context.Background(), c, siteID, input)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if got.ID != tmlID {
+		t.Errorf("expected ID=%q, got %q", tmlID, got.ID)
 	}
 }
 

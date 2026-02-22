@@ -159,6 +159,10 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 				m.log.Info().Str("site", site).Str("mode", "zone").
 					Msg("[DRY-RUN] would ensure zone policies for all shards")
 			} else {
+				// Bootstrap performs fail-fast site UUID resolution and zone discovery.
+				if err := m.zoneMgr.Bootstrap(ctx, []string{site}); err != nil {
+					return fmt.Errorf("zone bootstrap for site %s: %w", site, err)
+				}
 				if err := m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr); err != nil {
 					return fmt.Errorf("ensure zone policies for site %s: %w", site, err)
 				}

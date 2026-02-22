@@ -46,32 +46,64 @@ type ZonePolicy struct {
 
 // Zone represents a UniFi network zone (topology discovery).
 type Zone struct {
-	ID   string
-	Name string
+	ID     string
+	Name   string
+	Origin string // metadata.origin from integration v1 API, e.g. "USER_DEFINED"
+}
+
+// TrafficMatchingList represents an integration v1 IP/port list (zone mode).
+type TrafficMatchingList struct {
+	ID        string
+	Type      string // "IPV4_ADDRESSES", "IPV6_ADDRESSES", "PORTS"
+	Name      string
+	GroupType string // legacy compat hint: "address-group", "ipv6-address-group"
+	Items     []TrafficMatchingListItem
+}
+
+// TrafficMatchingListItem is one entry in a TrafficMatchingList.
+type TrafficMatchingListItem struct {
+	Value string
+}
+
+// ZonePolicyReorderRequest orders user-defined policies within a zone pair.
+// Zone IDs must be integration v1 UUIDs.
+type ZonePolicyReorderRequest struct {
+	SourceZoneID           string
+	DestinationZoneID      string
+	BeforeSystemDefinedIDs []string
 }
 
 // Controller is the UniFi API seam. All methods accept context for deadline control.
 type Controller interface {
-	// Firewall Groups (address lists)
+	// Firewall Groups (address lists) — legacy mode only
 	ListFirewallGroups(ctx context.Context, site string) ([]FirewallGroup, error)
 	CreateFirewallGroup(ctx context.Context, site string, g FirewallGroup) (FirewallGroup, error)
 	UpdateFirewallGroup(ctx context.Context, site string, g FirewallGroup) error
 	DeleteFirewallGroup(ctx context.Context, site string, id string) error
 
-	// Legacy Rules (WAN_IN / WANv6_IN)
+	// Legacy Rules (WAN_IN / WANv6_IN) — legacy mode only
 	ListFirewallRules(ctx context.Context, site string) ([]FirewallRule, error)
 	CreateFirewallRule(ctx context.Context, site string, r FirewallRule) (FirewallRule, error)
 	UpdateFirewallRule(ctx context.Context, site string, r FirewallRule) error
 	DeleteFirewallRule(ctx context.Context, site string, id string) error
 
-	// Zone-Based Policies
+	// Zone-Based Policies — integration v1
 	ListZonePolicies(ctx context.Context, site string) ([]ZonePolicy, error)
 	CreateZonePolicy(ctx context.Context, site string, p ZonePolicy) (ZonePolicy, error)
 	UpdateZonePolicy(ctx context.Context, site string, p ZonePolicy) error
 	DeleteZonePolicy(ctx context.Context, site string, id string) error
+	ReorderZonePolicies(ctx context.Context, site string, req ZonePolicyReorderRequest) error
 
-	// Zones
+	// Traffic Matching Lists — integration v1, zone mode only
+	ListTrafficMatchingLists(ctx context.Context, site string) ([]TrafficMatchingList, error)
+	CreateTrafficMatchingList(ctx context.Context, site string, list TrafficMatchingList) (TrafficMatchingList, error)
+	UpdateTrafficMatchingList(ctx context.Context, site string, list TrafficMatchingList) error
+	DeleteTrafficMatchingList(ctx context.Context, site string, id string) error
+
+	// Site and Zone Resolution — integration v1
+	GetSiteID(ctx context.Context, siteName string) (string, error)
 	GetZoneID(ctx context.Context, site, zoneName string) (string, error)
+	DiscoverZones(ctx context.Context, site string) ([]Zone, error)
 
 	// Feature Detection
 	HasFeature(ctx context.Context, site string, feature string) (bool, error)

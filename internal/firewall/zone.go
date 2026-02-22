@@ -19,6 +19,7 @@ type ZoneConfig struct {
 	Description          string
 	LogDrops             bool
 	APIWriteDelay        time.Duration
+	PolicyReorder        bool // reorder bouncer policies to run before system-defined ones
 }
 
 // ZoneManager manages zone-based firewall policies.
@@ -47,13 +48,43 @@ func normalizeConnectionStates(states []string) []string {
 	return out
 }
 
+// Bootstrap performs fail-fast startup discovery for all configured sites:
+//  1. Resolves each site name to its integration v1 UUID (fails if missing).
+//  2. Fetches all firewall zones for each site (fails if unavailable).
+//  3. At DEBUG log level, emits a structured log for each discovered zone.
+func (zm *ZoneManager) Bootstrap(ctx context.Context, sites []string) error {
+	for _, site := range sites {
+		siteID, err := zm.ctrl.GetSiteID(ctx, site)
+		if err != nil {
+			return fmt.Errorf("resolve site UUID for %q: %w", site, err)
+		}
+		zm.log.Info().Str("site", site).Str("site_id", siteID).Msg("site UUID resolved")
+
+		zones, err := zm.ctrl.DiscoverZones(ctx, site)
+		if err != nil {
+			return fmt.Errorf("discover firewall zones for site %q: %w", site, err)
+		}
+		zm.log.Info().Str("site", site).Int("zone_count", len(zones)).Msg("zone discovery complete")
+
+		// Emit per-zone debug log when log level is DEBUG.
+		if zm.log.GetLevel() <= zerolog.DebugLevel {
+			for _, z := range zones {
+				zm.log.Debug().
+					Str("site", site).
+					Str("zone_name", z.Name).
+					Str("zone_id", z.ID).
+					Str("origin", z.Origin).
+					Msg("discovered zone")
+			}
+		}
+	}
+	return nil
+}
+
 // EnsurePolicies idempotently creates zone policies for each shard and zone pair.
 func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards, v6Shards *ShardManager) error {
 	zoneMap := make(map[string]string)
 	for _, pair := range zm.cfg.ZonePairs {
-		// For UDM Pro Max 10.x, zone names cannot be auto-resolved.
-		// Zone IDs must be 24-char hex ObjectIDs passed directly via ZONE_PAIRS.
-		// GetZoneID will return the value directly if it's a valid ObjectID.
 		srcZoneID, err := zm.ctrl.GetZoneID(ctx, site, pair.Src)
 		if err != nil {
 			return fmt.Errorf("resolve source zone %q: %w", pair.Src, err)
@@ -79,6 +110,12 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 		}
 	}
 
+	if zm.cfg.PolicyReorder {
+		if err := zm.reorderPolicies(ctx, site, zoneMap); err != nil {
+			zm.log.Warn().Err(err).Str("site", site).Msg("policy reorder failed (non-fatal)")
+		}
+	}
+
 	return nil
 }
 
@@ -101,7 +138,6 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 		existingByID[p.ID] = true
 	}
 
-	// Resolve zone names to UUIDs
 	srcZoneID := zoneMap[pair.Src]
 	dstZoneID := zoneMap[pair.Dst]
 
@@ -138,7 +174,7 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 		}
 		firstCreate = false
 
-		// groupID is a firewall group ID in zone mode
+		// groupID is the TML UUID in zone mode (integration v1).
 		policy := controller.ZonePolicy{
 			Name:                   policyName,
 			Enabled:                true,
@@ -172,6 +208,54 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 	return nil
 }
 
+// reorderPolicies places bouncer policies before system-defined ones for each zone pair.
+func (zm *ZoneManager) reorderPolicies(ctx context.Context, site string, zoneMap map[string]string) error {
+	policies, err := zm.ctrl.ListZonePolicies(ctx, site)
+	if err != nil {
+		return fmt.Errorf("list zone policies for reorder: %w", err)
+	}
+
+	// Build a prefix to identify our bouncer policies (check all namer-derived names).
+	// We group by zone pair and collect matching policy IDs in order.
+	for _, pair := range zm.cfg.ZonePairs {
+		srcZoneID := zoneMap[pair.Src]
+		dstZoneID := zoneMap[pair.Dst]
+		if srcZoneID == "" || dstZoneID == "" {
+			continue
+		}
+
+		var ourIDs []string
+		for _, p := range policies {
+			if p.SrcZone != srcZoneID || p.DstZone != dstZoneID {
+				continue
+			}
+			// Check whether this policy name matches our naming convention by looking
+			// it up in bbolt (any policy we stored is ours).
+			rec, _ := zm.store.GetPolicy(p.Name)
+			if rec != nil && rec.UnifiID == p.ID && rec.Mode == "zone" {
+				ourIDs = append(ourIDs, p.ID)
+			}
+		}
+
+		if len(ourIDs) == 0 {
+			continue
+		}
+
+		if err := zm.ctrl.ReorderZonePolicies(ctx, site, controller.ZonePolicyReorderRequest{
+			SourceZoneID:           srcZoneID,
+			DestinationZoneID:      dstZoneID,
+			BeforeSystemDefinedIDs: ourIDs,
+		}); err != nil {
+			return fmt.Errorf("reorder policies for %s->%s: %w", pair.Src, pair.Dst, err)
+		}
+
+		zm.log.Debug().Str("site", site).
+			Str("src", pair.Src).Str("dst", pair.Dst).
+			Int("count", len(ourIDs)).Msg("reordered zone policies")
+	}
+	return nil
+}
+
 // EnsurePoliciesForShard creates zone policies for a single new shard across all configured zone pairs.
 // Called when a new shard overflows mid-operation.
 func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID string, ipv6 bool, shardIdx int) error {
@@ -183,8 +267,6 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 
 	zoneMap := make(map[string]string)
 	for _, pair := range zm.cfg.ZonePairs {
-		// For UDM Pro Max 10.x, zone names cannot be auto-resolved.
-		// Zone IDs must be 24-char hex ObjectIDs passed directly via ZONE_PAIRS.
 		srcZoneID, err := zm.ctrl.GetZoneID(ctx, site, pair.Src)
 		if err != nil {
 			return fmt.Errorf("resolve source zone %q: %w", pair.Src, err)
@@ -234,7 +316,6 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 			}
 		}
 
-		// Resolve zone names to UUIDs for this pair
 		srcZoneID := zoneMap[pair.Src]
 		dstZoneID := zoneMap[pair.Dst]
 
@@ -330,7 +411,7 @@ func (zm *ZoneManager) DeletePolicies(ctx context.Context, site string) error {
 	return nil
 }
 
-// UpdateGroupReference updates zone policies that reference an old firewall group ID with a new one.
+// UpdateGroupReference updates zone policies that reference an old TML/group ID with a new one.
 func (zm *ZoneManager) UpdateGroupReference(ctx context.Context, site, oldGroupID, newGroupID string) error {
 	policies, err := zm.ctrl.ListZonePolicies(ctx, site)
 	if err != nil {

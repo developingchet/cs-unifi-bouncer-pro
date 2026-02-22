@@ -11,18 +11,39 @@ import (
 	"testing"
 )
 
+// Fake UUIDs used throughout these tests.
+// Using clearly non-real values to avoid confusion with live controller data.
+const (
+	testSiteUUID     = "aaaaaaaa-0000-4000-8000-aaaaaaaaaaaa"
+	testZoneInternal = "bbbbbbbb-0000-4000-8000-bbbbbbbbbbbb"
+	testZoneExternal = "cccccccc-0000-4000-8000-cccccccccccc"
+)
+
+// setSiteIDCache pre-populates the siteIDCache on a test client so that
+// getSiteID doesn't need to make HTTP calls during feature-detection tests.
+func setSiteIDCache(c *unifiClient, siteName, siteID string) {
+	c.cacheMu.Lock()
+	c.siteIDCache[siteName] = siteID
+	c.cacheMu.Unlock()
+}
+
+// zonesEndpointPrefix returns the URL path prefix for the integration v1 zones endpoint.
+func zonesEndpointPrefix(siteID string) string {
+	return fmt.Sprintf("/proxy/network/integration/v1/sites/%s/firewall/zones", siteID)
+}
+
 // TestHasFeature_ZoneFirewall_Supported verifies that hasFeature returns true
 // when the zone endpoint responds with HTTP 200.
 func TestHasFeature_ZoneFirewall_Supported(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprint(w, `{"data":[],"meta":{"rc":"ok"}}`)
+		_, _ = fmt.Fprint(w, `{"offset":0,"limit":1,"count":0,"totalCount":0,"data":[]}`)
 	}))
 	defer srv.Close()
 
 	c := newTestClient(srv.URL, "api-key")
-	c.featureCache = make(map[string]map[string]bool)
+	setSiteIDCache(c, "default", testSiteUUID)
 
 	got, err := hasFeature(context.Background(), c, "default", FeatureZoneBasedFirewall)
 	if err != nil {
@@ -42,7 +63,7 @@ func TestHasFeature_ZoneFirewall_NotSupported(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(srv.URL, "api-key")
-	c.featureCache = make(map[string]map[string]bool)
+	setSiteIDCache(c, "default", testSiteUUID)
 
 	got, err := hasFeature(context.Background(), c, "default", FeatureZoneBasedFirewall)
 	if err != nil {
@@ -62,12 +83,12 @@ func TestHasFeature_Cached(t *testing.T) {
 		atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprint(w, `{"data":[],"meta":{"rc":"ok"}}`)
+		_, _ = fmt.Fprint(w, `{"offset":0,"limit":1,"count":0,"totalCount":0,"data":[]}`)
 	}))
 	defer srv.Close()
 
 	c := newTestClient(srv.URL, "api-key")
-	c.featureCache = make(map[string]map[string]bool)
+	setSiteIDCache(c, "default", testSiteUUID)
 
 	// First call — should hit the server.
 	got1, err := hasFeature(context.Background(), c, "default", FeatureZoneBasedFirewall)
@@ -100,12 +121,13 @@ func TestHasFeature_CacheSeparatePerSite(t *testing.T) {
 		atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprint(w, `{"data":[],"meta":{"rc":"ok"}}`)
+		_, _ = fmt.Fprint(w, `{"offset":0,"limit":1,"count":0,"totalCount":0,"data":[]}`)
 	}))
 	defer srv.Close()
 
 	c := newTestClient(srv.URL, "api-key")
-	c.featureCache = make(map[string]map[string]bool)
+	setSiteIDCache(c, "a", testSiteUUID)
+	setSiteIDCache(c, "b", testSiteUUID)
 
 	// Probe site "a".
 	_, err := hasFeature(context.Background(), c, "a", FeatureZoneBasedFirewall)
@@ -131,12 +153,12 @@ func TestHasFeature_CacheConcurrent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprint(w, `{"data":[],"meta":{"rc":"ok"}}`)
+		_, _ = fmt.Fprint(w, `{"offset":0,"limit":1,"count":0,"totalCount":0,"data":[]}`)
 	}))
 	defer srv.Close()
 
 	c := newTestClient(srv.URL, "api-key")
-	c.featureCache = make(map[string]map[string]bool)
+	setSiteIDCache(c, "concurrent-site", testSiteUUID)
 
 	const goroutines = 20
 	results := make([]bool, goroutines)
@@ -177,7 +199,6 @@ func TestHasFeature_Unknown(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(srv.URL, "api-key")
-	c.featureCache = make(map[string]map[string]bool)
 
 	_, err := hasFeature(context.Background(), c, "default", "UNKNOWN_FEATURE_XYZ")
 	if err == nil {
@@ -191,34 +212,35 @@ func TestHasFeature_Unknown(t *testing.T) {
 }
 
 // TestHasFeature_UnexpectedResponse verifies that when the server returns HTTP 200
-// with an invalid (non-JSON) body, hasFeature still returns true (assumes supported).
+// with a non-HTML body, hasFeature still returns true (assumes supported).
 func TestHasFeature_UnexpectedResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
-		// Invalid JSON body — should trigger the decode-error path in detectZoneFirewall.
+		// Non-JSON, non-HTML body — first byte is 'n', not '<'.
 		_, _ = fmt.Fprint(w, `not valid json {{{`)
 	}))
 	defer srv.Close()
 
 	c := newTestClient(srv.URL, "api-key")
-	c.featureCache = make(map[string]map[string]bool)
+	setSiteIDCache(c, "default", testSiteUUID)
 
 	got, err := hasFeature(context.Background(), c, "default", FeatureZoneBasedFirewall)
 	if err != nil {
-		t.Fatalf("expected no error on invalid JSON body, got: %v", err)
+		t.Fatalf("expected no error on non-JSON body, got: %v", err)
 	}
 	if !got {
-		t.Error("expected hasFeature to return true when JSON decode fails (assume supported)")
+		t.Error("expected hasFeature to return true when body is not HTML")
 	}
 }
 
+// TestDetectZoneFirewall_HTMLResponse verifies that an HTML response (proxy
+// fallback page) causes detectZoneFirewall to return false.
 func TestDetectZoneFirewall_HTMLResponse(t *testing.T) {
-	const site = "default"
-	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-policies", site)
+	prefix := zonesEndpointPrefix(testSiteUUID)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != expectedPath {
+		if !strings.HasPrefix(r.URL.Path, prefix) {
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
 		}
@@ -229,7 +251,9 @@ func TestDetectZoneFirewall_HTMLResponse(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(srv.URL, "api-key")
-	supported, err := detectZoneFirewall(context.Background(), c, site)
+	setSiteIDCache(c, "default", testSiteUUID)
+
+	supported, err := detectZoneFirewall(context.Background(), c, "default")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -238,6 +262,8 @@ func TestDetectZoneFirewall_HTMLResponse(t *testing.T) {
 	}
 }
 
+// TestGetZoneID_MongoObjectID verifies that a 24-char hex MongoDB ObjectID is
+// passed through directly without any HTTP calls.
 func TestGetZoneID_MongoObjectID(t *testing.T) {
 	c := newTestClient("https://example.invalid", "api-key")
 	const zoneID = "67a8cc9efe6c6350dfa4dcc7"
@@ -251,12 +277,27 @@ func TestGetZoneID_MongoObjectID(t *testing.T) {
 	}
 }
 
+// TestGetZoneID_StandardUUID verifies that a standard 36-char UUID is passed
+// through directly without any HTTP calls.
+func TestGetZoneID_StandardUUID(t *testing.T) {
+	c := newTestClient("https://example.invalid", "api-key")
+
+	got, err := getZoneID(context.Background(), c, "default", testZoneInternal)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if got != testZoneInternal {
+		t.Fatalf("expected zone ID %q, got %q", testZoneInternal, got)
+	}
+}
+
+// TestGetZoneID_NameFails verifies that getZoneID returns an error when the
+// firewall zones endpoint is unavailable (HTTP 404).
 func TestGetZoneID_NameFails(t *testing.T) {
-	const site = "default"
-	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-zones", site)
+	prefix := zonesEndpointPrefix(testSiteUUID)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == expectedPath {
+		if strings.HasPrefix(r.URL.Path, prefix) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -265,27 +306,30 @@ func TestGetZoneID_NameFails(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(srv.URL, "api-key")
-	_, err := getZoneID(context.Background(), c, site, "Internal")
+	setSiteIDCache(c, "default", testSiteUUID)
+
+	_, err := getZoneID(context.Background(), c, "default", "Internal")
 	if err == nil {
-		t.Fatal("expected error for non-ObjectID zone name on controller without zone list API")
+		t.Fatal("expected error when zone list endpoint returns 404")
 	}
-	if got := err.Error(); !strings.Contains(got, "cannot be resolved") || !strings.Contains(got, "ZONE_PAIRS") {
+	if got := err.Error(); !strings.Contains(got, "firewall zones") {
 		t.Fatalf("unexpected error message: %q", got)
 	}
 }
 
+// TestGetZoneID_NameResolvedFromZoneList verifies that getZoneID resolves a zone
+// name to its UUID via the integration v1 zones endpoint.
 func TestGetZoneID_NameResolvedFromZoneList(t *testing.T) {
-	const site = "default"
-	const wantID = "67a8cc9efe6c6350dfa4dcc8"
-	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-zones", site)
+	const wantID = testZoneInternal
+	prefix := zonesEndpointPrefix(testSiteUUID)
 
-	zoneList := makeBareArray(
-		apiFirewallZone{ID: "67a8cc9efe6c6350dfa4dcc7", Name: "WAN"},
-		apiFirewallZone{ID: wantID, Name: "Internal"},
+	zoneList := makeV1Page(
+		apiFirewallZoneV1{ID: testZoneExternal, Name: "WAN"},
+		apiFirewallZoneV1{ID: wantID, Name: "Internal"},
 	)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != expectedPath {
+		if !strings.HasPrefix(r.URL.Path, prefix) {
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
 		}
@@ -296,8 +340,9 @@ func TestGetZoneID_NameResolvedFromZoneList(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(srv.URL, "api-key")
+	setSiteIDCache(c, "default", testSiteUUID)
 
-	got, err := getZoneID(context.Background(), c, site, "Internal")
+	got, err := getZoneID(context.Background(), c, "default", "Internal")
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -307,23 +352,25 @@ func TestGetZoneID_NameResolvedFromZoneList(t *testing.T) {
 
 	// Verify cache was populated.
 	c.cacheMu.RLock()
-	cached := c.zoneIDCache[site]["Internal"]
+	cached := c.zoneIDCache["default"]["Internal"]
 	c.cacheMu.RUnlock()
 	if cached != wantID {
 		t.Errorf("cache entry for %q = %q, want %q", "Internal", cached, wantID)
 	}
 }
 
+// TestGetZoneID_NameFails_ZoneNotInList verifies that getZoneID returns a
+// descriptive error when the zone list is returned but doesn't contain the
+// requested zone name.
 func TestGetZoneID_NameFails_ZoneNotInList(t *testing.T) {
-	const site = "default"
-	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-zones", site)
+	prefix := zonesEndpointPrefix(testSiteUUID)
 
-	zoneList := makeBareArray(
-		apiFirewallZone{ID: "67a8cc9efe6c6350dfa4dcc7", Name: "WAN"},
+	zoneList := makeV1Page(
+		apiFirewallZoneV1{ID: testZoneExternal, Name: "WAN"},
 	)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != expectedPath {
+		if !strings.HasPrefix(r.URL.Path, prefix) {
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
 		}
@@ -334,8 +381,9 @@ func TestGetZoneID_NameFails_ZoneNotInList(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(srv.URL, "api-key")
+	setSiteIDCache(c, "default", testSiteUUID)
 
-	_, err := getZoneID(context.Background(), c, site, "Internal")
+	_, err := getZoneID(context.Background(), c, "default", "Internal")
 	if err == nil {
 		t.Fatal("expected error when zone name is absent from zone list")
 	}

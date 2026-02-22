@@ -39,6 +39,7 @@ func newTestClient(baseURL, apiKey string) *unifiClient {
 		session:      newSessionManager(authCfg, httpClient, log),
 		featureCache: make(map[string]map[string]bool),
 		zoneIDCache:  make(map[string]map[string]string),
+		siteIDCache:  make(map[string]string),
 		log:          log,
 	}
 }

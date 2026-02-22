@@ -157,25 +157,22 @@ These settings apply only when `FIREWALL_MODE=zone` or when `auto` detects a zon
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ZONE_PAIRS` | `External->Internal` | Comma-separated `src->dst` zone pairs. A policy is created for each pair and each shard. `External` and `Internal` are the default zone names in UniFi Network 8.x — check Settings → Firewall → Zones if you have renamed them. |
+| `ZONE_PAIRS` | `External->Internal` | Comma-separated `src->dst` zone pairs. A policy is created for each pair and each shard. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. `External` and `Internal` are the default zone names in UniFi Network 8.x — check Settings → Firewall → Zones if you have renamed them. Standard UUIDs (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) and MongoDB ObjectIDs (24-char hex) are also accepted and passed through without a lookup. |
 | `ZONE_CONNECTION_STATES` | `new,invalid` | Connection states to match. Comma-separated. Values are normalized to uppercase before sending (for example `new,invalid` -> `NEW,INVALID`). |
-
-> UniFi Network 10.x (UDM OS): zone names cannot be auto-resolved on current firmware.
-> Configure `ZONE_PAIRS` with zone UUID ObjectIDs directly.
-> Discover them from `GET /proxy/network/v2/api/site/default/firewall-policies` using `source.zone_id` and `destination.zone_id`.
+| `ZONE_POLICY_REORDER` | `true` | Move bouncer-managed policies to the front of each zone pair's policy list so they evaluate before any system-defined policies. Set to `false` to preserve existing policy order. |
 
 ```bash
-# UniFi Network 10.x (UDM OS): use zone UUIDs directly
-ZONE_PAIRS=67a8cc9efe6c6350dfa4dcc7->67a8cc9efe6c6350dfa4dcc8
+# Named zones (auto-resolved at startup)
+ZONE_PAIRS=External->Internal
 
 # Multiple pairs
-ZONE_PAIRS=<zone-id-a>-><zone-id-b>,<zone-id-a>-><zone-id-c>
+ZONE_PAIRS=External->Internal,External->IoT
+
+# Pass through UUIDs directly (standard 8-4-4-4-12 format)
+ZONE_PAIRS=aaaaaaaa-0000-4000-8000-aaaaaaaaaaaa->bbbbbbbb-0000-4000-8000-bbbbbbbbbbbb
 ```
 
-Zone names must match the zone names configured in the UniFi controller exactly (case-sensitive).
-
-For UniFi Network 10.x controllers, use UUID pairs directly, for example:
-`ZONE_PAIRS=67a8cc9efe6c6350dfa4dcc7->67a8cc9efe6c6350dfa4dcc8`
+Zone names are case-sensitive and must match the names shown in Settings → Firewall → Zones. If a zone name cannot be found at startup the bouncer exits with an error listing the available zones.
 
 ---
 

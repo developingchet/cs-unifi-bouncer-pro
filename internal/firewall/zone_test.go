@@ -292,3 +292,35 @@ func TestZoneManager_DeletePoliciesForShard_NoOp(t *testing.T) {
 		t.Errorf("DeleteZonePolicy calls: got %d, want 0 (no-op)", got)
 	}
 }
+
+// TestZoneManager_Bootstrap_FailsWhenSiteMissing verifies that Bootstrap returns
+// an error when GetSiteID fails (fail-fast site UUID resolution).
+func TestZoneManager_Bootstrap_FailsWhenSiteMissing(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore()
+	namer := zoneTestNamer(t)
+
+	ctrl.SetError("GetSiteID", errTest("site not found"))
+
+	zm := newTestZoneManager(ctrl, store, namer)
+	err := zm.Bootstrap(context.Background(), []string{testSite})
+	if err == nil {
+		t.Fatal("Bootstrap: expected error when GetSiteID fails, got nil")
+	}
+}
+
+// TestZoneManager_Bootstrap_FailsWhenZonesFail verifies that Bootstrap returns
+// an error when DiscoverZones fails (fail-fast zone discovery).
+func TestZoneManager_Bootstrap_FailsWhenZonesFail(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore()
+	namer := zoneTestNamer(t)
+
+	ctrl.SetError("DiscoverZones", errTest("zones unavailable"))
+
+	zm := newTestZoneManager(ctrl, store, namer)
+	err := zm.Bootstrap(context.Background(), []string{testSite})
+	if err == nil {
+		t.Fatal("Bootstrap: expected error when DiscoverZones fails, got nil")
+	}
+}

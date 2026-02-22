@@ -40,6 +40,7 @@ type unifiClient struct {
 	featureCache map[string]map[string]bool // site -> feature -> bool
 	cacheMu      sync.RWMutex
 	zoneIDCache  map[string]map[string]string // site key -> zone input -> zone UUID
+	siteIDCache  map[string]string            // site internalReference -> integration v1 UUID
 	log          zerolog.Logger
 }
 
@@ -102,6 +103,7 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 		http:         httpClient,
 		featureCache: make(map[string]map[string]bool),
 		zoneIDCache:  make(map[string]map[string]string),
+		siteIDCache:  make(map[string]string),
 		log:          log,
 	}
 
@@ -288,26 +290,98 @@ func (c *unifiClient) DeleteFirewallRule(ctx context.Context, site string, id st
 	return deleteFirewallRule(ctx, c, site, id)
 }
 
-// ---- Zone Policies ---------------------------------------------------------
+// ---- Site and Zone Resolution (integration v1) -----------------------------
 
-func (c *unifiClient) ListZonePolicies(ctx context.Context, site string) ([]ZonePolicy, error) {
-	return listZonePolicies(ctx, c, site)
-}
-
-func (c *unifiClient) CreateZonePolicy(ctx context.Context, site string, p ZonePolicy) (ZonePolicy, error) {
-	return createZonePolicy(ctx, c, site, p)
-}
-
-func (c *unifiClient) UpdateZonePolicy(ctx context.Context, site string, p ZonePolicy) error {
-	return updateZonePolicy(ctx, c, site, p)
-}
-
-func (c *unifiClient) DeleteZonePolicy(ctx context.Context, site string, id string) error {
-	return deleteZonePolicy(ctx, c, site, id)
+func (c *unifiClient) GetSiteID(ctx context.Context, siteName string) (string, error) {
+	return getSiteID(ctx, c, siteName)
 }
 
 func (c *unifiClient) GetZoneID(ctx context.Context, site, zoneName string) (string, error) {
 	return getZoneID(ctx, c, site, zoneName)
+}
+
+func (c *unifiClient) DiscoverZones(ctx context.Context, site string) ([]Zone, error) {
+	siteID, err := getSiteID(ctx, c, site)
+	if err != nil {
+		return nil, err
+	}
+	return listFirewallZones(ctx, c, siteID)
+}
+
+// ---- Zone Policies (integration v1) ----------------------------------------
+
+func (c *unifiClient) ListZonePolicies(ctx context.Context, site string) ([]ZonePolicy, error) {
+	siteID, err := getSiteID(ctx, c, site)
+	if err != nil {
+		return nil, err
+	}
+	return listZonePoliciesV1(ctx, c, siteID)
+}
+
+func (c *unifiClient) CreateZonePolicy(ctx context.Context, site string, p ZonePolicy) (ZonePolicy, error) {
+	siteID, err := getSiteID(ctx, c, site)
+	if err != nil {
+		return ZonePolicy{}, err
+	}
+	return createZonePolicyV1(ctx, c, siteID, p)
+}
+
+func (c *unifiClient) UpdateZonePolicy(ctx context.Context, site string, p ZonePolicy) error {
+	siteID, err := getSiteID(ctx, c, site)
+	if err != nil {
+		return err
+	}
+	return updateZonePolicyV1(ctx, c, siteID, p)
+}
+
+func (c *unifiClient) DeleteZonePolicy(ctx context.Context, site string, id string) error {
+	siteID, err := getSiteID(ctx, c, site)
+	if err != nil {
+		return err
+	}
+	return deleteZonePolicyV1(ctx, c, siteID, id)
+}
+
+func (c *unifiClient) ReorderZonePolicies(ctx context.Context, site string, req ZonePolicyReorderRequest) error {
+	siteID, err := getSiteID(ctx, c, site)
+	if err != nil {
+		return err
+	}
+	return reorderZonePolicies(ctx, c, siteID, req)
+}
+
+// ---- Traffic Matching Lists (integration v1) --------------------------------
+
+func (c *unifiClient) ListTrafficMatchingLists(ctx context.Context, site string) ([]TrafficMatchingList, error) {
+	siteID, err := getSiteID(ctx, c, site)
+	if err != nil {
+		return nil, err
+	}
+	return listTMLs(ctx, c, siteID)
+}
+
+func (c *unifiClient) CreateTrafficMatchingList(ctx context.Context, site string, list TrafficMatchingList) (TrafficMatchingList, error) {
+	siteID, err := getSiteID(ctx, c, site)
+	if err != nil {
+		return TrafficMatchingList{}, err
+	}
+	return createTML(ctx, c, siteID, list)
+}
+
+func (c *unifiClient) UpdateTrafficMatchingList(ctx context.Context, site string, list TrafficMatchingList) error {
+	siteID, err := getSiteID(ctx, c, site)
+	if err != nil {
+		return err
+	}
+	return updateTML(ctx, c, siteID, list)
+}
+
+func (c *unifiClient) DeleteTrafficMatchingList(ctx context.Context, site string, id string) error {
+	siteID, err := getSiteID(ctx, c, site)
+	if err != nil {
+		return err
+	}
+	return deleteTML(ctx, c, siteID, id)
 }
 
 // ---- Feature Detection -----------------------------------------------------

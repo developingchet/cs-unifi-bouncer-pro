@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 )
 
-// --- Wire types (JSON mapping to UniFi API responses) -----------------------
+// --- Legacy REST wire types -------------------------------------------------
 
 type apiGroup struct {
 	ID           string   `json:"_id,omitempty"`
@@ -30,55 +33,90 @@ type apiRule struct {
 	SrcFirewallGroupIDs []string `json:"src_firewallgroup_ids"`
 }
 
-// --- Proxy v2 API wire types for zone policies -------------------------------
-// These match the live UDM Pro Max firmware 10.1.85 proxy API.
+// --- Integration v1 wire types ----------------------------------------------
 
-type proxyPolicy struct {
-	ID                    string              `json:"_id,omitempty"`
-	Name                  string              `json:"name"`
-	Description           string              `json:"description,omitempty"`
-	Action                string              `json:"action"`
-	Enabled               bool                `json:"enabled"`
-	IPVersion             string              `json:"ip_version"`
-	Logging               bool                `json:"logging"`
-	Protocol              string              `json:"protocol,omitempty"`
-	Predefined            bool                `json:"predefined,omitempty"`
-	ConnectionStateType   string              `json:"connection_state_type"`
-	ConnectionStates      []string            `json:"connection_states"`
-	CreateAllowRespond    bool                `json:"create_allow_respond"`
-	MatchIPSec            bool                `json:"match_ip_sec"`
-	MatchOppositeProtocol bool                `json:"match_opposite_protocol"`
-	ICMPTypename          string              `json:"icmp_typename,omitempty"`
-	ICMPv6Typename        string              `json:"icmp_v6_typename,omitempty"`
-	Index                 int                 `json:"index,omitempty"`
-	Schedule              proxyPolicySchedule `json:"schedule"`
-	Source                proxyPolicyMatch    `json:"source"`
-	Destination           proxyPolicyMatch    `json:"destination"`
+// apiSiteV1 is returned by GET /proxy/network/integration/v1/sites.
+type apiSiteV1 struct {
+	ID                string `json:"id"`
+	InternalReference string `json:"internalReference"`
+	Name              string `json:"name"`
 }
 
-type proxyPolicySchedule struct {
-	Mode         string   `json:"mode"`
-	RepeatOnDays []string `json:"repeat_on_days,omitempty"`
-	TimeAllDay   bool     `json:"time_all_day,omitempty"`
+// apiV1Page is the pagination envelope for all integration v1 list endpoints.
+type apiV1Page struct {
+	Offset     int               `json:"offset"`
+	Limit      int               `json:"limit"`
+	Count      int               `json:"count"`
+	TotalCount int               `json:"totalCount"`
+	Data       []json.RawMessage `json:"data"`
 }
 
-type proxyPolicyMatch struct {
-	ZoneID             string   `json:"zone_id"`
-	MatchingTarget     string   `json:"matching_target"`
-	MatchingTargetType string   `json:"matching_target_type,omitempty"`
-	IPGroupID          string   `json:"ip_group_id,omitempty"`
-	IPs                []string `json:"ips,omitempty"`
-	MatchMAC           bool     `json:"match_mac,omitempty"`
-	MatchOppositeIPs   bool     `json:"match_opposite_ips,omitempty"`
-	MatchOppositePorts bool     `json:"match_opposite_ports,omitempty"`
-	PortMatchingType   string   `json:"port_matching_type,omitempty"`
+// apiFirewallZoneV1 is the zone wire type for the integration v1 API.
+// The id field is a UUID (not a MongoDB ObjectID).
+type apiFirewallZoneV1 struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Metadata struct {
+		Origin string `json:"origin"`
+	} `json:"metadata"`
 }
 
-// apiFirewallZone is the wire type returned by
-// GET /proxy/network/v2/api/site/{site}/firewall-zones.
-type apiFirewallZone struct {
-	ID   string `json:"_id"`
-	Name string `json:"name"`
+// apiTMLItemV1 is one entry in an integration v1 TML.
+type apiTMLItemV1 struct {
+	Type  string      `json:"type"`   // "IP_ADDRESS", "SUBNET", "PORT_NUMBER"
+	Value interface{} `json:"value"`  // string for IPs/subnets, int for ports
+}
+
+// apiTMLV1 is the integration v1 Traffic Matching List wire type.
+type apiTMLV1 struct {
+	ID    string         `json:"id,omitempty"`
+	Type  string         `json:"type"`  // "IPV4_ADDRESSES", "IPV6_ADDRESSES", "PORTS"
+	Name  string         `json:"name"`
+	Items []apiTMLItemV1 `json:"items"`
+}
+
+// Integration v1 zone policy wire types.
+type apiV1PolicyAction struct {
+	Type               string `json:"type"`                         // "BLOCK", "ALLOW", "REJECT"
+	AllowReturnTraffic bool   `json:"allowReturnTraffic,omitempty"` // only for ALLOW
+}
+
+type apiV1IPAddressFilter struct {
+	Type                  string `json:"type"`                            // "TRAFFIC_MATCHING_LIST"
+	MatchOpposite         bool   `json:"matchOpposite"`
+	TrafficMatchingListID string `json:"trafficMatchingListId,omitempty"`
+}
+
+type apiV1TrafficFilter struct {
+	Type            string                `json:"type,omitempty"` // "IP_ADDRESS"
+	IPAddressFilter *apiV1IPAddressFilter `json:"ipAddressFilter,omitempty"`
+}
+
+type apiV1PolicySrc struct {
+	ZoneID        string              `json:"zoneId"`
+	TrafficFilter *apiV1TrafficFilter `json:"trafficFilter,omitempty"`
+}
+
+type apiV1PolicyDst struct {
+	ZoneID string `json:"zoneId"`
+}
+
+type apiV1IPScope struct {
+	IPVersion string `json:"ipVersion"` // "IPV4", "IPV6", "IPV4_AND_IPV6"
+}
+
+type apiV1Policy struct {
+	ID                    string            `json:"id,omitempty"`
+	Enabled               bool              `json:"enabled"`
+	Name                  string            `json:"name"`
+	Description           string            `json:"description,omitempty"`
+	Index                 int               `json:"index,omitempty"`
+	Action                apiV1PolicyAction `json:"action"`
+	Source                apiV1PolicySrc    `json:"source"`
+	Destination           apiV1PolicyDst    `json:"destination"`
+	IPProtocolScope       apiV1IPScope      `json:"ipProtocolScope"`
+	ConnectionStateFilter []string          `json:"connectionStateFilter,omitempty"`
+	LoggingEnabled        bool              `json:"loggingEnabled"`
 }
 
 // --- Generic HTTP helpers ---------------------------------------------------
@@ -127,25 +165,6 @@ func doPOST(ctx context.Context, c *unifiClient, url, endpoint string, payload i
 		}
 		if len(body.Data) > 0 {
 			result = body.Data[0]
-		}
-		return nil
-	})
-}
-
-func doGETv2(ctx context.Context, c *unifiClient, url, endpoint string) ([]json.RawMessage, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	var result []json.RawMessage
-	return result, c.withReauth(ctx, func() error {
-		resp, err := c.apiDo(ctx, req, endpoint)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return fmt.Errorf("decode response: %w", err)
 		}
 		return nil
 	})
@@ -210,7 +229,7 @@ func doDELETE(ctx context.Context, c *unifiClient, url, endpoint string) error {
 	})
 }
 
-// --- Firewall Groups --------------------------------------------------------
+// --- Firewall Groups (legacy REST) ------------------------------------------
 
 func listFirewallGroups(ctx context.Context, c *unifiClient, site string) ([]FirewallGroup, error) {
 	data, err := doGET(ctx, c, groupEndpoint(c.cfg.BaseURL, site), "list-groups")
@@ -262,16 +281,16 @@ func updateFirewallGroup(ctx context.Context, c *unifiClient, site string, g Fir
 		GroupType:    g.GroupType,
 		GroupMembers: g.GroupMembers,
 	}
-	url := groupEndpoint(c.cfg.BaseURL, site) + "/" + g.ID
-	return doPUT(ctx, c, url, "update-group", payload)
+	u := groupEndpoint(c.cfg.BaseURL, site) + "/" + g.ID
+	return doPUT(ctx, c, u, "update-group", payload)
 }
 
 func deleteFirewallGroup(ctx context.Context, c *unifiClient, site, id string) error {
-	url := groupEndpoint(c.cfg.BaseURL, site) + "/" + id
-	return doDELETE(ctx, c, url, "delete-group")
+	u := groupEndpoint(c.cfg.BaseURL, site) + "/" + id
+	return doDELETE(ctx, c, u, "delete-group")
 }
 
-// --- Firewall Rules ---------------------------------------------------------
+// --- Firewall Rules (legacy REST) -------------------------------------------
 
 func listFirewallRules(ctx context.Context, c *unifiClient, site string) ([]FirewallRule, error) {
 	data, err := doGET(ctx, c, ruleEndpoint(c.cfg.BaseURL, site), "list-rules")
@@ -342,168 +361,313 @@ func updateFirewallRule(ctx context.Context, c *unifiClient, site string, r Fire
 		Protocol:            r.Protocol,
 		SrcFirewallGroupIDs: r.SrcFirewallGroupIDs,
 	}
-	url := ruleEndpoint(c.cfg.BaseURL, site) + "/" + r.ID
-	return doPUT(ctx, c, url, "update-rule", payload)
+	u := ruleEndpoint(c.cfg.BaseURL, site) + "/" + r.ID
+	return doPUT(ctx, c, u, "update-rule", payload)
 }
 
 func deleteFirewallRule(ctx context.Context, c *unifiClient, site, id string) error {
-	url := ruleEndpoint(c.cfg.BaseURL, site) + "/" + id
-	return doDELETE(ctx, c, url, "delete-rule")
+	u := ruleEndpoint(c.cfg.BaseURL, site) + "/" + id
+	return doDELETE(ctx, c, u, "delete-rule")
 }
 
-// --- Zone Policies (proxy v2 API) ------------------------------------------
+// --- Integration v1 helpers -------------------------------------------------
 
-// proxyPolicyFromModel builds a proxyPolicy from a ZonePolicy model.
-func proxyPolicyFromModel(p ZonePolicy) proxyPolicy {
-	connStateType := "ALL"
-	connStates := []string{}
-	if len(p.ConnectionStateFilter) > 0 {
-		connStateType = "CUSTOM"
-		connStates = p.ConnectionStateFilter
-	}
-
-	src := proxyPolicyMatch{
-		ZoneID:             p.SrcZone,
-		IPs:                []string{},
-		MatchMAC:           false,
-		MatchOppositeIPs:   false,
-		MatchOppositePorts: false,
-		PortMatchingType:   "ANY",
-	}
-	if len(p.TrafficMatchingListIDs) > 0 && p.TrafficMatchingListIDs[0] != "" {
-		src.MatchingTarget = "IP"
-		src.MatchingTargetType = "OBJECT"
-		src.IPGroupID = p.TrafficMatchingListIDs[0]
-	} else {
-		src.MatchingTarget = "ANY"
-	}
-
-	dst := proxyPolicyMatch{
-		ZoneID:             p.DstZone,
-		MatchingTarget:     "ANY",
-		MatchOppositePorts: false,
-		PortMatchingType:   "ANY",
-	}
-
-	ipVersion := p.IPVersion
-	if ipVersion == "" {
-		ipVersion = "IPV4"
-	}
-
-	return proxyPolicy{
-		Name:                  p.Name,
-		Description:           p.Description,
-		Action:                "BLOCK",
-		Enabled:               p.Enabled,
-		IPVersion:             ipVersion,
-		Logging:               p.LoggingEnabled,
-		Protocol:              "all",
-		ConnectionStateType:   connStateType,
-		ConnectionStates:      connStates,
-		CreateAllowRespond:    false,
-		MatchIPSec:            false,
-		MatchOppositeProtocol: false,
-		ICMPTypename:          "ANY",
-		ICMPv6Typename:        "ANY",
-		Schedule: proxyPolicySchedule{
-			Mode:         "ALWAYS",
-			RepeatOnDays: []string{},
-			TimeAllDay:   false,
-		},
-		Source:      src,
-		Destination: dst,
-	}
-}
-
-// zonePolicyFromProxy converts a proxyPolicy to a ZonePolicy model.
-func zonePolicyFromProxy(p proxyPolicy) ZonePolicy {
-	return ZonePolicy{
-		ID:                     p.ID,
-		Name:                   p.Name,
-		Enabled:                p.Enabled,
-		Action:                 p.Action,
-		Description:            p.Description,
-		SrcZone:                p.Source.ZoneID,
-		DstZone:                p.Destination.ZoneID,
-		IPVersion:              p.IPVersion,
-		TrafficMatchingListIDs: tmlIDsFromProxy(p.Source),
-		Predefined:             p.Predefined,
-		ConnectionStateFilter:  p.ConnectionStates,
-		LoggingEnabled:         p.Logging,
-	}
-}
-
-// tmlIDsFromProxy extracts traffic matching list IDs from the source endpoint.
-func tmlIDsFromProxy(src proxyPolicyMatch) []string {
-	if src.IPGroupID != "" {
-		return []string{src.IPGroupID}
-	}
-	return nil
-}
-
-// listZonePolicies fetches all zone policies from the proxy v2 API.
-// The site parameter is a site name (not a UUID).
-func listZonePolicies(ctx context.Context, c *unifiClient, site string) ([]ZonePolicy, error) {
-	data, err := doGETv2(ctx, c, proxyPolicyEndpoint(c.cfg.BaseURL, site), "list-policies")
+// listAllV1Pages fetches all pages from an integration v1 paginated endpoint.
+func listAllV1Pages(ctx context.Context, c *unifiClient, endpointURL, metricEndpoint string) ([]json.RawMessage, error) {
+	const pageLimit = 200
+	base, err := url.Parse(endpointURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse URL %q: %w", endpointURL, err)
 	}
-	policies := make([]ZonePolicy, 0, len(data))
+	var all []json.RawMessage
+	offset := 0
+	for {
+		u := *base
+		q := u.Query()
+		q.Set("offset", strconv.Itoa(offset))
+		q.Set("limit", strconv.Itoa(pageLimit))
+		u.RawQuery = q.Encode()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+		var page apiV1Page
+		err = c.withReauth(ctx, func() error {
+			resp, err := c.apiDo(ctx, req, metricEndpoint)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			return json.NewDecoder(resp.Body).Decode(&page)
+		})
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page.Data...)
+		if len(page.Data) == 0 || (page.TotalCount > 0 && offset+page.Count >= page.TotalCount) {
+			break
+		}
+		offset += page.Count
+	}
+	return all, nil
+}
+
+// getSiteID resolves a site internalReference to its integration v1 UUID.
+// Results are cached on the client.
+func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, error) {
+	c.cacheMu.RLock()
+	if id, ok := c.siteIDCache[siteName]; ok {
+		c.cacheMu.RUnlock()
+		return id, nil
+	}
+	c.cacheMu.RUnlock()
+
+	endpointURL := c.cfg.BaseURL + "/proxy/network/integration/v1/sites"
+	data, err := listAllV1Pages(ctx, c, endpointURL, "list-sites")
+	if err != nil {
+		return "", fmt.Errorf("fetch integration v1 sites: %w", err)
+	}
+
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
 	for _, raw := range data {
-		var p proxyPolicy
-		if err := json.Unmarshal(raw, &p); err != nil {
+		var s apiSiteV1
+		if err := json.Unmarshal(raw, &s); err != nil {
 			continue
 		}
-		policies = append(policies, zonePolicyFromProxy(p))
+		// Cache by both internalReference and display name for convenience.
+		c.siteIDCache[s.InternalReference] = s.ID
+		c.siteIDCache[s.Name] = s.ID
+		c.siteIDCache[s.ID] = s.ID // also cache UUID → UUID
 	}
-	return policies, nil
-}
-
-// createZonePolicy creates a new zone policy via the proxy v2 API.
-// The site parameter is a site name (not a UUID).
-func createZonePolicy(ctx context.Context, c *unifiClient, site string, p ZonePolicy) (ZonePolicy, error) {
-	payload := proxyPolicyFromModel(p)
-	raw, err := doPOSTv2(ctx, c, proxyPolicyEndpoint(c.cfg.BaseURL, site), "create-policy", payload)
-	if err != nil {
-		return ZonePolicy{}, err
+	if id, ok := c.siteIDCache[siteName]; ok {
+		return id, nil
 	}
-	var created proxyPolicy
-	if err := json.Unmarshal(raw, &created); err != nil {
-		return ZonePolicy{}, fmt.Errorf("decode created policy: %w", err)
-	}
-	return zonePolicyFromProxy(created), nil
+	return "", fmt.Errorf("site %q not found in integration v1 sites list", siteName)
 }
 
-// updateZonePolicy updates an existing zone policy via the proxy v2 API.
-// The site parameter is a site name (not a UUID).
-func updateZonePolicy(ctx context.Context, c *unifiClient, site string, p ZonePolicy) error {
-	payload := proxyPolicyFromModel(p)
-	url := proxyPolicyEndpoint(c.cfg.BaseURL, site) + "/" + p.ID
-	return doPUT(ctx, c, url, "update-policy", payload)
-}
+// --- Firewall Zones (integration v1) ----------------------------------------
 
-// deleteZonePolicy deletes a zone policy via the proxy v2 API.
-// The site parameter is a site name (not a UUID).
-func deleteZonePolicy(ctx context.Context, c *unifiClient, site, id string) error {
-	url := proxyPolicyEndpoint(c.cfg.BaseURL, site) + "/" + id
-	return doDELETE(ctx, c, url, "delete-policy")
-}
-
-// listFirewallZones fetches all firewall zones from the proxy v2 API.
-// Returns ErrNotFound on controllers that do not support this endpoint.
-func listFirewallZones(ctx context.Context, c *unifiClient, site string) ([]Zone, error) {
-	url := fmt.Sprintf("%s/proxy/network/v2/api/site/%s/firewall-zones", c.cfg.BaseURL, site)
-	data, err := doGETv2(ctx, c, url, "list-zones")
+// listFirewallZones fetches all zones from the integration v1 API.
+// siteID must be the site UUID (from getSiteID), not the site name.
+func listFirewallZones(ctx context.Context, c *unifiClient, siteID string) ([]Zone, error) {
+	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/zones",
+		c.cfg.BaseURL, siteID)
+	data, err := listAllV1Pages(ctx, c, endpointURL, "list-zones")
 	if err != nil {
 		return nil, err
 	}
 	zones := make([]Zone, 0, len(data))
 	for _, raw := range data {
-		var z apiFirewallZone
+		var z apiFirewallZoneV1
 		if err := json.Unmarshal(raw, &z); err != nil {
 			continue
 		}
-		zones = append(zones, Zone{ID: z.ID, Name: z.Name})
+		zones = append(zones, Zone{ID: z.ID, Name: z.Name, Origin: z.Metadata.Origin})
 	}
 	return zones, nil
+}
+
+// --- Traffic Matching Lists (integration v1) ---------------------------------
+
+func listTMLs(ctx context.Context, c *unifiClient, siteID string) ([]TrafficMatchingList, error) {
+	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/traffic-matching-lists",
+		c.cfg.BaseURL, siteID)
+	data, err := listAllV1Pages(ctx, c, endpointURL, "list-tmls")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]TrafficMatchingList, 0, len(data))
+	for _, raw := range data {
+		var t apiTMLV1
+		if err := json.Unmarshal(raw, &t); err != nil {
+			continue
+		}
+		out = append(out, tmlFromWire(t))
+	}
+	return out, nil
+}
+
+func createTML(ctx context.Context, c *unifiClient, siteID string, list TrafficMatchingList) (TrafficMatchingList, error) {
+	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/traffic-matching-lists",
+		c.cfg.BaseURL, siteID)
+	raw, err := doPOSTv2(ctx, c, endpointURL, "create-tml", tmlToWire(list))
+	if err != nil {
+		return TrafficMatchingList{}, err
+	}
+	var created apiTMLV1
+	if err := json.Unmarshal(raw, &created); err != nil {
+		return TrafficMatchingList{}, fmt.Errorf("decode created TML: %w", err)
+	}
+	return tmlFromWire(created), nil
+}
+
+func updateTML(ctx context.Context, c *unifiClient, siteID string, list TrafficMatchingList) error {
+	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/traffic-matching-lists/%s",
+		c.cfg.BaseURL, siteID, list.ID)
+	return doPUT(ctx, c, endpointURL, "update-tml", tmlToWire(list))
+}
+
+func deleteTML(ctx context.Context, c *unifiClient, siteID, id string) error {
+	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/traffic-matching-lists/%s",
+		c.cfg.BaseURL, siteID, id)
+	return doDELETE(ctx, c, endpointURL, "delete-tml")
+}
+
+func tmlToWire(list TrafficMatchingList) apiTMLV1 {
+	items := make([]apiTMLItemV1, 0, len(list.Items))
+	for _, item := range list.Items {
+		t := "IP_ADDRESS"
+		if strings.Contains(item.Value, "/") {
+			t = "SUBNET"
+		}
+		items = append(items, apiTMLItemV1{Type: t, Value: item.Value})
+	}
+	tmlType := list.Type
+	if tmlType == "" {
+		if list.GroupType == "ipv6-address-group" {
+			tmlType = "IPV6_ADDRESSES"
+		} else {
+			tmlType = "IPV4_ADDRESSES"
+		}
+	}
+	return apiTMLV1{ID: list.ID, Type: tmlType, Name: list.Name, Items: items}
+}
+
+func tmlFromWire(t apiTMLV1) TrafficMatchingList {
+	items := make([]TrafficMatchingListItem, 0, len(t.Items))
+	for _, item := range t.Items {
+		val := fmt.Sprintf("%v", item.Value)
+		items = append(items, TrafficMatchingListItem{Value: val})
+	}
+	return TrafficMatchingList{ID: t.ID, Type: t.Type, Name: t.Name, Items: items}
+}
+
+// --- Zone Policies (integration v1) -----------------------------------------
+
+func listZonePoliciesV1(ctx context.Context, c *unifiClient, siteID string) ([]ZonePolicy, error) {
+	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies",
+		c.cfg.BaseURL, siteID)
+	data, err := listAllV1Pages(ctx, c, endpointURL, "list-policies")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ZonePolicy, 0, len(data))
+	for _, raw := range data {
+		var p apiV1Policy
+		if err := json.Unmarshal(raw, &p); err != nil {
+			continue
+		}
+		out = append(out, v1PolicyToModel(p))
+	}
+	return out, nil
+}
+
+func createZonePolicyV1(ctx context.Context, c *unifiClient, siteID string, policy ZonePolicy) (ZonePolicy, error) {
+	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies",
+		c.cfg.BaseURL, siteID)
+	raw, err := doPOSTv2(ctx, c, endpointURL, "create-policy", modelToV1Policy(policy))
+	if err != nil {
+		return ZonePolicy{}, err
+	}
+	var created apiV1Policy
+	if err := json.Unmarshal(raw, &created); err != nil {
+		return ZonePolicy{}, fmt.Errorf("decode created policy: %w", err)
+	}
+	return v1PolicyToModel(created), nil
+}
+
+func updateZonePolicyV1(ctx context.Context, c *unifiClient, siteID string, policy ZonePolicy) error {
+	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies/%s",
+		c.cfg.BaseURL, siteID, policy.ID)
+	return doPUT(ctx, c, endpointURL, "update-policy", modelToV1Policy(policy))
+}
+
+func deleteZonePolicyV1(ctx context.Context, c *unifiClient, siteID, id string) error {
+	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies/%s",
+		c.cfg.BaseURL, siteID, id)
+	return doDELETE(ctx, c, endpointURL, "delete-policy")
+}
+
+func v1PolicyToModel(p apiV1Policy) ZonePolicy {
+	var tmlIDs []string
+	if p.Source.TrafficFilter != nil &&
+		p.Source.TrafficFilter.IPAddressFilter != nil &&
+		p.Source.TrafficFilter.IPAddressFilter.TrafficMatchingListID != "" {
+		tmlIDs = []string{p.Source.TrafficFilter.IPAddressFilter.TrafficMatchingListID}
+	}
+	ipVersion := p.IPProtocolScope.IPVersion
+	if ipVersion == "IPV4_AND_IPV6" {
+		ipVersion = "BOTH"
+	}
+	return ZonePolicy{
+		ID:                    p.ID,
+		Name:                  p.Name,
+		Description:           p.Description,
+		Enabled:               p.Enabled,
+		Action:                p.Action.Type,
+		SrcZone:               p.Source.ZoneID,
+		DstZone:               p.Destination.ZoneID,
+		IPVersion:             ipVersion,
+		ConnectionStateFilter: p.ConnectionStateFilter,
+		LoggingEnabled:        p.LoggingEnabled,
+		TrafficMatchingListIDs: tmlIDs,
+	}
+}
+
+func modelToV1Policy(p ZonePolicy) apiV1Policy {
+	src := apiV1PolicySrc{ZoneID: p.SrcZone}
+	if len(p.TrafficMatchingListIDs) > 0 && p.TrafficMatchingListIDs[0] != "" {
+		src.TrafficFilter = &apiV1TrafficFilter{
+			Type: "IP_ADDRESS",
+			IPAddressFilter: &apiV1IPAddressFilter{
+				Type:                  "TRAFFIC_MATCHING_LIST",
+				MatchOpposite:         false,
+				TrafficMatchingListID: p.TrafficMatchingListIDs[0],
+			},
+		}
+	}
+	ipVersion := p.IPVersion
+	switch ipVersion {
+	case "BOTH":
+		ipVersion = "IPV4_AND_IPV6"
+	case "":
+		ipVersion = "IPV4"
+	}
+	return apiV1Policy{
+		ID:                    p.ID,
+		Enabled:               p.Enabled,
+		Name:                  p.Name,
+		Description:           p.Description,
+		Action:                apiV1PolicyAction{Type: p.Action},
+		Source:                src,
+		Destination:           apiV1PolicyDst{ZoneID: p.DstZone},
+		IPProtocolScope:       apiV1IPScope{IPVersion: ipVersion},
+		ConnectionStateFilter: p.ConnectionStateFilter,
+		LoggingEnabled:        p.LoggingEnabled,
+	}
+}
+
+// --- Policy Reorder (integration v1) ----------------------------------------
+
+func reorderZonePolicies(ctx context.Context, c *unifiClient, siteID string, req ZonePolicyReorderRequest) error {
+	base := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies/ordering",
+		c.cfg.BaseURL, siteID)
+	u, err := url.Parse(base)
+	if err != nil {
+		return err
+	}
+	q := u.Query()
+	q.Set("sourceFirewallZoneId", req.SourceZoneID)
+	q.Set("destinationFirewallZoneId", req.DestinationZoneID)
+	u.RawQuery = q.Encode()
+
+	payload := map[string]interface{}{
+		"orderedFirewallPolicyIds": map[string]interface{}{
+			"beforeSystemDefined": req.BeforeSystemDefinedIDs,
+			"afterSystemDefined":  []string{},
+		},
+	}
+	return doPUT(ctx, c, u.String(), "reorder-policies", payload)
 }

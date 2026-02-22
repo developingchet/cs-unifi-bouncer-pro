@@ -57,6 +57,7 @@ type Config struct {
 	// Zone-Based Firewall Mode
 	ZonePairs            []string `koanf:"zone_pairs"`
 	ZoneConnectionStates []string `koanf:"zone_connection_states"`
+	ZonePolicyReorder    bool     `koanf:"zone_policy_reorder"`
 
 	// CrowdSec Decision Filtering
 	CrowdSecLAPIURL         string        `koanf:"crowdsec_lapi_url"`
@@ -193,6 +194,7 @@ func defaults() map[string]interface{} {
 		"legacy_ruleset_v6":           "WANv6_IN",
 		"zone_pairs":                  "External->Internal",
 		"zone_connection_states":      "new,invalid",
+		"zone_policy_reorder":         true,
 		"crowdsec_lapi_url":           "http://crowdsec:8080",
 		"crowdsec_lapi_verify_tls":    true,
 		"crowdsec_poll_interval":      "30s",

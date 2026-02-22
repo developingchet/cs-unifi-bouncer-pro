@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -62,10 +61,18 @@ func hasFeature(ctx context.Context, c *unifiClient, site, feature string) (bool
 	return result, nil
 }
 
-// detectZoneFirewall probes the proxy v2 zone policy endpoint.
-// Returns false if the endpoint returns HTML (endpoint doesn't exist).
+// detectZoneFirewall probes the integration v1 firewall zones endpoint.
+// Returns false if the site UUID cannot be resolved or the endpoint is unavailable.
 func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, proxyPolicyEndpoint(c.cfg.BaseURL, site), nil)
+	siteID, err := getSiteID(ctx, c, site)
+	if err != nil {
+		// Cannot resolve site UUID — integration v1 not available; fall back to legacy.
+		return false, nil
+	}
+
+	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/zones?limit=1",
+		c.cfg.BaseURL, siteID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointURL, nil)
 	if err != nil {
 		return false, err
 	}
@@ -81,13 +88,13 @@ func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool,
 			return err
 		}
 		defer resp.Body.Close()
-		// Peek at first byte — HTML responses start with '<'
+		// Peek at first byte — HTML responses (proxy fallback) start with '<'
 		buf := make([]byte, 1)
 		if n, _ := resp.Body.Read(buf); n > 0 && buf[0] == '<' {
 			supported = false
 			return nil
 		}
-		supported = true
+		supported = resp.StatusCode == http.StatusOK
 		return nil
 	})
 	return supported, callErr
@@ -111,20 +118,11 @@ func ruleEndpoint(base, site string) string {
 	return fmt.Sprintf("%s/proxy/network/api/s/%s/rest/firewallrule", base, site)
 }
 
-// Proxy v2 API endpoints (site name, not UUID).
-// These match the UDM Pro Max firmware 10.1.85 proxy API.
+// --- Zone ID Resolution (integration v1) ------------------------------------
 
-func proxyPolicyEndpoint(base, site string) string {
-	return fmt.Sprintf("%s/proxy/network/v2/api/site/%s/firewall-policies", base, site)
-}
-
-// --- Zone ID Resolution (proxy v2 API) -------------------------------------
-
-// getZoneID resolves a zone identifier for a given site key.
-// For UDM Pro Max firmware 10.x, zone names cannot be resolved automatically
-// since there's no zone list API. Zone IDs are MongoDB ObjectIDs (24 hex chars).
-// If zoneName is already a 24-char hex ObjectID, it is used directly.
-// Otherwise, returns an error telling the user to use zone UUIDs directly.
+// getZoneID resolves a zone identifier (name or UUID) for a given site.
+// If zoneName is already a standard UUID or MongoDB ObjectID, it is used directly.
+// Otherwise the integration v1 firewall-zones API is consulted.
 func getZoneID(ctx context.Context, c *unifiClient, site, zoneName string) (string, error) {
 	c.cacheMu.RLock()
 	if zoneMap, ok := c.zoneIDCache[site]; ok {
@@ -135,8 +133,8 @@ func getZoneID(ctx context.Context, c *unifiClient, site, zoneName string) (stri
 	}
 	c.cacheMu.RUnlock()
 
-	// If zoneName is already a 24-char hex ObjectID, use it directly
-	if isMongoObjectID(zoneName) {
+	// Fast path: pass through if it already looks like a UUID or ObjectID.
+	if isZoneIDPassthrough(zoneName) {
 		c.cacheMu.Lock()
 		if c.zoneIDCache[site] == nil {
 			c.zoneIDCache[site] = make(map[string]string)
@@ -146,29 +144,25 @@ func getZoneID(ctx context.Context, c *unifiClient, site, zoneName string) (stri
 		return zoneName, nil
 	}
 
-	// Attempt to resolve the name via the firewall-zones list API.
-	zones, err := listFirewallZones(ctx, c, site)
+	// Resolve site name → UUID for integration v1 lookup.
+	siteID, err := getSiteID(ctx, c, site)
 	if err != nil {
-		var nf *ErrNotFound
-		if errors.As(err, &nf) {
-			return "", fmt.Errorf(
-				"zone %q cannot be resolved: this controller does not support the zone list API. "+
-					"Set ZONE_PAIRS to use zone UUIDs directly, e.g. ZONE_PAIRS=%s->%s. "+
-					"Find zone UUIDs in: GET /proxy/network/v2/api/site/default/firewall-policies (source.zone_id / destination.zone_id fields)",
-				zoneName, zoneName, zoneName,
-			)
-		}
+		return "", fmt.Errorf("resolve site UUID for zone lookup: %w", err)
+	}
+
+	// Fetch all zones from integration v1 and populate cache.
+	zones, err := listFirewallZones(ctx, c, siteID)
+	if err != nil {
 		return "", fmt.Errorf("list firewall zones for site %q: %w", site, err)
 	}
 
-	// Populate the full name→ID cache for this site.
 	c.cacheMu.Lock()
 	if c.zoneIDCache[site] == nil {
 		c.zoneIDCache[site] = make(map[string]string)
 	}
 	for _, z := range zones {
 		c.zoneIDCache[site][z.Name] = z.ID
-		c.zoneIDCache[site][z.ID] = z.ID // also cache ID→ID for future fast-paths
+		c.zoneIDCache[site][z.ID] = z.ID // also cache UUID→UUID for future fast-paths
 	}
 	resolved := c.zoneIDCache[site][zoneName] // read while holding lock
 	c.cacheMu.Unlock()
@@ -178,10 +172,37 @@ func getZoneID(ctx context.Context, c *unifiClient, site, zoneName string) (stri
 	}
 	return "", fmt.Errorf(
 		"zone %q not found on this controller (checked %d zones). "+
-			"Set ZONE_PAIRS to use zone UUIDs directly, e.g. ZONE_PAIRS=%s->%s. "+
-			"Find zone UUIDs in: GET /proxy/network/v2/api/site/default/firewall-policies (source.zone_id / destination.zone_id fields)",
-		zoneName, len(zones), zoneName, zoneName,
+			"Zone names are case-sensitive. "+
+			"Use ZONE_PAIRS=<src>-><dst> with exact zone names as shown in the UniFi UI, "+
+			"or provide zone UUIDs directly (e.g. ZONE_PAIRS=<src-uuid>-><dst-uuid>).",
+		zoneName, len(zones),
 	)
+}
+
+// isZoneIDPassthrough returns true if s is a MongoDB ObjectID (24 hex chars)
+// or a standard UUID (8-4-4-4-12 hex), either of which can be used directly.
+func isZoneIDPassthrough(s string) bool {
+	return isMongoObjectID(s) || isStandardUUID(s)
+}
+
+// isStandardUUID checks if a string is a standard UUID (8-4-4-4-12 format).
+func isStandardUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // isMongoObjectID checks if a string is a 24-char hex MongoDB ObjectID.

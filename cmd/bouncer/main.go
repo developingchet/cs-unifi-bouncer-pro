@@ -147,6 +147,7 @@ func runDaemon() error {
 			Description:          cfg.ObjectDescription,
 			LogDrops:             cfg.FirewallLogDrops,
 			APIWriteDelay:        cfg.FirewallAPIShardDelay,
+			PolicyReorder:        cfg.ZonePolicyReorder,
 		},
 	}, ctrl, store, namer, log)
 
@@ -344,6 +345,7 @@ func reconcileCmd() *cobra.Command {
 					Description:          cfg.ObjectDescription,
 					LogDrops:             cfg.FirewallLogDrops,
 					APIWriteDelay:        cfg.FirewallAPIShardDelay,
+					PolicyReorder:        cfg.ZonePolicyReorder,
 				},
 			}, ctrl, store, namer, log)
 

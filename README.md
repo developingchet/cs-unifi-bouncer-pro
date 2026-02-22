@@ -133,8 +133,9 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ZONE_PAIRS` | `External->Internal` | Comma-separated `src->dst` zone pairs. `External`/`Internal` are the default UniFi 8.x names — check Settings → Firewall → Zones if you renamed them. |
+| `ZONE_PAIRS` | `External->Internal` | Comma-separated `src->dst` zone pairs. Zone names are auto-resolved to UUIDs at startup; standard UUIDs and MongoDB ObjectIDs are accepted directly. `External`/`Internal` are the default UniFi 8.x names — check Settings → Firewall → Zones if you renamed them. |
 | `ZONE_CONNECTION_STATES` | `new,invalid` | Connection states the policies match (normalized to uppercase before API calls) |
+| `ZONE_POLICY_REORDER` | `true` | Move bouncer policies before system-defined ones within each zone pair |
 
 ### Object naming
 
@@ -212,11 +213,18 @@ LEGACY_RULE_INDEX_START_V4=22000
 
 ### Zone-Based Mode
 
-Creates zone firewall policies for each configured source → destination pair. Requires UniFi Network ≥ 8.x.
+Creates zone firewall policies for each configured source → destination pair via the UniFi integration v1 API. Requires UniFi Network ≥ 8.x.
+
+Zone names are auto-resolved to UUIDs at startup. Standard UUIDs (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) and MongoDB ObjectIDs (24-char hex) are also accepted and passed through without a lookup. If a zone name cannot be found the bouncer exits with an error listing available zones.
 
 ```bash
 FIREWALL_MODE=zone
+
+# Named zones (auto-resolved)
 ZONE_PAIRS=External->Internal,External->IoT,External->DMZ
+
+# UUID pairs (passed through directly)
+ZONE_PAIRS=aaaaaaaa-0000-4000-8000-aaaaaaaaaaaa->bbbbbbbb-0000-4000-8000-bbbbbbbbbbbb
 ```
 
 ---

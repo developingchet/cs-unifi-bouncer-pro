@@ -18,6 +18,10 @@ type MockController struct {
 	rules    map[string][]controller.FirewallRule
 	policies map[string][]controller.ZonePolicy
 	zones    map[string][]controller.Zone
+	tmls     map[string][]controller.TrafficMatchingList
+
+	// Preset site ID mappings: internalReference -> UUID
+	siteIDs map[string]string
 
 	// Preset feature detection results per site
 	features map[string]map[string]bool
@@ -39,10 +43,26 @@ func NewMockController() *MockController {
 		rules:    make(map[string][]controller.FirewallRule),
 		policies: make(map[string][]controller.ZonePolicy),
 		zones:    make(map[string][]controller.Zone),
+		tmls:     make(map[string][]controller.TrafficMatchingList),
+		siteIDs:  make(map[string]string),
 		features: make(map[string]map[string]bool),
 		errors:   make(map[string]error),
 		calls:    make(map[string]int),
 	}
+}
+
+// SetSiteID presets the UUID returned for a site internalReference.
+func (m *MockController) SetSiteID(name, id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.siteIDs[name] = id
+}
+
+// SetTMLs presets the list of traffic matching lists returned for a site.
+func (m *MockController) SetTMLs(site string, tmls []controller.TrafficMatchingList) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tmls[site] = tmls
 }
 
 // SetGroups presets the list of firewall groups returned for a site.
@@ -322,4 +342,90 @@ func (m *MockController) Close() error {
 	defer m.mu.Unlock()
 	m.calls["Close"]++
 	return nil
+}
+
+func (m *MockController) GetSiteID(ctx context.Context, siteName string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls["GetSiteID"]++
+	if err := m.popError("GetSiteID"); err != nil {
+		return "", err
+	}
+	if id, ok := m.siteIDs[siteName]; ok {
+		return id, nil
+	}
+	// Passthrough: return siteName as its own ID (useful for tests that use UUID-like names directly).
+	return siteName, nil
+}
+
+func (m *MockController) DiscoverZones(ctx context.Context, site string) ([]controller.Zone, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls["DiscoverZones"]++
+	if err := m.popError("DiscoverZones"); err != nil {
+		return nil, err
+	}
+	return append([]controller.Zone{}, m.zones[site]...), nil
+}
+
+func (m *MockController) ListTrafficMatchingLists(ctx context.Context, site string) ([]controller.TrafficMatchingList, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls["ListTrafficMatchingLists"]++
+	if err := m.popError("ListTrafficMatchingLists"); err != nil {
+		return nil, err
+	}
+	return append([]controller.TrafficMatchingList{}, m.tmls[site]...), nil
+}
+
+func (m *MockController) CreateTrafficMatchingList(ctx context.Context, site string, list controller.TrafficMatchingList) (controller.TrafficMatchingList, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls["CreateTrafficMatchingList"]++
+	if err := m.popError("CreateTrafficMatchingList"); err != nil {
+		return controller.TrafficMatchingList{}, err
+	}
+	list.ID = m.newID()
+	m.tmls[site] = append(m.tmls[site], list)
+	return list, nil
+}
+
+func (m *MockController) UpdateTrafficMatchingList(ctx context.Context, site string, list controller.TrafficMatchingList) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls["UpdateTrafficMatchingList"]++
+	if err := m.popError("UpdateTrafficMatchingList"); err != nil {
+		return err
+	}
+	for i, existing := range m.tmls[site] {
+		if existing.ID == list.ID {
+			m.tmls[site][i] = list
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *MockController) DeleteTrafficMatchingList(ctx context.Context, site string, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls["DeleteTrafficMatchingList"]++
+	if err := m.popError("DeleteTrafficMatchingList"); err != nil {
+		return err
+	}
+	tmls := m.tmls[site][:0]
+	for _, t := range m.tmls[site] {
+		if t.ID != id {
+			tmls = append(tmls, t)
+		}
+	}
+	m.tmls[site] = tmls
+	return nil
+}
+
+func (m *MockController) ReorderZonePolicies(ctx context.Context, site string, req controller.ZonePolicyReorderRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls["ReorderZonePolicies"]++
+	return m.popError("ReorderZonePolicies")
 }
