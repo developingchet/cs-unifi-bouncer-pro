@@ -38,7 +38,7 @@ type ZonePolicy struct {
 	SrcZone                string
 	DstZone                string
 	IPVersion              string   // "IPV4", "IPV6", "BOTH"
-	TrafficMatchingListIDs []string // v1 API: ipGroupIds in source.trafficFilter
+	TrafficMatchingListIDs []string // proxy API: source.ip_group_id (single ID)
 	Predefined             bool     // true for built-in policies managed by UniFi
 	ConnectionStateFilter  []string // e.g. ["NEW", "INVALID"]
 	LoggingEnabled         bool
@@ -129,11 +129,11 @@ type Controller interface {
 	DeleteZonePolicy(ctx context.Context, site string, id string) error
 	ReorderZonePolicies(ctx context.Context, site string, req ZonePolicyReorderRequest) error
 
-	// Zones (read-only — topology discovery)
+	// Zones (read-only - topology discovery)
 	ListZones(ctx context.Context, site string) ([]Zone, error)
-	GetZoneID(ctx context.Context, siteID, zoneName string) (string, error)
+	GetZoneID(ctx context.Context, site, zoneName string) (string, error)
 
-	// Traffic Matching Lists (v1 API — zone mode only)
+	// Traffic Matching Lists (legacy v1 API compatibility)
 	ListTrafficMatchingLists(ctx context.Context, site string) ([]TrafficMatchingList, error)
 	CreateTrafficMatchingList(ctx context.Context, site string, list TrafficMatchingList) (TrafficMatchingList, error)
 	UpdateTrafficMatchingList(ctx context.Context, site string, list TrafficMatchingList) error

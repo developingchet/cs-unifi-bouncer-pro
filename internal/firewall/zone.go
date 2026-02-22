@@ -50,18 +50,16 @@ func normalizeConnectionStates(states []string) []string {
 
 // EnsurePolicies idempotently creates zone policies for each shard and zone pair.
 func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards, v6Shards *ShardManager) error {
-	siteID, err := zm.ctrl.GetSiteID(ctx, site)
-	if err != nil {
-		return fmt.Errorf("resolve site ID: %w", err)
-	}
-
 	zoneMap := make(map[string]string)
 	for _, pair := range zm.cfg.ZonePairs {
-		srcZoneID, err := zm.ctrl.GetZoneID(ctx, siteID, pair.Src)
+		// For UDM Pro Max 10.x, zone names cannot be auto-resolved.
+		// Zone IDs must be 24-char hex ObjectIDs passed directly via ZONE_PAIRS.
+		// GetZoneID will return the value directly if it's a valid ObjectID.
+		srcZoneID, err := zm.ctrl.GetZoneID(ctx, site, pair.Src)
 		if err != nil {
 			return fmt.Errorf("resolve source zone %q: %w", pair.Src, err)
 		}
-		dstZoneID, err := zm.ctrl.GetZoneID(ctx, siteID, pair.Dst)
+		dstZoneID, err := zm.ctrl.GetZoneID(ctx, site, pair.Dst)
 		if err != nil {
 			return fmt.Errorf("resolve destination zone %q: %w", pair.Dst, err)
 		}
@@ -72,11 +70,11 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	connectionStates := normalizeConnectionStates(zm.cfg.ZoneConnectionStates)
 
 	for _, pair := range zm.cfg.ZonePairs {
-		if err := zm.ensurePoliciesForPair(ctx, site, siteID, pair, zoneMap, connectionStates, false, v4Shards); err != nil {
+		if err := zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, connectionStates, false, v4Shards); err != nil {
 			return err
 		}
 		if v6Shards != nil {
-			if err := zm.ensurePoliciesForPair(ctx, site, siteID, pair, zoneMap, connectionStates, true, v6Shards); err != nil {
+			if err := zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, connectionStates, true, v6Shards); err != nil {
 				return err
 			}
 		}
@@ -84,7 +82,7 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 
 	// Reorder once after all families and zone-pairs are ensured.
 	if zm.cfg.PolicyReorder {
-		if err := zm.reorderPolicies(ctx, site, siteID); err != nil {
+		if err := zm.reorderPolicies(ctx, site); err != nil {
 			zm.log.Warn().Err(err).Str("site", site).Msg("policy reorder failed")
 		}
 	}
@@ -92,7 +90,7 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	return nil
 }
 
-func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site, siteID string, pair config.ZonePair, zoneMap map[string]string, connectionStates []string, ipv6 bool, sm *ShardManager) error {
+func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, pair config.ZonePair, zoneMap map[string]string, connectionStates []string, ipv6 bool, sm *ShardManager) error {
 	family := Family(ipv6)
 	ipVersion := "IPV4"
 	if ipv6 {
@@ -102,7 +100,7 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site, siteID s
 	groupIDs := sm.GroupIDs()
 
 	// Fetch ALL existing policies once before the loop (avoids N redundant GETs).
-	existingPolicies, err := zm.ctrl.ListZonePolicies(ctx, siteID)
+	existingPolicies, err := zm.ctrl.ListZonePolicies(ctx, site)
 	if err != nil {
 		return err
 	}
@@ -148,7 +146,7 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site, siteID s
 		}
 		firstCreate = false
 
-		// groupID is a Traffic Matching List ID in zone mode
+		// groupID is a firewall group ID in zone mode
 		policy := controller.ZonePolicy{
 			Name:                   policyName,
 			Enabled:                true,
@@ -162,7 +160,7 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site, siteID s
 			LoggingEnabled:         zm.cfg.LogDrops,
 		}
 
-		created, err := zm.ctrl.CreateZonePolicy(ctx, siteID, policy)
+		created, err := zm.ctrl.CreateZonePolicy(ctx, site, policy)
 		if err != nil {
 			return fmt.Errorf("create zone policy %s: %w", policyName, err)
 		}
@@ -191,17 +189,15 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 		ipVersion = "IPV6"
 	}
 
-	siteID, err := zm.ctrl.GetSiteID(ctx, site)
-	if err != nil {
-		return fmt.Errorf("resolve site ID: %w", err)
-	}
 	zoneMap := make(map[string]string)
 	for _, pair := range zm.cfg.ZonePairs {
-		srcZoneID, err := zm.ctrl.GetZoneID(ctx, siteID, pair.Src)
+		// For UDM Pro Max 10.x, zone names cannot be auto-resolved.
+		// Zone IDs must be 24-char hex ObjectIDs passed directly via ZONE_PAIRS.
+		srcZoneID, err := zm.ctrl.GetZoneID(ctx, site, pair.Src)
 		if err != nil {
 			return fmt.Errorf("resolve source zone %q: %w", pair.Src, err)
 		}
-		dstZoneID, err := zm.ctrl.GetZoneID(ctx, siteID, pair.Dst)
+		dstZoneID, err := zm.ctrl.GetZoneID(ctx, site, pair.Dst)
 		if err != nil {
 			return fmt.Errorf("resolve destination zone %q: %w", pair.Dst, err)
 		}
@@ -229,7 +225,7 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 
 		if existing != nil && existing.UnifiID != "" {
 			// Verify it still exists in the API
-			policies, apiErr := zm.ctrl.ListZonePolicies(ctx, siteID)
+			policies, apiErr := zm.ctrl.ListZonePolicies(ctx, site)
 			if apiErr != nil {
 				return apiErr
 			}
@@ -263,7 +259,7 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 			LoggingEnabled:         zm.cfg.LogDrops,
 		}
 
-		created, err := zm.ctrl.CreateZonePolicy(ctx, siteID, policy)
+		created, err := zm.ctrl.CreateZonePolicy(ctx, site, policy)
 		if err != nil {
 			return fmt.Errorf("create zone policy %s: %w", policyName, err)
 		}
@@ -286,10 +282,6 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 // Called during shard pruning.
 func (zm *ZoneManager) DeletePoliciesForShard(ctx context.Context, site string, ipv6 bool, shardIdx int) error {
 	family := Family(ipv6)
-	siteID, err := zm.ctrl.GetSiteID(ctx, site)
-	if err != nil {
-		return fmt.Errorf("resolve site ID: %w", err)
-	}
 
 	for _, pair := range zm.cfg.ZonePairs {
 		policyName, err := zm.namer.PolicyName(NameData{
@@ -312,7 +304,7 @@ func (zm *ZoneManager) DeletePoliciesForShard(ctx context.Context, site string, 
 			continue // Already gone
 		}
 
-		if err := zm.ctrl.DeleteZonePolicy(ctx, siteID, existing.UnifiID); err != nil {
+		if err := zm.ctrl.DeleteZonePolicy(ctx, site, existing.UnifiID); err != nil {
 			return fmt.Errorf("delete zone policy %s: %w", policyName, err)
 		}
 
@@ -326,8 +318,8 @@ func (zm *ZoneManager) DeletePoliciesForShard(ctx context.Context, site string, 
 }
 
 // reorderPolicies moves all bouncer-managed policies to the top, per zone-pair.
-func (zm *ZoneManager) reorderPolicies(ctx context.Context, site, siteID string) error {
-	allPolicies, err := zm.ctrl.ListZonePolicies(ctx, siteID)
+func (zm *ZoneManager) reorderPolicies(ctx context.Context, site string) error {
+	allPolicies, err := zm.ctrl.ListZonePolicies(ctx, site)
 	if err != nil {
 		return err
 	}
@@ -346,11 +338,13 @@ func (zm *ZoneManager) reorderPolicies(ctx context.Context, site, siteID string)
 
 	zoneMap := make(map[string]string)
 	for _, pair := range zm.cfg.ZonePairs {
-		srcZoneID, err := zm.ctrl.GetZoneID(ctx, siteID, pair.Src)
+		// For UDM Pro Max 10.x, zone names cannot be auto-resolved.
+		// Zone IDs must be 24-char hex ObjectIDs passed directly via ZONE_PAIRS.
+		srcZoneID, err := zm.ctrl.GetZoneID(ctx, site, pair.Src)
 		if err != nil {
 			return fmt.Errorf("resolve source zone %q for reorder: %w", pair.Src, err)
 		}
-		dstZoneID, err := zm.ctrl.GetZoneID(ctx, siteID, pair.Dst)
+		dstZoneID, err := zm.ctrl.GetZoneID(ctx, site, pair.Dst)
 		if err != nil {
 			return fmt.Errorf("resolve destination zone %q for reorder: %w", pair.Dst, err)
 		}
@@ -383,7 +377,7 @@ func (zm *ZoneManager) reorderPolicies(ctx context.Context, site, siteID string)
 			DestinationZoneID:      dstZoneID,
 			BeforeSystemDefinedIDs: bouncerIDs,
 		}
-		if err := zm.ctrl.ReorderZonePolicies(ctx, siteID, req); err != nil {
+		if err := zm.ctrl.ReorderZonePolicies(ctx, site, req); err != nil {
 			return fmt.Errorf("reorder zone-pair %s->%s: %w", pair.Src, pair.Dst, err)
 		}
 	}
@@ -393,11 +387,6 @@ func (zm *ZoneManager) reorderPolicies(ctx context.Context, site, siteID string)
 
 // DeletePolicies removes all managed zone policies for a site.
 func (zm *ZoneManager) DeletePolicies(ctx context.Context, site string) error {
-	siteID, err := zm.ctrl.GetSiteID(ctx, site)
-	if err != nil {
-		return fmt.Errorf("resolve site ID: %w", err)
-	}
-
 	policies, err := zm.store.ListPolicies()
 	if err != nil {
 		return err
@@ -406,7 +395,7 @@ func (zm *ZoneManager) DeletePolicies(ctx context.Context, site string) error {
 		if rec.Site != site || rec.Mode != "zone" {
 			continue
 		}
-		if err := zm.ctrl.DeleteZonePolicy(ctx, siteID, rec.UnifiID); err != nil {
+		if err := zm.ctrl.DeleteZonePolicy(ctx, site, rec.UnifiID); err != nil {
 			zm.log.Warn().Err(err).Str("policy", name).Msg("failed to delete zone policy")
 			continue
 		}
@@ -417,14 +406,9 @@ func (zm *ZoneManager) DeletePolicies(ctx context.Context, site string) error {
 	return nil
 }
 
-// UpdateGroupReference updates zone policies that reference an old Traffic Matching List ID with a new one.
+// UpdateGroupReference updates zone policies that reference an old firewall group ID with a new one.
 func (zm *ZoneManager) UpdateGroupReference(ctx context.Context, site, oldGroupID, newGroupID string) error {
-	siteID, err := zm.ctrl.GetSiteID(ctx, site)
-	if err != nil {
-		return fmt.Errorf("resolve site ID: %w", err)
-	}
-
-	policies, err := zm.ctrl.ListZonePolicies(ctx, siteID)
+	policies, err := zm.ctrl.ListZonePolicies(ctx, site)
 	if err != nil {
 		return err
 	}
@@ -437,7 +421,7 @@ func (zm *ZoneManager) UpdateGroupReference(ctx context.Context, site, oldGroupI
 			}
 		}
 		if needsUpdate {
-			if err := zm.ctrl.UpdateZonePolicy(ctx, siteID, p); err != nil {
+			if err := zm.ctrl.UpdateZonePolicy(ctx, site, p); err != nil {
 				return fmt.Errorf("update zone policy %s: %w", p.ID, err)
 			}
 		}

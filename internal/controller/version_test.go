@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -216,5 +217,55 @@ func TestHasFeature_UnexpectedResponse(t *testing.T) {
 	}
 	if !got {
 		t.Error("expected hasFeature to return true when JSON decode fails (assume supported)")
+	}
+}
+
+func TestDetectZoneFirewall_HTMLResponse(t *testing.T) {
+	const site = "default"
+	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-policies", site)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != expectedPath {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "<html><body>SPA</body></html>")
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	supported, err := detectZoneFirewall(context.Background(), c, site)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if supported {
+		t.Fatal("expected supported=false for HTML response")
+	}
+}
+
+func TestGetZoneID_MongoObjectID(t *testing.T) {
+	c := newTestClient("https://example.invalid", "api-key")
+	const zoneID = "67a8cc9efe6c6350dfa4dcc7"
+
+	got, err := getZoneID(context.Background(), c, "default", zoneID)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if got != zoneID {
+		t.Fatalf("expected zone ID %q, got %q", zoneID, got)
+	}
+}
+
+func TestGetZoneID_NameFails(t *testing.T) {
+	c := newTestClient("https://example.invalid", "api-key")
+
+	_, err := getZoneID(context.Background(), c, "default", "Internal")
+	if err == nil {
+		t.Fatal("expected error for non-ObjectID zone name")
+	}
+	if got := err.Error(); !strings.Contains(got, "cannot be resolved") || !strings.Contains(got, "ZONE_PAIRS") {
+		t.Fatalf("unexpected error message: %q", got)
 	}
 }

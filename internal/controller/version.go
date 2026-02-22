@@ -61,14 +61,10 @@ func hasFeature(ctx context.Context, c *unifiClient, site, feature string) (bool
 	return result, nil
 }
 
-// detectZoneFirewall probes the official v1 zone policy endpoint.
+// detectZoneFirewall probes the proxy v2 zone policy endpoint.
+// Returns false if the endpoint returns HTML (endpoint doesn't exist).
 func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool, error) {
-	siteID, err := getSiteID(ctx, c, site)
-	if err != nil {
-		return false, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v1PolicyEndpoint(c.cfg.BaseURL, siteID)+"?limit=1", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, proxyPolicyEndpoint(c.cfg.BaseURL, site), nil)
 	if err != nil {
 		return false, err
 	}
@@ -83,7 +79,13 @@ func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool,
 			}
 			return err
 		}
-		_ = resp.Body.Close()
+		defer resp.Body.Close()
+		// Peek at first byte — HTML responses start with '<'
+		buf := make([]byte, 1)
+		if n, _ := resp.Body.Read(buf); n > 0 && buf[0] == '<' {
+			supported = false
+			return nil
+		}
 		supported = true
 		return nil
 	})
@@ -112,28 +114,82 @@ func zoneEndpoint(base, site string) string {
 	return fmt.Sprintf("%s/proxy/network/api/s/%s/rest/firewallzone", base, site)
 }
 
-// v1 API endpoints (require siteID UUID, not site name).
+// Proxy v2 API endpoints (site name, not UUID).
+// These match the UDM Pro Max firmware 10.1.85 proxy API.
 
-func v1SitesEndpoint(base string) string {
-	return fmt.Sprintf("%s/v1/sites", base)
+func proxyPolicyEndpoint(base, site string) string {
+	return fmt.Sprintf("%s/proxy/network/v2/api/site/%s/firewall-policies", base, site)
 }
 
+func proxyPolicyReorderEndpoint(base, site string) string {
+	return fmt.Sprintf("%s/proxy/network/v2/api/site/%s/firewall-policies/batch-reorder", base, site)
+}
+
+// selfSitesEndpoint is still used for site UUID resolution.
 func selfSitesEndpoint(base string) string {
 	return fmt.Sprintf("%s/proxy/network/api/self/sites", base)
 }
 
-func v1PolicyEndpoint(base, siteID string) string {
-	return fmt.Sprintf("%s/v1/sites/%s/firewall/policies", base, siteID)
+// --- Zone Policy Reordering (proxy v2 API) ---------------------------------
+
+// reorderZonePolicies reorders zone policies via the proxy v2 API.
+// The site parameter is a site name (not a UUID).
+func reorderZonePolicies(ctx context.Context, c *unifiClient, site string, req ZonePolicyReorderRequest) error {
+	payload := map[string]interface{}{
+		"source_zone_id":      req.SourceZoneID,
+		"destination_zone_id": req.DestinationZoneID,
+		"before_policy_ids":   req.BeforeSystemDefinedIDs,
+	}
+	url := proxyPolicyReorderEndpoint(c.cfg.BaseURL, site)
+	return doPUT(ctx, c, url, "reorder-policies", payload)
 }
 
-func v1PolicyOrderingEndpoint(base, siteID string) string {
-	return fmt.Sprintf("%s/v1/sites/%s/firewall/policies/ordering", base, siteID)
+// --- Zone ID Resolution (proxy v2 API) -------------------------------------
+
+// getZoneID resolves a zone identifier for a given site key.
+// For UDM Pro Max firmware 10.x, zone names cannot be resolved automatically
+// since there's no zone list API. Zone IDs are MongoDB ObjectIDs (24 hex chars).
+// If zoneName is already a 24-char hex ObjectID, it is used directly.
+// Otherwise, returns an error telling the user to use zone UUIDs directly.
+func getZoneID(ctx context.Context, c *unifiClient, site, zoneName string) (string, error) {
+	c.cacheMu.RLock()
+	if zoneMap, ok := c.zoneIDCache[site]; ok {
+		if id, found := zoneMap[zoneName]; found {
+			c.cacheMu.RUnlock()
+			return id, nil
+		}
+	}
+	c.cacheMu.RUnlock()
+
+	// If zoneName is already a 24-char hex ObjectID, use it directly
+	if isMongoObjectID(zoneName) {
+		c.cacheMu.Lock()
+		if c.zoneIDCache[site] == nil {
+			c.zoneIDCache[site] = make(map[string]string)
+		}
+		c.zoneIDCache[site][zoneName] = zoneName
+		c.cacheMu.Unlock()
+		return zoneName, nil
+	}
+
+	// No zone list API available on UDM Pro Max 10.x — return clear error
+	return "", fmt.Errorf(
+		"zone %q cannot be resolved: no zone list API available on this controller. "+
+			"Set ZONE_PAIRS to use zone UUIDs directly, e.g. ZONE_PAIRS=%s->%s. "+
+			"Find zone UUIDs in: GET /proxy/network/v2/api/site/default/firewall-policies (source.zone_id / destination.zone_id fields)",
+		zoneName, zoneName, zoneName,
+	)
 }
 
-func v1TMLEndpoint(base, siteID string) string {
-	return fmt.Sprintf("%s/v1/sites/%s/traffic-matching-lists", base, siteID)
-}
-
-func v1ZoneEndpoint(base, siteID string) string {
-	return fmt.Sprintf("%s/v1/sites/%s/firewall/zones", base, siteID)
+// isMongoObjectID checks if a string is a 24-char hex MongoDB ObjectID.
+func isMongoObjectID(s string) bool {
+	if len(s) != 24 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }

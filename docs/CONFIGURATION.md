@@ -161,15 +161,22 @@ These settings apply only when `FIREWALL_MODE=zone` or when `auto` detects a zon
 | `ZONE_CONNECTION_STATES` | `new,invalid` | Connection states to match. Comma-separated. Values are normalized to uppercase before sending (for example `new,invalid` -> `NEW,INVALID`). |
 | `ZONE_POLICY_REORDER` | `true` | Move bouncer-managed policies to the highest priority in each zone pair. |
 
-```bash
-# Single pair (most common — default UniFi 8.x zone names)
-ZONE_PAIRS=External->Internal
+> UniFi Network 10.x (UDM OS): zone names cannot be auto-resolved on current firmware.
+> Configure `ZONE_PAIRS` with zone UUID ObjectIDs directly.
+> Discover them from `GET /proxy/network/v2/api/site/default/firewall-policies` using `source.zone_id` and `destination.zone_id`.
 
-# Multiple pairs — block from WAN into all internal segments
-ZONE_PAIRS=External->Internal,External->IoT,External->DMZ,External->VPN
+```bash
+# UniFi Network 10.x (UDM OS): use zone UUIDs directly
+ZONE_PAIRS=67a8cc9efe6c6350dfa4dcc7->67a8cc9efe6c6350dfa4dcc8
+
+# Multiple pairs
+ZONE_PAIRS=<zone-id-a>-><zone-id-b>,<zone-id-a>-><zone-id-c>
 ```
 
 Zone names must match the zone names configured in the UniFi controller exactly (case-sensitive).
+
+For UniFi Network 10.x controllers, use UUID pairs directly, for example:
+`ZONE_PAIRS=67a8cc9efe6c6350dfa4dcc7->67a8cc9efe6c6350dfa4dcc8`
 
 ---
 
