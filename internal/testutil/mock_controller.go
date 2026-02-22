@@ -79,6 +79,13 @@ func (m *MockController) SetZones(site string, zones []controller.Zone) {
 	m.zones[site] = zones
 }
 
+// SetSiteID presets a site-name to site-ID mapping.
+func (m *MockController) SetSiteID(siteName, siteID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.siteIDs[siteName] = siteID
+}
+
 // SetHasFeature presets the feature detection result for a site/feature pair.
 func (m *MockController) SetHasFeature(site, feature string, val bool) {
 	m.mu.Lock()
@@ -300,6 +307,33 @@ func (m *MockController) ListZones(ctx context.Context, site string) ([]controll
 	return append([]controller.Zone{}, m.zones[site]...), nil
 }
 
+func (m *MockController) GetZoneID(ctx context.Context, siteID, zoneName string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls["GetZoneID"]++
+	if err := m.popError("GetZoneID"); err != nil {
+		return "", err
+	}
+
+	zones := m.zones[siteID]
+	if len(zones) == 0 {
+		for siteName, id := range m.siteIDs {
+			if id == siteID {
+				zones = m.zones[siteName]
+				break
+			}
+		}
+	}
+
+	for _, z := range zones {
+		if z.Name == zoneName || z.ID == zoneName {
+			return z.ID, nil
+		}
+	}
+	// Default fallback for tests that provide UUID-like strings directly.
+	return zoneName, nil
+}
+
 func (m *MockController) HasFeature(ctx context.Context, site string, feature string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -387,7 +421,8 @@ func (m *MockController) GetSiteID(ctx context.Context, siteName string) (string
 	if id, ok := m.siteIDs[siteName]; ok {
 		return id, nil
 	}
-	return "", fmt.Errorf("site %q not found", siteName)
+	// Default fallback for tests that do not care about UUID conversion.
+	return siteName, nil
 }
 
 func (m *MockController) Ping(ctx context.Context) error {

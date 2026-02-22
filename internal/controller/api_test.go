@@ -64,6 +64,35 @@ func makeBareObject(item interface{}) []byte {
 	return b
 }
 
+func makeV1Page(offset, limit, total int, items ...interface{}) []byte {
+	data := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		b, err := json.Marshal(item)
+		if err != nil {
+			panic(fmt.Sprintf("makeV1Page: marshal failed: %v", err))
+		}
+		data = append(data, json.RawMessage(b))
+	}
+	resp := struct {
+		Offset     int               `json:"offset"`
+		Limit      int               `json:"limit"`
+		Count      int               `json:"count"`
+		TotalCount int               `json:"totalCount"`
+		Data       []json.RawMessage `json:"data"`
+	}{
+		Offset:     offset,
+		Limit:      limit,
+		Count:      len(data),
+		TotalCount: total,
+		Data:       data,
+	}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		panic(fmt.Sprintf("makeV1Page: marshal envelope failed: %v", err))
+	}
+	return b
+}
+
 // ---- Firewall Groups -------------------------------------------------------
 
 func TestListFirewallGroups(t *testing.T) {
@@ -310,12 +339,12 @@ func TestListZonePolicies(t *testing.T) {
 	const siteID = "site-uuid-123"
 	expectedPath := fmt.Sprintf("/v1/sites/%s/firewall/policies", siteID)
 
-	respBody := makeAPIResp(
+	respBody := makeV1Page(0, 200, 1,
 		apiV1Policy{
-			ID:        "p1",
-			Name:      "block-wan-in",
-			Enabled:   true,
-			Action:    apiV1PolicyAction{Type: "BLOCK"},
+			ID:              "p1",
+			Name:            "block-wan-in",
+			Enabled:         true,
+			Action:          apiV1PolicyAction{Type: "BLOCK"},
 			IPProtocolScope: apiV1IPProtocolScope{IPVersion: "IPV4"},
 			Source: apiV1PolicySource{
 				ZoneID: "wan-zone-id",
@@ -331,6 +360,10 @@ func TestListZonePolicies(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != expectedPath {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		if r.URL.Query().Get("offset") != "0" || r.URL.Query().Get("limit") != "200" {
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
 		}
@@ -372,6 +405,15 @@ func TestCreateZonePolicy(t *testing.T) {
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
 		}
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		if body["name"] != "block-wan" {
+			http.Error(w, "missing policy name", http.StatusBadRequest)
+			return
+		}
 		created := apiV1Policy{
 			ID:   "policy-abc",
 			Name: "block-wan",
@@ -384,7 +426,7 @@ func TestCreateZonePolicy(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(makeAPIResp(created))
+		_, _ = w.Write(makeBareObject(created))
 	}))
 	defer srv.Close()
 
@@ -406,18 +448,82 @@ func TestCreateZonePolicy(t *testing.T) {
 	}
 }
 
+func TestListTrafficMatchingLists_Pagination(t *testing.T) {
+	const siteID = "site-uuid-999"
+	expectedPath := fmt.Sprintf("/v1/sites/%s/traffic-matching-lists", siteID)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != expectedPath {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		offset := r.URL.Query().Get("offset")
+		limit := r.URL.Query().Get("limit")
+		if limit != "200" {
+			http.Error(w, "unexpected limit", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		switch offset {
+		case "0":
+			_, _ = w.Write(makeV1Page(0, 200, 2, apiTrafficMatchingList{
+				ID:   "tml-1",
+				Type: "IPV4_ADDRESSES",
+				Name: "crowdsec-block-v4-0",
+				Items: []apiTrafficMatchingListItem{
+					{Value: "1.2.3.4"},
+				},
+			}))
+		case "1":
+			_, _ = w.Write(makeV1Page(1, 200, 2, apiTrafficMatchingList{
+				ID:   "tml-2",
+				Type: "IPV4_ADDRESSES",
+				Name: "crowdsec-block-v4-1",
+				Items: []apiTrafficMatchingListItem{
+					{Value: "5.6.7.8"},
+				},
+			}))
+		default:
+			http.Error(w, "unexpected offset", http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	lists, err := listTrafficMatchingLists(context.Background(), c, siteID)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if len(lists) != 2 {
+		t.Fatalf("expected 2 lists, got %d", len(lists))
+	}
+	if lists[0].ID != "tml-1" || lists[1].ID != "tml-2" {
+		t.Fatalf("unexpected list IDs: %+v", lists)
+	}
+}
+
 func TestReorderZonePolicies(t *testing.T) {
-	const site = "default"
-	expectedPath := fmt.Sprintf("/proxy/network/v2/api/site/%s/firewall-policies/batch-reorder", site)
+	const siteID = "site-uuid-789"
+	expectedPath := fmt.Sprintf("/v1/sites/%s/firewall/policies/ordering", siteID)
 	req := ZonePolicyReorderRequest{
-		SourceZoneID:        "wan-zone-id",
-		DestinationZoneID:   "internal-zone-id",
-		BeforePredefinedIDs: []string{"p-predefined-1"},
+		SourceZoneID:           "wan-zone-id",
+		DestinationZoneID:      "internal-zone-id",
+		BeforeSystemDefinedIDs: []string{"p-bouncer-1", "p-bouncer-2"},
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut || r.URL.Path != expectedPath {
 			http.Error(w, fmt.Sprintf("unexpected %s %s", r.Method, r.URL.Path), http.StatusBadRequest)
+			return
+		}
+		if r.URL.Query().Get("sourceFirewallZoneId") != req.SourceZoneID {
+			http.Error(w, "wrong sourceFirewallZoneId", http.StatusBadRequest)
+			return
+		}
+		if r.URL.Query().Get("destinationFirewallZoneId") != req.DestinationZoneID {
+			http.Error(w, "wrong destinationFirewallZoneId", http.StatusBadRequest)
 			return
 		}
 
@@ -427,12 +533,18 @@ func TestReorderZonePolicies(t *testing.T) {
 			http.Error(w, "bad body", http.StatusBadRequest)
 			return
 		}
-		if body["source_zone_id"] != req.SourceZoneID {
-			http.Error(w, "wrong source_zone_id", http.StatusBadRequest)
+		ordered, ok := body["orderedFirewallPolicyIds"].(map[string]interface{})
+		if !ok {
+			http.Error(w, "missing orderedFirewallPolicyIds", http.StatusBadRequest)
 			return
 		}
-		if body["destination_zone_id"] != req.DestinationZoneID {
-			http.Error(w, "wrong destination_zone_id", http.StatusBadRequest)
+		before, ok := ordered["beforeSystemDefined"].([]interface{})
+		if !ok || len(before) != 2 {
+			http.Error(w, "wrong beforeSystemDefined", http.StatusBadRequest)
+			return
+		}
+		if before[0] != "p-bouncer-1" || before[1] != "p-bouncer-2" {
+			http.Error(w, "unexpected beforeSystemDefined values", http.StatusBadRequest)
 			return
 		}
 
@@ -444,7 +556,7 @@ func TestReorderZonePolicies(t *testing.T) {
 
 	c := newTestClient(srv.URL, "api-key")
 
-	if err := reorderZonePolicies(context.Background(), c, site, req); err != nil {
+	if err := reorderZonePolicies(context.Background(), c, siteID, req); err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
 }

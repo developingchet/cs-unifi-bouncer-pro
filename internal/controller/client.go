@@ -10,6 +10,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptrace"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
@@ -37,7 +38,9 @@ type unifiClient struct {
 	http         *http.Client
 	session      *sessionManager
 	featureCache map[string]map[string]bool // site -> feature -> bool
-	siteIDCache  map[string]string          // site name -> UUID
+	cacheMu      sync.RWMutex
+	siteIDCache  map[string]string            // site name -> UUID
+	zoneIDCache  map[string]map[string]string // site UUID -> zone name -> zone UUID
 	log          zerolog.Logger
 }
 
@@ -100,6 +103,7 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 		http:         httpClient,
 		featureCache: make(map[string]map[string]bool),
 		siteIDCache:  make(map[string]string),
+		zoneIDCache:  make(map[string]map[string]string),
 		log:          log,
 	}
 
@@ -331,7 +335,15 @@ func (c *unifiClient) ReorderZonePolicies(ctx context.Context, site string, req 
 // ---- Zones -----------------------------------------------------------------
 
 func (c *unifiClient) ListZones(ctx context.Context, site string) ([]Zone, error) {
-	return listZones(ctx, c, site)
+	siteID, err := c.GetSiteID(ctx, site)
+	if err != nil {
+		return nil, err
+	}
+	return listZonesV1(ctx, c, siteID)
+}
+
+func (c *unifiClient) GetZoneID(ctx context.Context, siteID, zoneName string) (string, error) {
+	return getZoneID(ctx, c, siteID, zoneName)
 }
 
 // --- Traffic Matching Lists (v1 API) ----------------------------------------

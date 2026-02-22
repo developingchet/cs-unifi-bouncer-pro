@@ -107,8 +107,19 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		v4Cap := m.cfg.GroupCapacityV4
 		v6Cap := m.cfg.GroupCapacityV6
 
+		// Determine effective mode first so shard backend uses the right API object type.
+		mode, err := m.resolveMode(ctx, site)
+		if err != nil {
+			return fmt.Errorf("resolve mode for site %s: %w", site, err)
+		}
+
+		// Cache resolved mode for use in ensureNewShardInfrastructure and pruneEmptyTailShards.
+		m.siteMu.Lock()
+		m.siteMode[site] = mode
+		m.siteMu.Unlock()
+
 		v4 := NewShardManager(site, false, v4Cap, m.namer, m.ctrl, m.store, m.log,
-			m.cfg.APIShardDelay, m.flushSem, m.cfg.DryRun)
+			m.cfg.APIShardDelay, m.flushSem, m.cfg.DryRun, mode)
 		if err := v4.EnsureShards(ctx); err != nil {
 			return fmt.Errorf("ensure v4 shards for site %s: %w", site, err)
 		}
@@ -119,7 +130,7 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 
 		if m.cfg.EnableIPv6 {
 			v6 := NewShardManager(site, true, v6Cap, m.namer, m.ctrl, m.store, m.log,
-				m.cfg.APIShardDelay, m.flushSem, m.cfg.DryRun)
+				m.cfg.APIShardDelay, m.flushSem, m.cfg.DryRun, mode)
 			if err := v6.EnsureShards(ctx); err != nil {
 				return fmt.Errorf("ensure v6 shards for site %s: %w", site, err)
 			}
@@ -127,17 +138,6 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 			m.v6Mgrs[site] = v6
 			m.mu.Unlock()
 		}
-
-		// Determine effective mode
-		mode, err := m.resolveMode(ctx, site)
-		if err != nil {
-			return fmt.Errorf("resolve mode for site %s: %w", site, err)
-		}
-
-		// Cache resolved mode for use in ensureNewShardInfrastructure and pruneEmptyTailShards
-		m.siteMu.Lock()
-		m.siteMode[site] = mode
-		m.siteMu.Unlock()
 
 		m.mu.RLock()
 		v4Mgr := m.v4Mgrs[site]
@@ -463,10 +463,10 @@ func (m *managerImpl) pruneEmptyTailShards(ctx context.Context, site string, v4,
 				}
 			}
 
-			// Delete group from UniFi
-			if err := m.ctrl.DeleteFirewallGroup(ctx, site, unifiID); err != nil {
+			// Delete backing shard object from UniFi.
+			if err := e.sm.DeleteShardObject(ctx, unifiID); err != nil {
 				m.log.Error().Err(err).Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
-					Msg("failed to delete pruned shard group")
+					Msg("failed to delete pruned shard object")
 				break // stop pruning on error to avoid inconsistency
 			}
 

@@ -113,7 +113,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `FIREWALL_GROUP_CAPACITY` | `10000` | Max IPs per firewall group shard (shared default) |
 | `FIREWALL_GROUP_CAPACITY_V4` | — | Per-family override for IPv4 shard capacity |
 | `FIREWALL_GROUP_CAPACITY_V6` | — | Per-family override for IPv6 shard capacity |
-| `FIREWALL_BATCH_WINDOW` | `500ms` | How long to accumulate writes before flushing to API |
+| `FIREWALL_BATCH_WINDOW` | `10s` | How long to accumulate writes before flushing to API |
 | `FIREWALL_API_SHARD_DELAY` | `250ms` | Minimum pause between consecutive UniFi API write calls. Prevents the controller stacking back-to-back ruleset regenerations. `0` disables. |
 | `FIREWALL_FLUSH_CONCURRENCY` | `1` | Maximum concurrent group `PUT` calls in-flight. `1` = fully serialized (recommended). Increase only for multi-site setups. |
 | `FIREWALL_LOG_DROPS` | `false` | Enable logging rules on the firewall objects |
@@ -134,7 +134,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ZONE_PAIRS` | `External->Internal` | Comma-separated `src->dst` zone pairs. `External`/`Internal` are the default UniFi 8.x names — check Settings → Firewall → Zones if you renamed them. |
-| `ZONE_CONNECTION_STATES` | `new,invalid` | Connection states the policies match |
+| `ZONE_CONNECTION_STATES` | `new,invalid` | Connection states the policies match (normalized to uppercase before API calls) |
 | `ZONE_POLICY_REORDER` | `true` | Reorder policies to place block rules at the top |
 
 ### Object naming

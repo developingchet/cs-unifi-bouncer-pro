@@ -472,6 +472,10 @@ func (pc *PanicController) ListZones(ctx context.Context, site string) ([]contro
 	return []controller.Zone{}, nil
 }
 
+func (pc *PanicController) GetZoneID(ctx context.Context, siteID, zoneName string) (string, error) {
+	return zoneName, nil
+}
+
 func (pc *PanicController) ListTrafficMatchingLists(ctx context.Context, siteID string) ([]controller.TrafficMatchingList, error) {
 	return []controller.TrafficMatchingList{}, nil
 }

@@ -15,15 +15,7 @@ const (
 )
 
 // --- UniFi Network API path helpers -----------------------------------------
-// All API paths are constructed here. To adapt for a future API restructure,
-// update these helpers. To add a new feature:
-//  1. Add a const Feature... = "FEATURE_NAME" below
-//  2. Add a newFeatureEndpoint(base, site) function here
-//  3. Add a detectNewFeature(ctx, c, site) probe function here
-//  4. Wire it into the hasFeature() switch
-//  5. Add CRUD helpers in api.go
 
-// Common path segments used across multiple endpoint builders.
 const (
 	pathNetworkAPI = "/proxy/network/api/s/%s/rest/"
 	pathLogin      = "/api/auth/login"
@@ -69,9 +61,14 @@ func hasFeature(ctx context.Context, c *unifiClient, site, feature string) (bool
 	return result, nil
 }
 
-// detectZoneFirewall probes the zone-policy endpoint; a 200 means the feature exists.
+// detectZoneFirewall probes the official v1 zone policy endpoint.
 func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, zoneEndpoint(c.cfg.BaseURL, site), nil)
+	siteID, err := getSiteID(ctx, c, site)
+	if err != nil {
+		return false, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v1PolicyEndpoint(c.cfg.BaseURL, siteID)+"?limit=1", nil)
 	if err != nil {
 		return false, err
 	}
@@ -86,23 +83,14 @@ func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool,
 			}
 			return err
 		}
-		defer resp.Body.Close()
-
-		var body struct {
-			Data []json.RawMessage `json:"data"`
-		}
-		if decErr := json.NewDecoder(resp.Body).Decode(&body); decErr != nil {
-			// Endpoint exists but response is unexpected — assume supported
-			supported = true
-			return nil
-		}
+		_ = resp.Body.Close()
 		supported = true
 		return nil
 	})
 	return supported, callErr
 }
 
-// --- API helpers for firewall groups ----------------------------------------
+// --- API helpers for legacy envelope responses ------------------------------
 
 type apiResponse struct {
 	Data []json.RawMessage `json:"data"`
@@ -120,22 +108,26 @@ func ruleEndpoint(base, site string) string {
 	return fmt.Sprintf("%s/proxy/network/api/s/%s/rest/firewallrule", base, site)
 }
 
-func zonePolicyEndpoint(base, site string) string {
-	return fmt.Sprintf("%s/proxy/network/v2/api/site/%s/firewall-policies", base, site)
-}
-
 func zoneEndpoint(base, site string) string {
 	return fmt.Sprintf("%s/proxy/network/api/s/%s/rest/firewallzone", base, site)
 }
 
-// v1 API endpoints (require siteID UUID, not site name)
+// v1 API endpoints (require siteID UUID, not site name).
 
 func v1SitesEndpoint(base string) string {
 	return fmt.Sprintf("%s/v1/sites", base)
 }
 
+func selfSitesEndpoint(base string) string {
+	return fmt.Sprintf("%s/proxy/network/api/self/sites", base)
+}
+
 func v1PolicyEndpoint(base, siteID string) string {
 	return fmt.Sprintf("%s/v1/sites/%s/firewall/policies", base, siteID)
+}
+
+func v1PolicyOrderingEndpoint(base, siteID string) string {
+	return fmt.Sprintf("%s/v1/sites/%s/firewall/policies/ordering", base, siteID)
 }
 
 func v1TMLEndpoint(base, siteID string) string {

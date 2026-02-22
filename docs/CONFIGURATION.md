@@ -80,7 +80,7 @@ UNIFI_SITES=default,homelab,iot
 | `FIREWALL_GROUP_CAPACITY` | `10000` | No | Maximum IPs per firewall group shard (used if family-specific overrides are not set) |
 | `FIREWALL_GROUP_CAPACITY_V4` | — | No | Override capacity for IPv4 groups (takes precedence over `FIREWALL_GROUP_CAPACITY`) |
 | `FIREWALL_GROUP_CAPACITY_V6` | — | No | Override capacity for IPv6 groups (takes precedence over `FIREWALL_GROUP_CAPACITY`) |
-| `FIREWALL_BATCH_WINDOW` | `500ms` | No | Accumulate group member changes for this duration before issuing a single API update |
+| `FIREWALL_BATCH_WINDOW` | `10s` | No | Accumulate shard member changes for this duration before issuing API updates |
 | `FIREWALL_API_SHARD_DELAY` | `250ms` | No | Minimum pause between consecutive write calls (`PUT /rest/firewallgroup`, rule/policy `POST`/`DELETE`). Prevents the UDM from stacking back-to-back ruleset regenerations. Set `0` to disable. |
 | `FIREWALL_FLUSH_CONCURRENCY` | `1` | No | Maximum concurrent `PUT /rest/firewallgroup` calls in-flight across all sites and address families. `1` = fully serialized (recommended). Increase only for multi-site setups where faster bulk updates are needed. |
 | `FIREWALL_LOG_DROPS` | `false` | No | Enable UniFi "log dropped packets" on managed firewall rules |
@@ -158,7 +158,7 @@ These settings apply only when `FIREWALL_MODE=zone` or when `auto` detects a zon
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ZONE_PAIRS` | `External->Internal` | Comma-separated `src->dst` zone pairs. A policy is created for each pair and each shard. `External` and `Internal` are the default zone names in UniFi Network 8.x — check Settings → Firewall → Zones if you have renamed them. |
-| `ZONE_CONNECTION_STATES` | `new,invalid` | Connection states to match. Comma-separated. **Note: this value is accepted by the config parser but is not yet wired to the zone policy API payload. All connection states are matched by the policy regardless of this setting.** |
+| `ZONE_CONNECTION_STATES` | `new,invalid` | Connection states to match. Comma-separated. Values are normalized to uppercase before sending (for example `new,invalid` -> `NEW,INVALID`). |
 | `ZONE_POLICY_REORDER` | `true` | Move bouncer-managed policies to the highest priority in each zone pair. |
 
 ```bash

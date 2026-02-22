@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 )
 
 // --- Wire types (JSON mapping to UniFi API responses) -----------------------
@@ -62,9 +63,17 @@ type apiZone struct {
 
 // v1 API wire types
 
-type apiSite struct {
-	ID   string `json:"id"`
+type apiSelfSite struct {
+	ID   string `json:"_id"`
 	Name string `json:"name"`
+}
+
+type apiV1ListResponse struct {
+	Offset     int               `json:"offset"`
+	Limit      int               `json:"limit"`
+	Count      int               `json:"count"`
+	TotalCount int               `json:"totalCount"`
+	Data       []json.RawMessage `json:"data"`
 }
 
 type apiTrafficMatchingListItem struct {
@@ -101,15 +110,17 @@ type apiV1IPProtocolScope struct {
 }
 
 type apiV1Policy struct {
-	ID                   string                 `json:"id,omitempty"`
-	Name                 string                 `json:"name,omitempty"`
-	Enabled              bool                   `json:"enabled"`
-	Action               apiV1PolicyAction      `json:"action"`
-	Source               apiV1PolicySource      `json:"source"`
-	Destination          apiV1PolicyDestination `json:"destination"`
-	IPProtocolScope      apiV1IPProtocolScope   `json:"ipProtocolScope"`
-	ConnectionStateFilter []string              `json:"connectionStateFilter"`
-	LoggingEnabled       bool                   `json:"loggingEnabled"`
+	ID                    string                 `json:"id,omitempty"`
+	Name                  string                 `json:"name,omitempty"`
+	Description           string                 `json:"description,omitempty"`
+	Enabled               bool                   `json:"enabled"`
+	Action                apiV1PolicyAction      `json:"action"`
+	Source                apiV1PolicySource      `json:"source"`
+	Destination           apiV1PolicyDestination `json:"destination"`
+	IPProtocolScope       apiV1IPProtocolScope   `json:"ipProtocolScope"`
+	ConnectionStateFilter []string               `json:"connectionStateFilter,omitempty"`
+	LoggingEnabled        bool                   `json:"loggingEnabled"`
+	SystemDefined         bool                   `json:"systemDefined,omitempty"`
 }
 
 type apiV1Zone struct {
@@ -138,6 +149,69 @@ func doGET(ctx context.Context, c *unifiClient, url, endpoint string) ([]json.Ra
 		result = body.Data
 		return nil
 	})
+}
+
+func doGETv1Page(ctx context.Context, c *unifiClient, rawURL, endpoint string) (apiV1ListResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return apiV1ListResponse{}, err
+	}
+
+	var page apiV1ListResponse
+	err = c.withReauth(ctx, func() error {
+		resp, err := c.apiDo(ctx, req, endpoint)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+			return fmt.Errorf("decode response: %w", err)
+		}
+		return nil
+	})
+	return page, err
+}
+
+func listAllV1Pages(ctx context.Context, c *unifiClient, endpointURL, metricEndpoint string) ([]json.RawMessage, error) {
+	const pageLimit = 200
+
+	base, err := url.Parse(endpointURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse endpoint URL: %w", err)
+	}
+
+	offset := 0
+	all := make([]json.RawMessage, 0)
+	for {
+		pageURL := *base
+		query := pageURL.Query()
+		query.Set("offset", fmt.Sprintf("%d", offset))
+		query.Set("limit", fmt.Sprintf("%d", pageLimit))
+		pageURL.RawQuery = query.Encode()
+
+		page, err := doGETv1Page(ctx, c, pageURL.String(), metricEndpoint)
+		if err != nil {
+			return nil, err
+		}
+
+		all = append(all, page.Data...)
+		count := page.Count
+		if count == 0 {
+			count = len(page.Data)
+		}
+
+		// totalCount is authoritative when present; count/len(data) are fallback guards.
+		if page.TotalCount > 0 && offset+count >= page.TotalCount {
+			break
+		}
+		if count == 0 || len(page.Data) == 0 {
+			break
+		}
+
+		offset += count
+	}
+
+	return all, nil
 }
 
 func doPOST(ctx context.Context, c *unifiClient, url, endpoint string, payload interface{}) (json.RawMessage, error) {
@@ -381,7 +455,7 @@ func deleteFirewallRule(ctx context.Context, c *unifiClient, site, id string) er
 // listZonePolicies fetches all zone policies from the v1 API.
 // The siteID parameter must be a UUID (not a site name).
 func listZonePolicies(ctx context.Context, c *unifiClient, siteID string) ([]ZonePolicy, error) {
-	data, err := doGET(ctx, c, v1PolicyEndpoint(c.cfg.BaseURL, siteID), "list-policies")
+	data, err := listAllV1Pages(ctx, c, v1PolicyEndpoint(c.cfg.BaseURL, siteID), "list-policies")
 	if err != nil {
 		return nil, err
 	}
@@ -391,51 +465,60 @@ func listZonePolicies(ctx context.Context, c *unifiClient, siteID string) ([]Zon
 		if err := json.Unmarshal(raw, &p); err != nil {
 			continue
 		}
-		policies = append(policies, ZonePolicy{
-			ID:                     p.ID,
-			Name:                   p.Name,
-			Enabled:                p.Enabled,
-			Action:                 p.Action.Type,
-			Description:            "",
-			SrcZone:                p.Source.ZoneID,
-			DstZone:                p.Destination.ZoneID,
-			IPVersion:              p.IPProtocolScope.IPVersion,
-			TrafficMatchingListIDs: p.Source.TrafficFilter.IPGroupIDs,
-			Predefined:             false,
-			ConnectionStateFilter:  p.ConnectionStateFilter,
-		})
+		policies = append(policies, zonePolicyFromAPI(p))
 	}
 	return policies, nil
+}
+
+func zonePolicyFromAPI(p apiV1Policy) ZonePolicy {
+	return ZonePolicy{
+		ID:                     p.ID,
+		Name:                   p.Name,
+		Enabled:                p.Enabled,
+		Action:                 p.Action.Type,
+		Description:            p.Description,
+		SrcZone:                p.Source.ZoneID,
+		DstZone:                p.Destination.ZoneID,
+		IPVersion:              p.IPProtocolScope.IPVersion,
+		TrafficMatchingListIDs: p.Source.TrafficFilter.IPGroupIDs,
+		Predefined:             p.SystemDefined,
+		ConnectionStateFilter:  p.ConnectionStateFilter,
+		LoggingEnabled:         p.LoggingEnabled,
+	}
+}
+
+func zonePolicyPayloadFromModel(p ZonePolicy) ZonePolicyPayload {
+	return ZonePolicyPayload{
+		Enabled:     p.Enabled,
+		Name:        p.Name,
+		Description: p.Description,
+		Action: ZonePolicyAction{
+			Type: p.Action,
+		},
+		Source: ZonePolicyEndpoint{
+			ZoneID: p.SrcZone,
+			TrafficFilter: ZonePolicyTMFilter{
+				IPGroupIDs: p.TrafficMatchingListIDs,
+			},
+		},
+		Destination: ZonePolicyEndpoint{
+			ZoneID: p.DstZone,
+			// Empty trafficFilter means "match all destinations in zone".
+			TrafficFilter: ZonePolicyTMFilter{},
+		},
+		IPProtocolScope: ZonePolicyIPScope{
+			IPVersion: p.IPVersion,
+		},
+		ConnectionStateFilter: p.ConnectionStateFilter,
+		LoggingEnabled:        p.LoggingEnabled,
+	}
 }
 
 // createZonePolicy creates a new zone policy via the v1 API.
 // The siteID parameter must be a UUID (not a site name).
 func createZonePolicy(ctx context.Context, c *unifiClient, siteID string, p ZonePolicy) (ZonePolicy, error) {
-	payload := apiV1Policy{
-		Name:    p.Name,
-		Enabled: p.Enabled,
-		Action: apiV1PolicyAction{
-			Type: p.Action,
-		},
-		Source: apiV1PolicySource{
-			ZoneID: p.SrcZone,
-			TrafficFilter: apiV1TrafficFilter{
-				IPGroupIDs: p.TrafficMatchingListIDs,
-			},
-		},
-		Destination: apiV1PolicyDestination{
-			ZoneID: p.DstZone,
-			TrafficFilter: apiV1TrafficFilter{
-				IPGroupIDs: nil,
-			},
-		},
-		IPProtocolScope: apiV1IPProtocolScope{
-			IPVersion: p.IPVersion,
-		},
-		ConnectionStateFilter: p.ConnectionStateFilter,
-		LoggingEnabled:        false,
-	}
-	raw, err := doPOST(ctx, c, v1PolicyEndpoint(c.cfg.BaseURL, siteID), "create-policy", payload)
+	payload := zonePolicyPayloadFromModel(p)
+	raw, err := doPOSTv2(ctx, c, v1PolicyEndpoint(c.cfg.BaseURL, siteID), "create-policy", payload)
 	if err != nil {
 		return ZonePolicy{}, err
 	}
@@ -443,47 +526,13 @@ func createZonePolicy(ctx context.Context, c *unifiClient, siteID string, p Zone
 	if err := json.Unmarshal(raw, &created); err != nil {
 		return ZonePolicy{}, err
 	}
-	return ZonePolicy{
-		ID:                     created.ID,
-		Name:                   created.Name,
-		Enabled:                created.Enabled,
-		Action:                 created.Action.Type,
-		SrcZone:                created.Source.ZoneID,
-		DstZone:                created.Destination.ZoneID,
-		IPVersion:              created.IPProtocolScope.IPVersion,
-		TrafficMatchingListIDs: created.Source.TrafficFilter.IPGroupIDs,
-		ConnectionStateFilter:  created.ConnectionStateFilter,
-	}, nil
+	return zonePolicyFromAPI(created), nil
 }
 
 // updateZonePolicy updates an existing zone policy via the v1 API.
 // The siteID parameter must be a UUID (not a site name).
 func updateZonePolicy(ctx context.Context, c *unifiClient, siteID string, p ZonePolicy) error {
-	payload := apiV1Policy{
-		ID:      p.ID,
-		Name:    p.Name,
-		Enabled: p.Enabled,
-		Action: apiV1PolicyAction{
-			Type: p.Action,
-		},
-		Source: apiV1PolicySource{
-			ZoneID: p.SrcZone,
-			TrafficFilter: apiV1TrafficFilter{
-				IPGroupIDs: p.TrafficMatchingListIDs,
-			},
-		},
-		Destination: apiV1PolicyDestination{
-			ZoneID: p.DstZone,
-			TrafficFilter: apiV1TrafficFilter{
-				IPGroupIDs: nil,
-			},
-		},
-		IPProtocolScope: apiV1IPProtocolScope{
-			IPVersion: p.IPVersion,
-		},
-		ConnectionStateFilter: p.ConnectionStateFilter,
-		LoggingEnabled:        false,
-	}
+	payload := zonePolicyPayloadFromModel(p)
 	url := v1PolicyEndpoint(c.cfg.BaseURL, siteID) + "/" + p.ID
 	return doPUT(ctx, c, url, "update-policy", payload)
 }
@@ -500,7 +549,7 @@ func deleteZonePolicy(ctx context.Context, c *unifiClient, siteID, id string) er
 // listTrafficMatchingLists fetches all traffic matching lists from the v1 API.
 // The siteID parameter must be a UUID (not a site name).
 func listTrafficMatchingLists(ctx context.Context, c *unifiClient, siteID string) ([]TrafficMatchingList, error) {
-	data, err := doGET(ctx, c, v1TMLEndpoint(c.cfg.BaseURL, siteID), "list-traffic-matching-lists")
+	data, err := listAllV1Pages(ctx, c, v1TMLEndpoint(c.cfg.BaseURL, siteID), "list-traffic-matching-lists")
 	if err != nil {
 		return nil, err
 	}
@@ -536,7 +585,7 @@ func createTrafficMatchingList(ctx context.Context, c *unifiClient, siteID strin
 		Name:  list.Name,
 		Items: items,
 	}
-	raw, err := doPOST(ctx, c, v1TMLEndpoint(c.cfg.BaseURL, siteID), "create-traffic-matching-list", payload)
+	raw, err := doPOSTv2(ctx, c, v1TMLEndpoint(c.cfg.BaseURL, siteID), "create-traffic-matching-list", payload)
 	if err != nil {
 		return TrafficMatchingList{}, err
 	}
@@ -585,7 +634,7 @@ func deleteTrafficMatchingList(ctx context.Context, c *unifiClient, siteID, id s
 // listZonesV1 fetches all zones from the v1 API.
 // The siteID parameter must be a UUID (not a site name).
 func listZonesV1(ctx context.Context, c *unifiClient, siteID string) ([]Zone, error) {
-	data, err := doGET(ctx, c, v1ZoneEndpoint(c.cfg.BaseURL, siteID), "list-zones-v1")
+	data, err := listAllV1Pages(ctx, c, v1ZoneEndpoint(c.cfg.BaseURL, siteID), "list-zones-v1")
 	if err != nil {
 		return nil, err
 	}
@@ -602,29 +651,31 @@ func listZonesV1(ctx context.Context, c *unifiClient, siteID string) ([]Zone, er
 
 // --- Site ID Resolution (v1 API) --------------------------------------------
 
-// getSiteID resolves a site name to its UUID via the v1 API.
+// getSiteID resolves a site name to its UUID.
 // Results are cached in the unifiClient to avoid repeated API calls.
 func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, error) {
-	// Check cache
+	c.cacheMu.RLock()
 	if id, ok := c.siteIDCache[siteName]; ok {
+		c.cacheMu.RUnlock()
 		return id, nil
 	}
+	c.cacheMu.RUnlock()
 
-	// Fetch all sites
-	data, err := doGET(ctx, c, v1SitesEndpoint(c.cfg.BaseURL), "get-site-id")
+	data, err := doGET(ctx, c, selfSitesEndpoint(c.cfg.BaseURL), "get-site-id")
 	if err != nil {
 		return "", err
 	}
 
-	// Find matching site by name
 	for _, raw := range data {
-		var site apiSite
+		var site apiSelfSite
 		if err := json.Unmarshal(raw, &site); err != nil {
 			continue
 		}
-		if site.Name == siteName {
-			// Cache and return
+		if site.Name == siteName || site.ID == siteName {
+			c.cacheMu.Lock()
+			c.siteIDCache[site.Name] = site.ID
 			c.siteIDCache[siteName] = site.ID
+			c.cacheMu.Unlock()
 			return site.ID, nil
 		}
 	}
@@ -632,22 +683,66 @@ func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, er
 	return "", fmt.Errorf("site %q not found", siteName)
 }
 
+// getZoneID resolves a zone name to its UUID for a given site UUID.
+// Results are cached per site ID.
+func getZoneID(ctx context.Context, c *unifiClient, siteID, zoneName string) (string, error) {
+	c.cacheMu.RLock()
+	if zoneMap, ok := c.zoneIDCache[siteID]; ok {
+		if id, found := zoneMap[zoneName]; found {
+			c.cacheMu.RUnlock()
+			return id, nil
+		}
+	}
+	c.cacheMu.RUnlock()
+
+	zones, err := listZonesV1(ctx, c, siteID)
+	if err != nil {
+		return "", err
+	}
+
+	zoneMap := make(map[string]string, len(zones)*2)
+	for _, z := range zones {
+		zoneMap[z.Name] = z.ID
+		zoneMap[z.ID] = z.ID
+	}
+
+	c.cacheMu.Lock()
+	c.zoneIDCache[siteID] = zoneMap
+	c.cacheMu.Unlock()
+
+	if id, found := zoneMap[zoneName]; found {
+		return id, nil
+	}
+
+	return "", fmt.Errorf("zone %q not found for site %s", zoneName, siteID)
+}
+
 // reorderZonePolicies reorders zone policies via the v1 API.
 // The siteID parameter must be a UUID (not a site name).
 func reorderZonePolicies(ctx context.Context, c *unifiClient, siteID string, req ZonePolicyReorderRequest) error {
-	url := v1PolicyEndpoint(c.cfg.BaseURL, siteID) + "/batch-reorder"
-	payload := map[string]interface{}{
-		"source_zone_id":        req.SourceZoneID,
-		"destination_zone_id":   req.DestinationZoneID,
-		"before_predefined_ids": req.BeforePredefinedIDs,
-		"after_predefined_ids":  req.AfterPredefinedIDs,
+	orderURL, err := url.Parse(v1PolicyOrderingEndpoint(c.cfg.BaseURL, siteID))
+	if err != nil {
+		return err
 	}
+	query := orderURL.Query()
+	query.Set("sourceFirewallZoneId", req.SourceZoneID)
+	query.Set("destinationFirewallZoneId", req.DestinationZoneID)
+	orderURL.RawQuery = query.Encode()
+
+	payload := map[string]interface{}{
+		"orderedFirewallPolicyIds": map[string][]string{
+			"beforeSystemDefined": req.BeforeSystemDefinedIDs,
+			"afterSystemDefined":  req.AfterSystemDefinedIDs,
+		},
+	}
+
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
+
 	return c.withReauth(ctx, func() error {
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(b))
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, orderURL.String(), bytes.NewReader(b))
 		if err != nil {
 			return err
 		}
@@ -660,22 +755,3 @@ func reorderZonePolicies(ctx context.Context, c *unifiClient, siteID string, req
 		return nil
 	})
 }
-
-// --- Zones (legacy REST API) ------------------------------------------------
-
-func listZones(ctx context.Context, c *unifiClient, site string) ([]Zone, error) {
-	data, err := doGET(ctx, c, zoneEndpoint(c.cfg.BaseURL, site), "list-zones")
-	if err != nil {
-		return nil, err
-	}
-	zones := make([]Zone, 0, len(data))
-	for _, raw := range data {
-		var z apiZone
-		if err := json.Unmarshal(raw, &z); err != nil {
-			continue
-		}
-		zones = append(zones, Zone{ID: z.ID, Name: z.Name})
-	}
-	return zones, nil
-}
-

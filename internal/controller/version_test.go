@@ -22,6 +22,7 @@ func TestHasFeature_ZoneFirewall_Supported(t *testing.T) {
 
 	c := newTestClient(srv.URL, "api-key")
 	c.featureCache = make(map[string]map[string]bool)
+	c.siteIDCache["default"] = "site-default"
 
 	got, err := hasFeature(context.Background(), c, "default", FeatureZoneBasedFirewall)
 	if err != nil {
@@ -42,6 +43,7 @@ func TestHasFeature_ZoneFirewall_NotSupported(t *testing.T) {
 
 	c := newTestClient(srv.URL, "api-key")
 	c.featureCache = make(map[string]map[string]bool)
+	c.siteIDCache["default"] = "site-default"
 
 	got, err := hasFeature(context.Background(), c, "default", FeatureZoneBasedFirewall)
 	if err != nil {
@@ -67,6 +69,7 @@ func TestHasFeature_Cached(t *testing.T) {
 
 	c := newTestClient(srv.URL, "api-key")
 	c.featureCache = make(map[string]map[string]bool)
+	c.siteIDCache["default"] = "site-default"
 
 	// First call — should hit the server.
 	got1, err := hasFeature(context.Background(), c, "default", FeatureZoneBasedFirewall)
@@ -105,6 +108,8 @@ func TestHasFeature_CacheSeparatePerSite(t *testing.T) {
 
 	c := newTestClient(srv.URL, "api-key")
 	c.featureCache = make(map[string]map[string]bool)
+	c.siteIDCache["a"] = "site-a"
+	c.siteIDCache["b"] = "site-b"
 
 	// Probe site "a".
 	_, err := hasFeature(context.Background(), c, "a", FeatureZoneBasedFirewall)
@@ -136,6 +141,7 @@ func TestHasFeature_CacheConcurrent(t *testing.T) {
 
 	c := newTestClient(srv.URL, "api-key")
 	c.featureCache = make(map[string]map[string]bool)
+	c.siteIDCache["concurrent-site"] = "site-concurrent"
 
 	const goroutines = 20
 	results := make([]bool, goroutines)
@@ -202,6 +208,7 @@ func TestHasFeature_UnexpectedResponse(t *testing.T) {
 
 	c := newTestClient(srv.URL, "api-key")
 	c.featureCache = make(map[string]map[string]bool)
+	c.siteIDCache["default"] = "site-default"
 
 	got, err := hasFeature(context.Background(), c, "default", FeatureZoneBasedFirewall)
 	if err != nil {
