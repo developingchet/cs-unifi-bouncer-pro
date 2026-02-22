@@ -170,10 +170,11 @@ func getZoneID(ctx context.Context, c *unifiClient, site, zoneName string) (stri
 		c.zoneIDCache[site][z.Name] = z.ID
 		c.zoneIDCache[site][z.ID] = z.ID // also cache ID→ID for future fast-paths
 	}
+	resolved := c.zoneIDCache[site][zoneName] // read while holding lock
 	c.cacheMu.Unlock()
 
-	if id, ok := c.zoneIDCache[site][zoneName]; ok {
-		return id, nil
+	if resolved != "" {
+		return resolved, nil
 	}
 	return "", fmt.Errorf(
 		"zone %q not found on this controller (checked %d zones). "+
