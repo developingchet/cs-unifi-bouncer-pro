@@ -14,7 +14,6 @@ type MockStore struct {
 	bans     map[string]storage.BanEntry
 	groups   map[string]storage.GroupRecord
 	policies map[string]storage.PolicyRecord
-	rate     map[string][]int64 // endpoint -> Unix-nano timestamps
 
 	// Error injection: method -> next error (consumed on first call)
 	errors map[string]error
@@ -29,7 +28,6 @@ func NewMockStore() *MockStore {
 		bans:     make(map[string]storage.BanEntry),
 		groups:   make(map[string]storage.GroupRecord),
 		policies: make(map[string]storage.PolicyRecord),
-		rate:     make(map[string][]int64),
 		errors:   make(map[string]error),
 		Size:     1024,
 	}
@@ -97,37 +95,6 @@ func (m *MockStore) BanList() (map[string]storage.BanEntry, error) {
 	return result, nil
 }
 
-// --- APIRateGate ------------------------------------------------------------
-
-func (m *MockStore) APIRateGate(endpoint string, window time.Duration, max int) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.popError("APIRateGate"); err != nil {
-		return false, err
-	}
-	if max <= 0 {
-		return true, nil
-	}
-	cutoff := time.Now().Add(-window).UnixNano()
-	now := time.Now().UnixNano()
-	ts := m.rate[endpoint]
-
-	// Prune old
-	pruned := ts[:0]
-	for _, t := range ts {
-		if t >= cutoff {
-			pruned = append(pruned, t)
-		}
-	}
-
-	if len(pruned) >= max {
-		m.rate[endpoint] = pruned
-		return false, nil
-	}
-	m.rate[endpoint] = append(pruned, now)
-	return true, nil
-}
-
 // --- Janitor helpers --------------------------------------------------------
 
 func (m *MockStore) PruneExpiredBans() (int, error) {
@@ -145,31 +112,6 @@ func (m *MockStore) PruneExpiredBans() (int, error) {
 		}
 	}
 	return pruned, nil
-}
-
-func (m *MockStore) PruneExpiredRateEntries(window time.Duration) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.popError("PruneExpiredRateEntries"); err != nil {
-		return 0, err
-	}
-	cutoff := time.Now().Add(-window).UnixNano()
-	total := 0
-	for ep, ts := range m.rate {
-		pruned := ts[:0]
-		for _, t := range ts {
-			if t >= cutoff {
-				pruned = append(pruned, t)
-			}
-		}
-		total += len(ts) - len(pruned)
-		if len(pruned) == 0 {
-			delete(m.rate, ep)
-		} else {
-			m.rate[ep] = pruned
-		}
-	}
-	return total, nil
 }
 
 // --- Group cache ------------------------------------------------------------

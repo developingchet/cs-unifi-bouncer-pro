@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
@@ -13,14 +12,12 @@ import (
 
 const (
 	bucketBans     = "bans"
-	bucketRate     = "rate"
 	bucketGroups   = "groups"
 	bucketPolicies = "policies"
 )
 
 type bboltStore struct {
 	db *bolt.DB
-	mu sync.Mutex // guards rate bucket sliding-window writes
 }
 
 // NewBboltStore opens (or creates) a bbolt database at dataDir/bouncer.db.
@@ -34,7 +31,7 @@ func NewBboltStore(dataDir string) (Store, error) {
 		return nil, fmt.Errorf("open bbolt at %s: %w", path, err)
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
-		for _, name := range []string{bucketBans, bucketRate, bucketGroups, bucketPolicies} {
+		for _, name := range []string{bucketBans, bucketGroups, bucketPolicies} {
 			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return fmt.Errorf("create bucket %s: %w", name, err)
 			}
@@ -95,62 +92,6 @@ func (s *bboltStore) BanList() (map[string]BanEntry, error) {
 	return result, err
 }
 
-// ---- APIRateGate -----------------------------------------------------------
-
-// APIRateGate implements a sliding-window rate limit backed by bbolt.
-// The rate bucket stores a []int64 of Unix nanosecond timestamps per endpoint.
-// Returns allowed=true and appends the current timestamp if within budget.
-func (s *bboltStore) APIRateGate(endpoint string, window time.Duration, max int) (bool, error) {
-	if max <= 0 {
-		return true, nil // unlimited
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var allowed bool
-	err := s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(bucketRate))
-		key := []byte(endpoint)
-		cutoff := time.Now().Add(-window).UnixNano()
-		now := time.Now().UnixNano()
-
-		var timestamps []int64
-		if raw := b.Get(key); raw != nil {
-			if err := msgpack.Unmarshal(raw, &timestamps); err != nil {
-				return fmt.Errorf("unmarshal rate timestamps: %w", err)
-			}
-		}
-
-		// Prune entries outside window
-		pruned := timestamps[:0]
-		for _, ts := range timestamps {
-			if ts >= cutoff {
-				pruned = append(pruned, ts)
-			}
-		}
-
-		if len(pruned) >= max {
-			allowed = false
-			// Still save pruned slice to keep bucket tidy
-			data, err := msgpack.Marshal(pruned)
-			if err != nil {
-				return err
-			}
-			return b.Put(key, data)
-		}
-
-		allowed = true
-		pruned = append(pruned, now)
-		data, err := msgpack.Marshal(pruned)
-		if err != nil {
-			return err
-		}
-		return b.Put(key, data)
-	})
-	return allowed, err
-}
-
 // ---- Janitor ---------------------------------------------------------------
 
 func (s *bboltStore) PruneExpiredBans() (int, error) {
@@ -180,37 +121,6 @@ func (s *bboltStore) PruneExpiredBans() (int, error) {
 			pruned++
 		}
 		return nil
-	})
-	return pruned, err
-}
-
-func (s *bboltStore) PruneExpiredRateEntries(window time.Duration) (int, error) {
-	cutoff := time.Now().Add(-window).UnixNano()
-	var pruned int
-	err := s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(bucketRate))
-		return b.ForEach(func(k, v []byte) error {
-			var timestamps []int64
-			if err := msgpack.Unmarshal(v, &timestamps); err != nil {
-				return nil
-			}
-			before := len(timestamps)
-			filtered := timestamps[:0]
-			for _, ts := range timestamps {
-				if ts >= cutoff {
-					filtered = append(filtered, ts)
-				}
-			}
-			pruned += before - len(filtered)
-			if len(filtered) == 0 {
-				return b.Delete(k)
-			}
-			data, err := msgpack.Marshal(filtered)
-			if err != nil {
-				return err
-			}
-			return b.Put(k, data)
-		})
 	})
 	return pruned, err
 }

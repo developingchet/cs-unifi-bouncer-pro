@@ -3,7 +3,6 @@ package storage
 import (
 	"os"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -110,41 +109,6 @@ func TestPruneKeepsFreshBans(t *testing.T) {
 	}
 }
 
-func TestAPIRateGateWithinBudget(t *testing.T) {
-	s := newTestStore(t)
-	window := time.Minute
-	max := 3
-
-	for i := 0; i < max; i++ {
-		allowed, err := s.APIRateGate("test-endpoint", window, max)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !allowed {
-			t.Fatalf("call %d should be allowed", i+1)
-		}
-	}
-
-	// 4th call should be denied
-	allowed, err := s.APIRateGate("test-endpoint", window, max)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if allowed {
-		t.Fatal("4th call should be denied")
-	}
-}
-
-func TestAPIRateGateUnlimited(t *testing.T) {
-	s := newTestStore(t)
-	for i := 0; i < 1000; i++ {
-		allowed, _ := s.APIRateGate("endpoint", time.Minute, 0)
-		if !allowed {
-			t.Fatalf("unlimited gate denied at call %d", i)
-		}
-	}
-}
-
 func TestConcurrentBanAccess(t *testing.T) {
 	s := newTestStore(t)
 	var wg sync.WaitGroup
@@ -228,27 +192,6 @@ func TestPolicyCRUD(t *testing.T) {
 	}
 }
 
-func TestPruneExpiredRateEntries(t *testing.T) {
-	s := newTestStore(t)
-	// Add entries within window
-	_, _ = s.APIRateGate("ep", 100*time.Millisecond, 5)
-	_, _ = s.APIRateGate("ep", 100*time.Millisecond, 5)
-	// Wait for window to expire
-	time.Sleep(150 * time.Millisecond)
-	pruned, err := s.PruneExpiredRateEntries(100 * time.Millisecond)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pruned == 0 {
-		t.Error("expected some pruned rate entries")
-	}
-	// After pruning, limit resets
-	allowed, _ := s.APIRateGate("ep", 100*time.Millisecond, 2)
-	if !allowed {
-		t.Error("after prune, should be allowed again")
-	}
-}
-
 // TestListGroups verifies ListGroups returns all stored groups.
 func TestListGroups(t *testing.T) {
 	s := newTestStore(t)
@@ -292,39 +235,6 @@ func TestListPolicies(t *testing.T) {
 		if rec.UnifiID != want.UnifiID {
 			t.Errorf("policy %q: UnifiID got %q, want %q", k, rec.UnifiID, want.UnifiID)
 		}
-	}
-}
-
-// TestAPIRateGate_Concurrent verifies that concurrent callers to APIRateGate
-// produce an accurate total call count (no races, no double-counting).
-func TestAPIRateGate_Concurrent(t *testing.T) {
-	s := newTestStore(t)
-	const (
-		maxCalls = 20
-		workers  = 20
-		window   = time.Minute
-	)
-	var (
-		wg      sync.WaitGroup
-		allowed int64
-	)
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ok, err := s.APIRateGate("concurrent-ep", window, maxCalls)
-			if err != nil {
-				return
-			}
-			if ok {
-				atomic.AddInt64(&allowed, 1)
-			}
-		}()
-	}
-	wg.Wait()
-	got := atomic.LoadInt64(&allowed)
-	if got > int64(maxCalls) {
-		t.Errorf("allowed %d calls, but max is %d (race detected)", got, maxCalls)
 	}
 }
 

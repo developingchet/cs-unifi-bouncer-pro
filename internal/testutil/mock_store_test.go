@@ -86,58 +86,6 @@ func TestMockStore_BanOperations(t *testing.T) {
 	})
 }
 
-// TestMockStore_APIRateGate covers rolling-window rate limiting behaviour.
-func TestMockStore_APIRateGate(t *testing.T) {
-	t.Run("allowed within budget", func(t *testing.T) {
-		s := testutil.NewMockStore()
-		for i := 0; i < 3; i++ {
-			ok, err := s.APIRateGate("ep", time.Minute, 3)
-			if err != nil || !ok {
-				t.Fatalf("call %d: expected allowed; got ok=%v err=%v", i+1, ok, err)
-			}
-		}
-	})
-
-	t.Run("denied when at capacity", func(t *testing.T) {
-		s := testutil.NewMockStore()
-		for i := 0; i < 5; i++ {
-			_, _ = s.APIRateGate("ep", time.Minute, 5)
-		}
-		ok, err := s.APIRateGate("ep", time.Minute, 5)
-		if err != nil || ok {
-			t.Fatalf("expected denied; got ok=%v err=%v", ok, err)
-		}
-	})
-
-	t.Run("max=0 always allows", func(t *testing.T) {
-		s := testutil.NewMockStore()
-		ok, err := s.APIRateGate("ep", time.Minute, 0)
-		if err != nil || !ok {
-			t.Fatalf("expected allowed for max=0; got ok=%v err=%v", ok, err)
-		}
-	})
-
-	t.Run("negative max always allows", func(t *testing.T) {
-		s := testutil.NewMockStore()
-		ok, err := s.APIRateGate("ep", time.Minute, -1)
-		if err != nil || !ok {
-			t.Fatalf("expected allowed for max<0; got ok=%v err=%v", ok, err)
-		}
-	})
-
-	t.Run("independent budgets per endpoint", func(t *testing.T) {
-		s := testutil.NewMockStore()
-		for i := 0; i < 2; i++ {
-			_, _ = s.APIRateGate("ep-a", time.Minute, 2)
-		}
-		// ep-a is now at capacity; ep-b should still be allowed.
-		ok, err := s.APIRateGate("ep-b", time.Minute, 2)
-		if err != nil || !ok {
-			t.Fatalf("ep-b should be allowed; got ok=%v err=%v", ok, err)
-		}
-	})
-}
-
 // TestMockStore_PruneExpiredBans verifies janitor behaviour for ban entries.
 func TestMockStore_PruneExpiredBans(t *testing.T) {
 	t.Run("removes expired, keeps live and permanent", func(t *testing.T) {
@@ -172,42 +120,6 @@ func TestMockStore_PruneExpiredBans(t *testing.T) {
 		pruned, err := s.PruneExpiredBans()
 		if err != nil || pruned != 0 {
 			t.Fatalf("expected 0, nil; got %d, %v", pruned, err)
-		}
-	})
-}
-
-// TestMockStore_PruneExpiredRateEntries verifies janitor behaviour for rate timestamps.
-func TestMockStore_PruneExpiredRateEntries(t *testing.T) {
-	t.Run("prunes stale timestamps", func(t *testing.T) {
-		s := testutil.NewMockStore()
-		const n = 5
-		for i := 0; i < n; i++ {
-			_, _ = s.APIRateGate("ep", time.Hour, 100)
-		}
-		// Wait long enough for entries to fall outside a 1ns window.
-		time.Sleep(time.Millisecond)
-
-		pruned, err := s.PruneExpiredRateEntries(time.Nanosecond)
-		if err != nil {
-			t.Fatalf("PruneExpiredRateEntries: %v", err)
-		}
-		if pruned != n {
-			t.Fatalf("expected %d pruned, got %d", n, pruned)
-		}
-	})
-
-	t.Run("entries still in window are kept", func(t *testing.T) {
-		s := testutil.NewMockStore()
-		for i := 0; i < 3; i++ {
-			_, _ = s.APIRateGate("ep", time.Hour, 100)
-		}
-		// Use a large window so nothing is pruned.
-		pruned, err := s.PruneExpiredRateEntries(time.Hour)
-		if err != nil {
-			t.Fatalf("PruneExpiredRateEntries: %v", err)
-		}
-		if pruned != 0 {
-			t.Fatalf("expected 0 pruned, got %d", pruned)
 		}
 	})
 }
@@ -382,16 +294,8 @@ func TestMockStore_ErrorInjection(t *testing.T) {
 			func(s *testutil.MockStore) error { _, err := s.BanList(); return err },
 		},
 		{
-			"APIRateGate",
-			func(s *testutil.MockStore) error { _, err := s.APIRateGate("ep", time.Minute, 10); return err },
-		},
-		{
 			"PruneExpiredBans",
 			func(s *testutil.MockStore) error { _, err := s.PruneExpiredBans(); return err },
-		},
-		{
-			"PruneExpiredRateEntries",
-			func(s *testutil.MockStore) error { _, err := s.PruneExpiredRateEntries(time.Minute); return err },
 		},
 		{
 			"GetGroup",

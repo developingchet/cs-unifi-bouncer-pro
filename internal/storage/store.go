@@ -38,13 +38,8 @@ type Store interface {
 	BanDelete(ip string) error
 	BanList() (map[string]BanEntry, error)
 
-	// APIRateGate: rolling-window API budget.
-	// Returns allowed=true if within budget; atomically appends timestamp on allowed.
-	APIRateGate(endpoint string, window time.Duration, max int) (bool, error)
-
 	// Janitor helpers
 	PruneExpiredBans() (int, error)
-	PruneExpiredRateEntries(window time.Duration) (int, error)
 
 	// Group cache
 	GetGroup(name string) (*GroupRecord, error)
