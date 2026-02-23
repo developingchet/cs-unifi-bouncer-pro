@@ -22,27 +22,6 @@ var (
 		Help:      "Decisions rejected per filter stage.",
 	}, []string{"stage", "reason"})
 
-	// JobsEnqueued counts jobs placed into the worker channel.
-	JobsEnqueued = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace,
-		Name:      "jobs_enqueued_total",
-		Help:      "Jobs placed into worker channel.",
-	}, []string{"action"})
-
-	// JobsDropped counts jobs discarded without an API call.
-	JobsDropped = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace,
-		Name:      "jobs_dropped_total",
-		Help:      "Jobs discarded without API call.",
-	}, []string{"reason"})
-
-	// JobsProcessed counts worker completions.
-	JobsProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: namespace,
-		Name:      "jobs_processed_total",
-		Help:      "Worker job completions.",
-	}, []string{"action", "status"})
-
 	// APICalls counts raw UniFi API calls.
 	APICalls = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
@@ -93,13 +72,6 @@ var (
 		Help:      "bbolt on-disk file size in bytes.",
 	})
 
-	// WorkerQueueDepth tracks current job channel length.
-	WorkerQueueDepth = promauto.NewGauge(prometheus.GaugeOpts{
-		Namespace: namespace,
-		Name:      "worker_queue_depth",
-		Help:      "Current job channel buffer depth.",
-	})
-
 	// ReconcileDuration records full reconcile duration.
 	ReconcileDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace,
@@ -126,8 +98,8 @@ var (
 	ShardSyncTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "shard_sync_total",
-		Help:      "Shard sync attempts by family, shard, and result.",
-	}, []string{"family", "shard", "result"})
+		Help:      "Shard sync attempts by family, shard, site, and result.",
+	}, []string{"family", "shard", "site", "result"})
 
 	// ShardSyncDuration records shard sync latency.
 	ShardSyncDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
@@ -135,7 +107,7 @@ var (
 		Name:      "shard_sync_duration_seconds",
 		Help:      "Shard sync duration in seconds.",
 		Buckets:   []float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0},
-	}, []string{"family", "shard"})
+	}, []string{"family", "shard", "site"})
 
 	// DirtyShards counts shards pending sync.
 	DirtyShards = promauto.NewGauge(prometheus.GaugeOpts{

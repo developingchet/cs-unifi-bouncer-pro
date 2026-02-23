@@ -9,7 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-// TestMetricCollectorsNonNil verifies all 15 package-level metric variables
+// TestMetricCollectorsNonNil verifies all package-level metric variables
 // are non-nil and pass Prometheus linting rules.
 func TestMetricCollectorsNonNil(t *testing.T) {
 	tests := []struct {
@@ -18,9 +18,6 @@ func TestMetricCollectorsNonNil(t *testing.T) {
 	}{
 		{"DecisionsProcessed", metrics.DecisionsProcessed},
 		{"DecisionsFiltered", metrics.DecisionsFiltered},
-		{"JobsEnqueued", metrics.JobsEnqueued},
-		{"JobsDropped", metrics.JobsDropped},
-		{"JobsProcessed", metrics.JobsProcessed},
 		{"APICalls", metrics.APICalls},
 		{"APIDuration", metrics.APIDuration},
 		{"AuthErrors", metrics.AuthErrors},
@@ -28,9 +25,12 @@ func TestMetricCollectorsNonNil(t *testing.T) {
 		{"ActiveBans", metrics.ActiveBans},
 		{"FirewallGroupSize", metrics.FirewallGroupSize},
 		{"DBSizeBytes", metrics.DBSizeBytes},
-		{"WorkerQueueDepth", metrics.WorkerQueueDepth},
 		{"ReconcileDuration", metrics.ReconcileDuration},
 		{"ReconcileDelta", metrics.ReconcileDelta},
+		{"ShardIPCount", metrics.ShardIPCount},
+		{"ShardSyncTotal", metrics.ShardSyncTotal},
+		{"ShardSyncDuration", metrics.ShardSyncDuration},
+		{"DirtyShards", metrics.DirtyShards},
 	}
 
 	for _, tc := range tests {
@@ -61,9 +61,6 @@ func TestMetricNamesAndHelp(t *testing.T) {
 	}{
 		{"crowdsec_unifi_decisions_processed_total", metrics.DecisionsProcessed},
 		{"crowdsec_unifi_decisions_filtered_total", metrics.DecisionsFiltered},
-		{"crowdsec_unifi_jobs_enqueued_total", metrics.JobsEnqueued},
-		{"crowdsec_unifi_jobs_dropped_total", metrics.JobsDropped},
-		{"crowdsec_unifi_jobs_processed_total", metrics.JobsProcessed},
 		{"crowdsec_unifi_api_calls_total", metrics.APICalls},
 		{"crowdsec_unifi_api_duration_seconds", metrics.APIDuration},
 		{"crowdsec_unifi_auth_errors_total", metrics.AuthErrors},
@@ -71,9 +68,12 @@ func TestMetricNamesAndHelp(t *testing.T) {
 		{"crowdsec_unifi_active_bans", metrics.ActiveBans},
 		{"crowdsec_unifi_firewall_group_size", metrics.FirewallGroupSize},
 		{"crowdsec_unifi_db_size_bytes", metrics.DBSizeBytes},
-		{"crowdsec_unifi_worker_queue_depth", metrics.WorkerQueueDepth},
 		{"crowdsec_unifi_reconcile_duration_seconds", metrics.ReconcileDuration},
 		{"crowdsec_unifi_reconcile_delta", metrics.ReconcileDelta},
+		{"crowdsec_unifi_shard_ip_count", metrics.ShardIPCount},
+		{"crowdsec_unifi_shard_sync_total", metrics.ShardSyncTotal},
+		{"crowdsec_unifi_shard_sync_duration_seconds", metrics.ShardSyncDuration},
+		{"crowdsec_unifi_dirty_shards", metrics.DirtyShards},
 	}
 
 	for _, tc := range cases {
