@@ -13,12 +13,27 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// ShardLimit is the maximum number of IPs per Traffic Matching List shard.
+// UniFi integration v1 supports up to 10,000 items per TML.
+const ShardLimit = 10_000
+
+// Shard represents a single Traffic Matching List shard in zone mode.
+// In legacy mode, it represents a firewall group shard.
+type Shard struct {
+	ID     string // TML UUID (integration v1) or firewall group ID (legacy)
+	Name   string // "crowdsec-block-v4-0" or similar
+	Index  int    // shard number (0, 1, 2, ...)
+	Family string // "v4" or "v6"
+	IPs    *IPSet // in-memory authoritative IP set
+}
+
 // ShardManager manages a set of firewall group shards for one address family on one site.
+// In zone mode, shards are Traffic Matching Lists; in legacy mode, they are firewall groups.
 type ShardManager struct {
 	mu         sync.RWMutex
 	site       string
 	ipv6       bool
-	capacity   int
+	capacity   int // deprecated: use ShardLimit constant instead
 	namer      *Namer
 	ctrl       controller.Controller
 	store      storage.Store
@@ -29,13 +44,7 @@ type ShardManager struct {
 	mode       string // "legacy" or "zone" (used for log messaging only)
 
 	// In-memory shadow of each shard's members
-	shards []shard // index == shard number
-}
-
-type shard struct {
-	unifiID string
-	members map[string]struct{}
-	dirty   bool
+	shards []Shard // index == shard number
 }
 
 // flushSnapshot captures the data needed to flush a dirty shard without holding the lock.
@@ -131,7 +140,6 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 			continue
 		}
 
-		members := make(map[string]struct{}, len(rec.Members))
 		foundInAPI := false
 
 		// Prefer live API data over stale bbolt cache.
@@ -139,43 +147,63 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 		// In legacy mode, match by ID.
 		if sm.mode == "zone" {
 			if tml, exists := apiTMLByName[name]; exists {
+				// Load existing members as baseline
+				members := make([]string, 0, len(tml.Items))
 				for _, item := range tml.Items {
-					members[item.Value] = struct{}{}
+					members = append(members, item.Value)
 				}
+				shard := &Shard{
+					ID:     tml.ID,
+					Name:   tml.Name,
+					Index:  idx,
+					Family: Family(sm.ipv6),
+					IPs:    NewIPSet(),
+				}
+				shard.IPs.Replace(members)
+				shard.IPs.MarkClean() // baseline is not dirty
+
 				// Update bbolt record with current TML ID in case it changed.
 				rec.UnifiID = tml.ID
 				foundInAPI = true
+				sm.shards = append(sm.shards, *shard)
+				idx++
+				continue
 			}
 		} else {
 			if apiGroup, exists := apiGroupByID[rec.UnifiID]; exists {
-				for _, m := range apiGroup.GroupMembers {
-					members[m] = struct{}{}
+				// Load existing members as baseline
+				members := make([]string, len(apiGroup.GroupMembers))
+				copy(members, apiGroup.GroupMembers)
+				shard := &Shard{
+					ID:     rec.UnifiID,
+					Name:   name,
+					Index:  idx,
+					Family: Family(sm.ipv6),
+					IPs:    NewIPSet(),
 				}
+				shard.IPs.Replace(members)
+				shard.IPs.MarkClean() // baseline is not dirty
+				sm.shards = append(sm.shards, *shard)
 				foundInAPI = true
+				idx++
+				continue
 			}
 		}
 
-		if foundInAPI {
-			sm.shards = append(sm.shards, shard{
-				unifiID: rec.UnifiID,
-				members: members,
-			})
+		if !foundInAPI {
+			// Cached object no longer exists in API for this mode. Recreate and
+			// mark dirty so members are pushed on the next flush.
+			if err := sm.createShard(ctx, idx); err != nil {
+				return err
+			}
+			// The new shard already has an empty IPSet
+			if len(rec.Members) > 0 {
+				// Mark dirty to push the old members
+				sm.shards[idx].IPs.Replace(rec.Members)
+				sm.shards[idx].IPs.MarkClean() // will be set dirty by replace above, but let's be explicit
+			}
 			idx++
-			continue
 		}
-
-		// Cached object no longer exists in API for this mode. Recreate and
-		// mark dirty so members are pushed on the next flush.
-		if err := sm.createShard(ctx, idx); err != nil {
-			return err
-		}
-		for _, m := range rec.Members {
-			sm.shards[idx].members[m] = struct{}{}
-		}
-		if len(rec.Members) > 0 {
-			sm.shards[idx].dirty = true
-		}
-		idx++
 	}
 
 	// If no shards yet, create the first one
@@ -200,7 +228,7 @@ func (sm *ShardManager) Add(ctx context.Context, ip string) (shardName string, n
 
 	// Check if already present
 	for _, s := range sm.shards {
-		if _, ok := s.members[ip]; ok {
+		if s.IPs.Contains(ip) {
 			return "", -1, nil // already there
 		}
 	}
@@ -208,7 +236,7 @@ func (sm *ShardManager) Add(ctx context.Context, ip string) (shardName string, n
 	// Find a shard with capacity
 	shardIdx := -1
 	for i, s := range sm.shards {
-		if len(s.members) < sm.capacity {
+		if s.IPs.Capacity(sm.capacity) > 0 {
 			shardIdx = i
 			break
 		}
@@ -223,8 +251,7 @@ func (sm *ShardManager) Add(ctx context.Context, ip string) (shardName string, n
 		newShardIdx = shardIdx
 	}
 
-	sm.shards[shardIdx].members[ip] = struct{}{}
-	sm.shards[shardIdx].dirty = true
+	sm.shards[shardIdx].IPs.Add(ip)
 
 	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: shardIdx, Site: sm.site})
 	if err != nil {
@@ -240,9 +267,7 @@ func (sm *ShardManager) Remove(ctx context.Context, ip string) (string, error) {
 	defer sm.mu.Unlock()
 
 	for i, s := range sm.shards {
-		if _, ok := s.members[ip]; ok {
-			delete(sm.shards[i].members, ip)
-			sm.shards[i].dirty = true
+		if s.IPs.Remove(ip) {
 			name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: i, Site: sm.site})
 			if err != nil {
 				return "", err
@@ -272,12 +297,13 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 	sm.mu.Lock()
 	var snapshots []flushSnapshot
 	for i := range sm.shards {
-		if !sm.shards[i].dirty {
+		ips, dirty := sm.shards[i].IPs.PeekDirty()
+		if !dirty {
 			continue
 		}
 
-		members := make([]string, 0, len(sm.shards[i].members))
-		for m := range sm.shards[i].members {
+		members := make([]string, 0, len(ips))
+		for _, m := range ips {
 			members = append(members, m)
 		}
 		sort.Strings(members)
@@ -290,11 +316,12 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 
 		snapshots = append(snapshots, flushSnapshot{
 			idx:     i,
-			unifiID: sm.shards[i].unifiID,
+			unifiID: sm.shards[i].ID,
 			name:    name,
 			members: members,
 		})
-		sm.shards[i].dirty = false
+		// Clear dirty flag now so Add/Remove can proceed
+		sm.shards[i].IPs.MarkClean()
 	}
 	sm.mu.Unlock()
 
@@ -319,7 +346,8 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 				// Re-mark remaining snapshots as dirty
 				sm.mu.Lock()
 				for _, s := range snapshots[i:] {
-					sm.shards[s.idx].dirty = true
+					// Restore dirty flag
+					sm.shards[s.idx].IPs.Replace(snap.members)
 				}
 				sm.mu.Unlock()
 				return ctx.Err()
@@ -333,7 +361,8 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 			case <-ctx.Done():
 				sm.mu.Lock()
 				for _, s := range snapshots[i:] {
-					sm.shards[s.idx].dirty = true
+					// Restore dirty flag
+					sm.shards[s.idx].IPs.Replace(snap.members)
 				}
 				sm.mu.Unlock()
 				return ctx.Err()
@@ -370,7 +399,7 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 		if putErr != nil {
 			// Re-mark as dirty for retry on next flush
 			sm.mu.Lock()
-			sm.shards[snap.idx].dirty = true
+			sm.shards[snap.idx].IPs.Replace(snap.members)
 			sm.mu.Unlock()
 
 			if firstErr == nil {
@@ -405,11 +434,11 @@ func (sm *ShardManager) PrunableTail() (unifiID string, shardIdx int, ok bool) {
 	}
 
 	last := sm.shards[len(sm.shards)-1]
-	if len(last.members) > 0 {
+	if last.IPs.Len() > 0 {
 		return "", -1, false
 	}
 
-	return last.unifiID, len(sm.shards) - 1, true
+	return last.ID, len(sm.shards) - 1, true
 }
 
 // RemoveTail removes the last shard from in-memory slice and bbolt.
@@ -445,7 +474,7 @@ func (sm *ShardManager) Contains(ip string) bool {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	for _, s := range sm.shards {
-		if _, ok := s.members[ip]; ok {
+		if s.IPs.Contains(ip) {
 			return true
 		}
 	}
@@ -458,9 +487,7 @@ func (sm *ShardManager) AllMembers() []string {
 	defer sm.mu.RUnlock()
 	var all []string
 	for _, s := range sm.shards {
-		for m := range s.members {
-			all = append(all, m)
-		}
+		all = append(all, s.IPs.Members()...)
 	}
 	return all
 }
@@ -478,9 +505,12 @@ func (sm *ShardManager) createShard(ctx context.Context, idx int) error {
 	if sm.dryRun {
 		sm.log.Info().Str("name", name).Bool("ipv6", sm.ipv6).Int("shard", idx).
 			Msgf("[DRY-RUN] would create %s", objectKind)
-		sm.shards = append(sm.shards, shard{
-			unifiID: "dry-run-no-id",
-			members: make(map[string]struct{}),
+		sm.shards = append(sm.shards, Shard{
+			ID:      "dry-run-no-id",
+			Name:    name,
+			Index:   idx,
+			Family:  Family(sm.ipv6),
+			IPs:     NewIPSet(),
 		})
 		return nil
 	}
@@ -520,9 +550,12 @@ func (sm *ShardManager) createShard(ctx context.Context, idx int) error {
 		createdID = created.ID
 	}
 
-	sm.shards = append(sm.shards, shard{
-		unifiID: createdID,
-		members: make(map[string]struct{}),
+	sm.shards = append(sm.shards, Shard{
+		ID:      createdID,
+		Name:    name,
+		Index:   idx,
+		Family:  Family(sm.ipv6),
+		IPs:     NewIPSet(),
 	})
 
 	if err := sm.store.SetGroup(name, storage.GroupRecord{
@@ -544,7 +577,7 @@ func (sm *ShardManager) GroupIDs() []string {
 	defer sm.mu.RUnlock()
 	ids := make([]string, 0, len(sm.shards))
 	for _, s := range sm.shards {
-		ids = append(ids, s.unifiID)
+		ids = append(ids, s.ID)
 	}
 	return ids
 }
@@ -553,6 +586,6 @@ func (sm *ShardManager) updateMetrics() {
 	family := Family(sm.ipv6)
 	for i, s := range sm.shards {
 		name, _ := sm.namer.GroupName(NameData{Family: family, Index: i, Site: sm.site})
-		metrics.FirewallGroupSize.WithLabelValues(family, name, sm.site).Set(float64(len(s.members)))
+		metrics.FirewallGroupSize.WithLabelValues(family, name, sm.site).Set(float64(s.IPs.Len()))
 	}
 }

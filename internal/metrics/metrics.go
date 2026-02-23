@@ -114,4 +114,33 @@ var (
 		Name:      "reconcile_delta",
 		Help:      "IPs changed in last reconcile.",
 	}, []string{"direction", "site"})
+
+	// ShardIPCount tracks current IP count per shard.
+	ShardIPCount = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "shard_ip_count",
+		Help:      "Current IP count per firewall shard.",
+	}, []string{"family", "shard", "site"})
+
+	// ShardSyncTotal counts shard sync attempts.
+	ShardSyncTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "shard_sync_total",
+		Help:      "Shard sync attempts by family, shard, and result.",
+	}, []string{"family", "shard", "result"})
+
+	// ShardSyncDuration records shard sync latency.
+	ShardSyncDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace,
+		Name:      "shard_sync_duration_seconds",
+		Help:      "Shard sync duration in seconds.",
+		Buckets:   []float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0},
+	}, []string{"family", "shard"})
+
+	// DirtyShards counts shards pending sync.
+	DirtyShards = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "dirty_shards",
+		Help:      "Number of shards pending sync at last tick.",
+	})
 )

@@ -42,6 +42,10 @@ type Config struct {
 	FirewallReconcileOnStart  bool          `koanf:"firewall_reconcile_on_start"`
 	FirewallReconcileInterval time.Duration `koanf:"firewall_reconcile_interval"`
 
+	// Shard Management (integration v1)
+	SyncInterval time.Duration `koanf:"sync_interval"`
+	ShardLimit   int           `koanf:"shard_limit"`
+
 	// Object Naming Templates
 	GroupNameTemplate  string `koanf:"group_name_template"`
 	RuleNameTemplate   string `koanf:"rule_name_template"`
@@ -184,6 +188,8 @@ func defaults() map[string]interface{} {
 		"firewall_flush_concurrency":  1,
 		"firewall_reconcile_on_start": true,
 		"firewall_reconcile_interval": "0s",
+		"sync_interval":               "30s",
+		"shard_limit":                 10000,
 		"group_name_template":         "crowdsec-block-{{.Family}}-{{.Index}}",
 		"rule_name_template":          "crowdsec-drop-{{.Family}}-{{.Index}}",
 		"policy_name_template":        "crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}",
@@ -371,6 +377,13 @@ func (c *Config) Validate() error {
 
 	if c.JanitorInterval <= 0 {
 		return fmt.Errorf("JANITOR_INTERVAL must be > 0; got %s", c.JanitorInterval)
+	}
+
+	if c.SyncInterval < 5*time.Second {
+		return fmt.Errorf("SYNC_INTERVAL must be at least 5s (got %s)", c.SyncInterval)
+	}
+	if c.ShardLimit < 1 || c.ShardLimit > 10000 {
+		return fmt.Errorf("SHARD_LIMIT must be between 1 and 10000 (got %d)", c.ShardLimit)
 	}
 
 	return nil

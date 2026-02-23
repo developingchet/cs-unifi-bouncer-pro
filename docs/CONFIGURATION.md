@@ -87,6 +87,13 @@ UNIFI_SITES=default,homelab,iot
 | `FIREWALL_RECONCILE_ON_START` | `true` | No | Run a full reconcile on startup before accepting the CrowdSec stream |
 | `FIREWALL_RECONCILE_INTERVAL` | — | No | Periodically re-sync UniFi state with bbolt (e.g. `6h`). `0` or empty = startup only. |
 
+### Traffic Matching List / Shard Management (Integration v1 / Zone Mode)
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `SYNC_INTERVAL` | `30s` | No | How often to push the current ban list to Traffic Matching Lists. Minimum: `5s`. Lower values = faster ban propagation, higher API call frequency. |
+| `SHARD_LIMIT` | `10000` | No | Maximum IPs per Traffic Matching List shard. When a shard is full, a new shard + zone policies are created automatically. UniFi integration v1 supports up to 10,000 items per TML. |
+
 ### Firewall mode details
 
 **`auto`** (recommended): The bouncer queries the UniFi controller to detect whether zone-based firewall policies are supported. Controllers running UniFi Network ≥ 8.x use zone mode; older versions use legacy mode. The detected mode is logged at startup.
@@ -97,7 +104,11 @@ UNIFI_SITES=default,homelab,iot
 
 ### Group capacity and sharding
 
-UniFi firewall groups have an upper limit on members. When the number of banned IPs exceeds `FIREWALL_GROUP_CAPACITY`, the bouncer automatically creates additional shards (e.g. `crowdsec-block-v4-0`, `crowdsec-block-v4-1`, ...) and creates matching rules or policies for each. The default of 10,000 is conservative; raise it if you observe frequent sharding.
+UniFi firewall groups (legacy mode) and Traffic Matching Lists (zone mode) have a maximum capacity of 10,000 items per shard. When the number of banned IPs exceeds the configured capacity, the bouncer automatically creates additional shards (e.g. `crowdsec-block-v4-0`, `crowdsec-block-v4-1`, ...) and creates matching rules or policies for each.
+
+IPs are distributed across shards using **bin-packing**: each shard is filled to capacity before a new shard is created. This minimizes the number of shards and keeps the firewall configuration compact.
+
+Shards are batch-flushed at the interval defined by `FIREWALL_BATCH_WINDOW` (default `10s`). This means multiple IP changes are accumulated and pushed to the UniFi API in a single PUT request per shard, reducing API call frequency.
 
 ---
 
@@ -214,7 +225,7 @@ Decisions from CrowdSec pass through an 8-stage filter pipeline before being enq
 
 ---
 
-## Worker Pool
+## Decision Worker Pool
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -223,7 +234,13 @@ Decisions from CrowdSec pass through an 8-stage filter pipeline before being enq
 | `POOL_MAX_RETRIES` | `3` | Maximum retry attempts per job before it is dropped |
 | `POOL_RETRY_BASE` | `1s` | Base delay for exponential backoff between retries |
 
-Each worker independently handles the idempotency check, rate gate, UniFi API call, and bbolt persistence for each ban/unban job.
+The decision worker pool processes ban/unban decisions from CrowdSec. Each worker independently handles:
+- Idempotency check (bbolt bans bucket)
+- API rate gate (bbolt rate bucket, sliding window)
+- Firewall manager (ApplyBan / ApplyUnban)
+- Persistence to bbolt (BanRecord / BanDelete — skipped in DRY_RUN)
+
+**Note**: Shard management (Firewall Groups / Traffic Matching Lists) uses a separate batch sync model that flushes dirty shards at the interval defined by `FIREWALL_BATCH_WINDOW`, not the worker pool.
 
 ---
 

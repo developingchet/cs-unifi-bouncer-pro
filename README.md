@@ -15,7 +15,8 @@ Automatically translates CrowdSec ban decisions into UniFi firewall rules — bl
 
 - **Dual firewall modes** — Auto-detects zone-based (UniFi Network ≥ 8.x) or legacy WAN_IN rules; no manual configuration required in most deployments
 - **Multi-site** — Apply bans to multiple UniFi sites simultaneously with a single bouncer instance
-- **Worker pool** — Configurable concurrency (1–64 workers) with exponential backoff retry; handles large ban waves without blocking the CrowdSec stream
+- **Batch sync** — IP changes are accumulated and flushed in batch at configurable intervals (default 10s), with bin-packing to fill shards before creating new ones
+- **Shard management** — Automatic creation of multiple Firewall Groups / Traffic Matching Lists when IP count exceeds capacity (10,000 per shard)
 - **ACID persistence** — bbolt-backed ban tracking with TTL-aware auto-expiry; bans survive container restarts and are never double-applied
 - **Template-based naming** — Go templates for all managed object names; prevents conflicts in multi-instance deployments
 - **Prometheus metrics** — 15 `crowdsec_unifi_*` metrics covering decisions, jobs, API calls, active bans, and more
@@ -119,6 +120,9 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `FIREWALL_LOG_DROPS` | `false` | Enable logging rules on the firewall objects |
 | `FIREWALL_RECONCILE_ON_START` | `true` | Sync UniFi state with bbolt on startup |
 | `FIREWALL_RECONCILE_INTERVAL` | `0s` | Periodic reconcile interval; `0s` = disabled |
+| `SYNC_INTERVAL` | `30s` | Push interval for Traffic Matching Lists (integration v1) |
+| `SHARD_LIMIT` | `10000` | Max IPs per shard before creating a new one |
+| `FIREWALL_BATCH_WINDOW` | `10s` | Accumulate writes before flushing to API |
 
 ### Legacy firewall mode
 
@@ -161,6 +165,18 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 |----------|---------|-------------|
 | `RATELIMIT_WINDOW` | `1m` | Sliding window duration |
 | `RATELIMIT_MAX_CALLS` | `120` | Max API calls per window; `0` = unlimited |
+
+### Batch Sync & Shard Management
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SYNC_INTERVAL` | `30s` | How often to push the current ban list to Traffic Matching Lists (integration v1). Minimum: `5s` |
+| `SHARD_LIMIT` | `10000` | Maximum IPs per shard. When a shard is full, a new shard is created automatically |
+| `FIREWALL_BATCH_WINDOW` | `10s` | Accumulate shard member changes for this duration before issuing API updates |
+
+**Bin-packing**: IPs are distributed across shards such that each shard is filled to capacity before a new shard is created. This minimizes the number of firewall objects created.
+
+**Batch flush**: Changes to shard members are accumulated in-memory and pushed to UniFi at the `FIREWALL_BATCH_WINDOW` interval. Multiple IP changes are merged into a single PUT request per shard.
 
 ### Storage & TTL
 
@@ -250,11 +266,19 @@ Worker pool (1–64 goroutines, bounded queue)
     └── 4. Persist to bbolt  (BanRecord / BanDelete — skipped in DRY_RUN)
     │
     ▼
+Firewall Shard Manager (batch sync)
+    │
+    ├── IPSet: in-memory goroutine-safe set with dirty tracking
+    ├── Bin-packing: fill shards to capacity (default 10,000) before creating new ones
+    ├── Batch flush: push all dirty shards at FIREWALL_BATCH_WINDOW interval
+    └── Shard naming: crowdsec-block-{family}-{index} (v4-0, v4-1, v6-0, ...)
+    │
+    ▼
 UniFi controller (HTTPS REST API)
     │
-    ├── Firewall groups (address-group shards, batch-flushed)
-    ├── Legacy WAN_IN rules (one per shard, per family)
-    └── Zone-based policies (one per zone-pair, per shard, per family)
+    ├── Traffic Matching Lists (zone mode) or Firewall Groups (legacy mode)
+    ├── Zone policies or Legacy WAN_IN rules (one per shard, per family)
+    └── Batch-flushed via PUT /proxy/network/v2/api/site/{site}/firewall-group/{id}
 ```
 
 For a detailed explanation of each component, see [docs/DESIGN.md](docs/DESIGN.md).
@@ -284,6 +308,10 @@ Available at `:9090/metrics` (configurable via `METRICS_ADDR`):
 | `crowdsec_unifi_firewall_group_size` | Gauge | Members per firewall group shard |
 | `crowdsec_unifi_db_size_bytes` | Gauge | bbolt database file size |
 | `crowdsec_unifi_worker_queue_depth` | Gauge | Current number of pending jobs |
+| `crowdsec_unifi_shard_ip_count` | Gauge | Current IP count per firewall shard (family/shard/site) |
+| `crowdsec_unifi_shard_sync_total` | Counter | Shard sync attempts by family, shard, and result |
+| `crowdsec_unifi_shard_sync_duration_seconds` | Histogram | Shard sync duration by family and shard |
+| `crowdsec_unifi_dirty_shards` | Gauge | Number of shards pending sync |
 
 ### CrowdSec usage metrics
 
@@ -340,12 +368,12 @@ For the vulnerability disclosure policy, see [SECURITY.md](SECURITY.md).
 | Feature | Teifun2 | cs-unifi-bouncer-pro |
 |---------|---------|---------------------|
 | State persistence | None | ACID bbolt (4 buckets) |
-| Worker concurrency | Single-threaded | 1–64 worker pool |
+| Worker concurrency | Single-threaded | 1–64 worker pool (decision processing) |
 | Ban auto-expiry | No | Yes (TTL from CrowdSec + `BAN_TTL`) |
 | Multi-site | No | Yes |
 | Firewall mode | Legacy only | Auto / legacy / zone |
 | Object naming | Hardcoded | Go templates |
-| Prometheus metrics | None | 15 `crowdsec_unifi_*` metrics |
+| Prometheus metrics | None | 19 `crowdsec_unifi_*` metrics |
 | Log redaction | None | `RedactWriter` |
 | Dry-run mode | No | Yes |
 | Startup reconcile | No | Yes |
@@ -355,6 +383,9 @@ For the vulnerability disclosure policy, see [SECURITY.md](SECURITY.md).
 | CrowdSec usage-metrics | No | Yes (LAPI `/v1/usage-metrics`, 30m default) |
 | Seccomp profile | None | 78-syscall allowlist |
 | Image signing | None | Cosign keyless OIDC + CycloneDX SBOM |
+| Batch sync | No | Yes (configurable interval, bin-packing) |
+| Shard management | No | Yes (automatic, up to 10,000 IPs per shard) |
+| Traffic Matching Lists | No | Yes (integration v1 API) |
 
 ---
 
