@@ -36,7 +36,7 @@ Rationale and architectural decisions for cs-unifi-bouncer-pro.
 Go was selected for three reasons:
 
 1. **Single static binary** — no runtime dependency, no interpreter, no shared libraries. The binary can be copied into a distroless container with only CA certificates and timezone data. The resulting image is under 20 MB.
-2. **Concurrency primitives** — goroutines and channels map directly onto the worker pool and stream processor model. The `golang.org/x/sync/errgroup` package simplifies coordinated shutdown.
+2. **Concurrency primitives** — goroutines and channels map directly onto the stream processor and periodic sync model. The `golang.org/x/sync/errgroup` package simplifies coordinated shutdown.
 3. **TLS and HTTP** — the standard library's `net/http` and `crypto/tls` packages handle UniFi and CrowdSec LAPI connections without additional dependencies.
 
 ---
@@ -53,22 +53,22 @@ processStream() goroutine
 handleDecisionBlock()
     │  8-stage filter pipeline (synchronous, in-stream)
     ▼
-Worker pool (1–64 goroutines)
-    │
-    │  per job:
+job handler (inline, per decision)
     │  1. idempotency check  (bbolt bans bucket)
-    │  2. API rate gate      (bbolt rate bucket, sliding window)
-    │  3. firewall manager   (ApplyBan / ApplyUnban)
-    │  4. bbolt persist      (BanRecord / BanDelete)
+    │  2. firewall manager   (ApplyBan / ApplyUnban → mark shard dirty)
+    │  3. bbolt persist      (BanRecord / BanDelete)
+    ▼
+SyncDirty() — flush dirty shards to UniFi (after every decision batch)
+    │  periodic SYNC_INTERVAL ticker retries failed flushes
     ▼
 UniFi controller (HTTPS REST API)
     │
-    ├── Firewall groups (address-group shards, batch-flushed)
+    ├── Traffic Matching Lists / Firewall groups (shards, batch-flushed)
     ├── Legacy WAN_IN rules (one per shard, per family)
     └── Zone-based policies (one per zone-pair, per shard, per family)
 ```
 
-The stream processor runs in a dedicated goroutine. All filter stages are stateless and execute synchronously before enqueue — no lock contention, no I/O in the hot path. Workers handle all I/O operations asynchronously.
+The stream processor runs in a dedicated goroutine. All filter stages are stateless and execute synchronously. The job handler runs inline — no queuing, no retries at the job layer.
 
 All goroutines participate in a shared `errgroup.Group` with a cancellable context. Any goroutine returning a non-nil error triggers shutdown of all others.
 
@@ -119,41 +119,33 @@ Each (site, family) combination has its own `ShardManager` that tracks in-memory
 
 ---
 
-## Worker Pool
+## Decision Handling
 
-The worker pool (`internal/pool`) provides bounded concurrency with backpressure:
+Ban and unban decisions are processed synchronously per CrowdSec decision batch. The job handler runs inline in the `processStream` goroutine:
 
-```
-Enqueue()  ──►  [ job channel (depth=POOL_QUEUE_DEPTH) ]  ──►  worker goroutines
-```
+1. **Idempotency check** — consult the bbolt `bans` bucket:
+   - Ban job: if the IP is already in `bans`, skip (already applied)
+   - Unban job: if the IP is not in `bans`, skip (nothing to remove)
+2. **Firewall manager** — call `ApplyBan` / `ApplyUnban`, which marks the relevant shard as dirty in memory
+3. **Persist to bbolt** — write `BanRecord` / `BanDelete` (skipped in `DRY_RUN`)
 
-Jobs that arrive when the channel is full are **dropped** (not blocked). A `crowdsec_unifi_jobs_dropped_total` counter tracks these events. The queue depth should be sized to absorb startup ban waves — the default of 4096 is sufficient for most deployments.
+After all decisions in the batch are processed, `SyncDirty` flushes all dirty shards to the UniFi API. If a flush fails, the shard stays dirty and is retried at the next `SYNC_INTERVAL` tick.
 
-Each worker runs a retry loop with exponential backoff (`POOL_RETRY_BASE × 2^attempt`). On exhaustion, the job is logged and discarded. Retried jobs do not re-enter the queue — they block the worker for the backoff duration.
-
-### Idempotency
-
-Before calling the UniFi API, each worker checks the bbolt `bans` bucket:
-
-- **Ban job**: if the IP is already in `bans`, skip (already applied)
-- **Unban job**: if the IP is not in `bans`, skip (nothing to remove)
-
-This makes the system safe to restart mid-stream: re-delivered decisions from CrowdSec after restart are deduplicated at this layer.
+This makes the system safe to restart mid-stream: re-delivered decisions from CrowdSec after reconnect are deduplicated at the idempotency layer.
 
 ---
 
 ## State Management
 
-Persistent state is stored in a single [bbolt](https://github.com/etcd-io/bbolt) database (`bouncer.db`) with four buckets:
+Persistent state is stored in a single [bbolt](https://github.com/etcd-io/bbolt) database (`bouncer.db`) with three buckets:
 
 | Bucket | Key | Value |
 |--------|-----|-------|
 | `bans` | IP string | msgpack-encoded `BanEntry` {RecordedAt, ExpiresAt, IPv6} |
-| `rate` | UUID | Unix timestamp (sliding-window rate gate entries) |
 | `groups` | `site/family/shard` | msgpack-encoded `GroupRecord` {UnifiID, Members, UpdatedAt} |
 | `policies` | `site/family/shard` | msgpack-encoded `PolicyRecord` {UnifiID, RuleID, Mode, Priority, UpdatedAt} |
 
-bbolt provides ACID transactions with a single writer at a time. This matches the access pattern well: the ban bucket has many concurrent readers (idempotency checks) and one writer per job (persist step). The rate bucket uses a mutex in addition to bbolt's serialisation to coordinate the sliding-window atomicity.
+bbolt provides ACID transactions with a single writer at a time. This matches the access pattern well: the ban bucket has many concurrent readers (idempotency checks) and one writer per decision batch (persist step).
 
 ### Startup reconcile
 
@@ -171,7 +163,6 @@ This corrects drift caused by manual edits, controller restarts, or bouncer down
 A background goroutine runs every `JANITOR_INTERVAL` (default 1 h):
 
 - Prunes expired bans from the `bans` bucket (entries older than `BAN_TTL`)
-- Prunes expired sliding-window entries from the `rate` bucket
 - Updates the `crowdsec_unifi_db_size_bytes` gauge
 
 ---
@@ -180,12 +171,12 @@ A background goroutine runs every `JANITOR_INTERVAL` (default 1 h):
 
 The UniFi controller may return `401 Unauthorized` when a session cookie expires or when the API key is rotated. The bouncer handles this with a mutex-guarded re-authentication mechanism:
 
-1. Any worker that receives a 401 calls `sessionManager.EnsureAuth()`
+1. Any goroutine that receives a 401 calls `sessionManager.EnsureAuth()`
 2. The mutex ensures only one goroutine performs the re-authentication request
 3. A `ReauthMinGap` timer prevents stampedes: if re-auth completed within the gap, subsequent callers skip it and assume the session is now valid
 4. After successful re-auth, the failed request is retried once
 
-This pattern prevents the thundering-herd problem when many workers encounter a 401 simultaneously.
+This pattern prevents the thundering-herd problem when multiple goroutines encounter a 401 simultaneously.
 
 ---
 
@@ -193,9 +184,9 @@ This pattern prevents the thundering-herd problem when many workers encounter a 
 
 Updating a firewall group requires a `PUT` request with the full member list. Issuing one `PUT` per ban would be wasteful during ban waves.
 
-Instead, the `ShardManager` accumulates IP additions and removals in memory and sets a `dirty` flag. A per-shard timer (controlled by `FIREWALL_BATCH_WINDOW`, default 500 ms) triggers a flush: a single `PUT` with the full updated member list.
+Instead, `ApplyBan` / `ApplyUnban` accumulate IP changes in memory and mark the shard as `dirty`. After every CrowdSec decision batch, `SyncDirty` flushes all dirty shards: a single `PUT` with the full updated member list per shard. Failed flushes leave the shard dirty for retry at the next `SYNC_INTERVAL` tick.
 
-The shard also flushes immediately when it reaches `FIREWALL_GROUP_CAPACITY`, creating a new shard if needed.
+New shards are created automatically when a shard reaches `FIREWALL_GROUP_CAPACITY`.
 
 ---
 
@@ -282,8 +273,7 @@ All tests are table-driven and run without external services. The test suite cov
 - **`internal/decision`**: filter pipeline (all 8 stages), IP parsing and sanitisation, private IP detection, whitelist matching
 - **`internal/firewall`**: namer template rendering, shard manager operations
 - **`internal/controller`**: session management, 401 re-authentication logic
-- **`internal/storage`**: bbolt ban operations, rate gate sliding window, group/policy cache
-- **`internal/pool`**: enqueue, drain, retry backoff
+- **`internal/storage`**: bbolt ban operations, group/policy cache
 - **`internal/logger`**: redaction patterns
 - **`internal/lapi_metrics`**: Reporter construction, interval clamping, counter reset
   behaviour after push, payload structure validation, user-agent and API key headers,
@@ -304,8 +294,8 @@ The race detector (`go test -race ./...`) is run in CI for all packages. Concurr
 
 | Feature | Teifun2 | cs-unifi-bouncer-pro |
 |---------|---------|---------------------|
-| State persistence | None | ACID bbolt (4 buckets) |
-| Worker concurrency | Single-threaded | 1–64 worker pool |
+| State persistence | None | ACID bbolt (3 buckets) |
+| Decision handling | Single-threaded | Inline synchronous handler per batch |
 | Ban auto-expiry | No | Yes (TTL from CrowdSec + `BAN_TTL`) |
 | Multi-site | No | Yes |
 | Firewall mode | Legacy only | Auto / legacy / zone |

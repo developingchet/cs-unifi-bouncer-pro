@@ -80,7 +80,6 @@ UNIFI_SITES=default,homelab,iot
 | `FIREWALL_GROUP_CAPACITY` | `10000` | No | Maximum IPs per firewall group shard (used if family-specific overrides are not set) |
 | `FIREWALL_GROUP_CAPACITY_V4` | — | No | Override capacity for IPv4 groups (takes precedence over `FIREWALL_GROUP_CAPACITY`) |
 | `FIREWALL_GROUP_CAPACITY_V6` | — | No | Override capacity for IPv6 groups (takes precedence over `FIREWALL_GROUP_CAPACITY`) |
-| `FIREWALL_BATCH_WINDOW` | `10s` | No | Accumulate shard member changes for this duration before issuing API updates |
 | `FIREWALL_API_SHARD_DELAY` | `250ms` | No | Minimum pause between consecutive write calls (`PUT /rest/firewallgroup`, rule/policy `POST`/`DELETE`). Prevents the UDM from stacking back-to-back ruleset regenerations. Set `0` to disable. |
 | `FIREWALL_FLUSH_CONCURRENCY` | `1` | No | Maximum concurrent `PUT /rest/firewallgroup` calls in-flight across all sites and address families. `1` = fully serialized (recommended). Increase only for multi-site setups where faster bulk updates are needed. |
 | `FIREWALL_LOG_DROPS` | `false` | No | Enable UniFi "log dropped packets" on managed firewall rules |
@@ -91,7 +90,7 @@ UNIFI_SITES=default,homelab,iot
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `SYNC_INTERVAL` | `30s` | No | How often to push the current ban list to Traffic Matching Lists. Minimum: `5s`. Lower values = faster ban propagation, higher API call frequency. |
+| `SYNC_INTERVAL` | `30s` | No | Retry interval for dirty shard flushes that failed after a decision batch. Shards are also flushed immediately after every decision batch. Minimum: `5s`. |
 | `SHARD_LIMIT` | `10000` | No | Maximum IPs per Traffic Matching List shard. When a shard is full, a new shard + zone policies are created automatically. UniFi integration v1 supports up to 10,000 items per TML. |
 
 ### Firewall mode details
@@ -108,7 +107,7 @@ UniFi firewall groups (legacy mode) and Traffic Matching Lists (zone mode) have 
 
 IPs are distributed across shards using **bin-packing**: each shard is filled to capacity before a new shard is created. This minimizes the number of shards and keeps the firewall configuration compact.
 
-Shards are batch-flushed at the interval defined by `FIREWALL_BATCH_WINDOW` (default `10s`). This means multiple IP changes are accumulated and pushed to the UniFi API in a single PUT request per shard, reducing API call frequency.
+After every CrowdSec decision batch, all dirty shards are flushed to the UniFi API immediately (`SyncDirty`). If a flush fails (e.g. transient network error), the shard remains dirty and is retried at the next `SYNC_INTERVAL` tick. This means multiple IP changes within a single decision batch are merged into one PUT request per shard.
 
 ---
 
@@ -222,38 +221,6 @@ Decisions from CrowdSec pass through an 8-stage filter pipeline before being enq
 | `private-ip` | RFC 1918, loopback, link-local, and ULA addresses |
 | `whitelist` | IPs matching `BLOCK_WHITELIST` |
 | `min-duration` | Decisions shorter than `BLOCK_MIN_DURATION` |
-
----
-
-## Decision Worker Pool
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `POOL_WORKERS` | `4` | Number of concurrent worker goroutines (1–64). Increase for high-throughput deployments. |
-| `POOL_QUEUE_DEPTH` | `4096` | Bounded job queue depth. Jobs are dropped (and a metric recorded) when the queue is full. |
-| `POOL_MAX_RETRIES` | `3` | Maximum retry attempts per job before it is dropped |
-| `POOL_RETRY_BASE` | `1s` | Base delay for exponential backoff between retries |
-
-The decision worker pool processes ban/unban decisions from CrowdSec. Each worker independently handles:
-- Idempotency check (bbolt bans bucket)
-- API rate gate (bbolt rate bucket, sliding window)
-- Firewall manager (ApplyBan / ApplyUnban)
-- Persistence to bbolt (BanRecord / BanDelete — skipped in DRY_RUN)
-
-**Note**: Shard management (Firewall Groups / Traffic Matching Lists) uses a separate batch sync model that flushes dirty shards at the interval defined by `FIREWALL_BATCH_WINDOW`, not the worker pool.
-
----
-
-## API Rate Gate
-
-The rate gate prevents the bouncer from overwhelming the UniFi API during large ban waves. It uses a sliding-window counter stored in bbolt.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `RATELIMIT_WINDOW` | `1m` | Rolling time window for rate counting |
-| `RATELIMIT_MAX_CALLS` | `120` | Maximum UniFi API calls allowed within the window |
-
-Jobs that arrive when the gate is closed are requeued with retry logic.
 
 ---
 

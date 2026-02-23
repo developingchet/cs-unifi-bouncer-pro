@@ -419,39 +419,21 @@ The reconcile command compares bbolt state with the current UniFi firewall state
 
 ## Performance Issues
 
-### API rate gate triggered
+### Shard sync failures
 
 **Symptom:**
 
 ```json
-{"level":"warn","msg":"rate gate closed","calls_in_window":120,"window":"1m"}
+{"level":"warn","msg":"SyncDirty after decision block failed","error":"..."}
 ```
 
-**Cause:** The bouncer made more than `RATELIMIT_MAX_CALLS` UniFi API calls within `RATELIMIT_WINDOW`. Jobs are retried with backoff.
+**Cause:** A transient error prevented one or more shards from being flushed to the UniFi API after a decision batch.
 
-**Fix:** This is normal during large startup ban waves. If it is chronic:
+**Fix:** This is usually transient. The bouncer will retry dirty shards at the next `SYNC_INTERVAL` tick (default `30s`). If the error is chronic:
 
-- Increase `RATELIMIT_MAX_CALLS` (check your UniFi controller's documented limits)
-- Increase `FIREWALL_BATCH_WINDOW` to accumulate more changes per API call
-- Increase `POOL_RETRY_BASE` to spread retries over a longer interval
-
----
-
-### Worker queue full — jobs dropped
-
-**Symptom:**
-
-```json
-{"level":"warn","msg":"job dropped","reason":"queue full","action":"ban","ip":"1.2.3.4"}
-```
-
-**Cause:** The worker pool cannot keep up with the rate of incoming decisions. The bounded job channel is full.
-
-**Fix:**
-
-- Increase `POOL_QUEUE_DEPTH` (default 4096) to absorb larger bursts
-- Increase `POOL_WORKERS` (default 4) to process jobs faster
-- Dropped jobs will be re-delivered by CrowdSec on the next stream reconnect (`CROWDSEC_POLL_INTERVAL`)
+- Check UniFi controller connectivity
+- Increase `FIREWALL_API_SHARD_DELAY` to reduce request rate
+- Review `crowdsec_unifi_dirty_shards` and `crowdsec_unifi_shard_sync_total{result="error"}` metrics
 
 ---
 
