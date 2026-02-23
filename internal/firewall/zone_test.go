@@ -293,6 +293,36 @@ func TestZoneManager_DeletePoliciesForShard_NoOp(t *testing.T) {
 	}
 }
 
+// TestZoneManager_EnsurePolicies_ListsOnce verifies that EnsurePolicies calls
+// ListZonePolicies exactly once regardless of the number of zone pairs or families.
+func TestZoneManager_EnsurePolicies_ListsOnce(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore()
+	namer := zoneTestNamer(t)
+
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	v6 := ensuredZoneV6Shard(t, ctrl, store)
+
+	zm := NewZoneManager(ZoneConfig{
+		ZonePairs: []config.ZonePair{
+			{Src: "wan", Dst: "lan"},
+			{Src: "wan", Dst: "iot"},
+		},
+		Description: "test",
+	}, namer, ctrl, store, zerolog.Nop())
+
+	listsBefore := ctrl.Calls("ListZonePolicies")
+
+	if err := zm.EnsurePolicies(context.Background(), testSite, v4, v6); err != nil {
+		t.Fatalf("EnsurePolicies: %v", err)
+	}
+
+	// 2 pairs × 2 families = 4 ensurePoliciesForPair calls, but ListZonePolicies must be 1.
+	if got := ctrl.Calls("ListZonePolicies") - listsBefore; got != 1 {
+		t.Errorf("ListZonePolicies calls = %d, want 1", got)
+	}
+}
+
 // TestZoneManager_Bootstrap_FailsWhenSiteMissing verifies that Bootstrap returns
 // an error when GetSiteID fails (fail-fast site UUID resolution).
 func TestZoneManager_Bootstrap_FailsWhenSiteMissing(t *testing.T) {

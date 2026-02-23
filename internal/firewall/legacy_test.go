@@ -265,3 +265,26 @@ func TestLegacyManager_DeleteRuleForShard_NoOp(t *testing.T) {
 		t.Errorf("DeleteFirewallRule calls: got %d, want 0 (no-op)", got)
 	}
 }
+
+// TestLegacyManager_EnsureRules_ListsOnce verifies that EnsureRules calls
+// ListFirewallRules exactly once even when both v4 and v6 shards are present.
+func TestLegacyManager_EnsureRules_ListsOnce(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	namer := testNamer(t)
+
+	v4 := ensuredV4Shard(t, ctrl, store)
+	v6 := ensuredV6Shard(t, ctrl, store)
+	lm := newTestLegacyManager(ctrl, store, namer)
+
+	listsBefore := ctrl.Calls("ListFirewallRules")
+
+	if err := lm.EnsureRules(context.Background(), testSite, v4, v6); err != nil {
+		t.Fatalf("EnsureRules: %v", err)
+	}
+
+	// v4 + v6 = 2 ensureRulesForFamily calls, but ListFirewallRules must be 1.
+	if got := ctrl.Calls("ListFirewallRules") - listsBefore; got != 1 {
+		t.Errorf("ListFirewallRules calls = %d, want 1", got)
+	}
+}

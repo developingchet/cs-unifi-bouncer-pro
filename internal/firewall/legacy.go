@@ -39,18 +39,28 @@ func NewLegacyManager(cfg LegacyConfig, namer *Namer, ctrl controller.Controller
 // EnsureRules idempotently creates drop rules for each group shard.
 // If the rule already exists (from bbolt policy cache), it verifies and updates it.
 func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards, v6Shards *ShardManager) error {
-	if err := lm.ensureRulesForFamily(ctx, site, false, v4Shards); err != nil {
+	// Fetch ALL existing rules once for all families (avoids one GET per family).
+	existingRules, err := lm.ctrl.ListFirewallRules(ctx, site)
+	if err != nil {
+		return err
+	}
+	existingByID := make(map[string]bool, len(existingRules))
+	for _, r := range existingRules {
+		existingByID[r.ID] = true
+	}
+
+	if err := lm.ensureRulesForFamily(ctx, site, false, existingByID, v4Shards); err != nil {
 		return err
 	}
 	if v6Shards != nil {
-		if err := lm.ensureRulesForFamily(ctx, site, true, v6Shards); err != nil {
+		if err := lm.ensureRulesForFamily(ctx, site, true, existingByID, v6Shards); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (lm *LegacyManager) ensureRulesForFamily(ctx context.Context, site string, ipv6 bool, sm *ShardManager) error {
+func (lm *LegacyManager) ensureRulesForFamily(ctx context.Context, site string, ipv6 bool, existingByID map[string]bool, sm *ShardManager) error {
 	family := Family(ipv6)
 	ruleset := lm.cfg.RulesetV4
 	indexStart := lm.cfg.RuleIndexStartV4
@@ -60,16 +70,6 @@ func (lm *LegacyManager) ensureRulesForFamily(ctx context.Context, site string, 
 	}
 
 	groupIDs := sm.GroupIDs()
-
-	// Fetch ALL existing rules once before the loop (avoids N redundant GETs).
-	existingRules, err := lm.ctrl.ListFirewallRules(ctx, site)
-	if err != nil {
-		return err
-	}
-	existingByID := make(map[string]bool, len(existingRules))
-	for _, r := range existingRules {
-		existingByID[r.ID] = true
-	}
 
 	firstCreate := true
 	for i, groupID := range groupIDs {
@@ -115,6 +115,7 @@ func (lm *LegacyManager) ensureRulesForFamily(ctx context.Context, site string, 
 		if err != nil {
 			return fmt.Errorf("create legacy rule %s: %w", ruleName, err)
 		}
+		existingByID[created.ID] = true
 
 		if err := lm.store.SetPolicy(ruleName, storage.PolicyRecord{
 			UnifiID: created.ID,

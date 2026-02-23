@@ -99,12 +99,22 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 
 	connectionStates := normalizeConnectionStates(zm.cfg.ZoneConnectionStates)
 
+	// Fetch ALL existing policies once for all zone pairs (avoids one GET per pair).
+	existingPolicies, err := zm.ctrl.ListZonePolicies(ctx, site)
+	if err != nil {
+		return err
+	}
+	existingByID := make(map[string]bool, len(existingPolicies))
+	for _, p := range existingPolicies {
+		existingByID[p.ID] = true
+	}
+
 	for _, pair := range zm.cfg.ZonePairs {
-		if err := zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, connectionStates, false, v4Shards); err != nil {
+		if err := zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, connectionStates, existingByID, false, v4Shards); err != nil {
 			return err
 		}
 		if v6Shards != nil {
-			if err := zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, connectionStates, true, v6Shards); err != nil {
+			if err := zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, connectionStates, existingByID, true, v6Shards); err != nil {
 				return err
 			}
 		}
@@ -119,7 +129,7 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	return nil
 }
 
-func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, pair config.ZonePair, zoneMap map[string]string, connectionStates []string, ipv6 bool, sm *ShardManager) error {
+func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, pair config.ZonePair, zoneMap map[string]string, connectionStates []string, existingByID map[string]bool, ipv6 bool, sm *ShardManager) error {
 	family := Family(ipv6)
 	ipVersion := "IPV4"
 	if ipv6 {
@@ -127,17 +137,6 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 	}
 
 	groupIDs := sm.GroupIDs()
-
-	// Fetch ALL existing policies once before the loop (avoids N redundant GETs).
-	existingPolicies, err := zm.ctrl.ListZonePolicies(ctx, site)
-	if err != nil {
-		return err
-	}
-	existingByID := make(map[string]bool, len(existingPolicies))
-	for _, p := range existingPolicies {
-		existingByID[p.ID] = true
-	}
-
 	srcZoneID := zoneMap[pair.Src]
 	dstZoneID := zoneMap[pair.Dst]
 
@@ -192,6 +191,7 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 		if err != nil {
 			return fmt.Errorf("create zone policy %s: %w", policyName, err)
 		}
+		existingByID[created.ID] = true
 
 		if err := zm.store.SetPolicy(policyName, storage.PolicyRecord{
 			UnifiID: created.ID,
