@@ -35,7 +35,6 @@ type Config struct {
 	FirewallGroupCapacity     int           `koanf:"firewall_group_capacity"`
 	FirewallGroupCapacityV4   int           `koanf:"firewall_group_capacity_v4"`
 	FirewallGroupCapacityV6   int           `koanf:"firewall_group_capacity_v6"`
-	FirewallBatchWindow       time.Duration `koanf:"firewall_batch_window"`
 	FirewallAPIShardDelay     time.Duration `koanf:"firewall_api_shard_delay"`
 	FirewallFlushConcurrency  int           `koanf:"firewall_flush_concurrency"`
 	FirewallLogDrops          bool          `koanf:"firewall_log_drops"`
@@ -74,16 +73,6 @@ type Config struct {
 	BlockWhitelist          []string      `koanf:"block_whitelist"`
 	BlockMinDuration        time.Duration `koanf:"block_min_duration"`
 
-	// Worker Pool
-	PoolWorkers    int           `koanf:"pool_workers"`
-	PoolQueueDepth int           `koanf:"pool_queue_depth"`
-	PoolMaxRetries int           `koanf:"pool_max_retries"`
-	PoolRetryBase  time.Duration `koanf:"pool_retry_base"`
-
-	// API Rate Gate
-	RateLimitWindow   time.Duration `koanf:"ratelimit_window"`
-	RateLimitMaxCalls int           `koanf:"ratelimit_max_calls"`
-
 	// Session Management
 	SessionReauthMinGap  time.Duration `koanf:"session_reauth_min_gap"`
 	SessionReauthTimeout time.Duration `koanf:"session_reauth_timeout"`
@@ -100,6 +89,10 @@ type Config struct {
 	MetricsAddr     string        `koanf:"metrics_addr"`
 	HealthAddr      string        `koanf:"health_addr"`
 	JanitorInterval time.Duration `koanf:"janitor_interval"`
+
+	// DeprecationWarnings holds warnings about deprecated env vars that were
+	// used. Callers should log these after building the logger.
+	DeprecationWarnings []string `koanf:"-"`
 }
 
 // ZonePair represents a parsed src->dst zone pair.
@@ -183,7 +176,6 @@ func defaults() map[string]interface{} {
 		"firewall_enable_ipv6":        true,
 		"enable_ipv6":                 false,
 		"firewall_group_capacity":     10000,
-		"firewall_batch_window":       "10s",
 		"firewall_api_shard_delay":    "250ms",
 		"firewall_flush_concurrency":  1,
 		"firewall_reconcile_on_start": true,
@@ -205,12 +197,6 @@ func defaults() map[string]interface{} {
 		"crowdsec_lapi_verify_tls":    true,
 		"crowdsec_poll_interval":      "30s",
 		"lapi_metrics_push_interval":  "30m",
-		"pool_workers":                4,
-		"pool_queue_depth":            4096,
-		"pool_max_retries":            3,
-		"pool_retry_base":             "1s",
-		"ratelimit_window":            "1m",
-		"ratelimit_max_calls":         120,
 		"session_reauth_min_gap":      "5s",
 		"session_reauth_timeout":      "10s",
 		"data_dir":                    "/data",
@@ -281,6 +267,16 @@ func Load() (*Config, error) {
 	// Strip Docker env-file quoting from all string values
 	cfg.sanitise()
 
+	// Deprecation alias: FIREWALL_BATCH_WINDOW → SYNC_INTERVAL.
+	// If the user set the old variable but not the new one, migrate the value.
+	if bw := os.Getenv("FIREWALL_BATCH_WINDOW"); bw != "" && os.Getenv("SYNC_INTERVAL") == "" {
+		if d, parseErr := time.ParseDuration(bw); parseErr == nil {
+			cfg.SyncInterval = d
+		}
+		cfg.DeprecationWarnings = append(cfg.DeprecationWarnings,
+			"FIREWALL_BATCH_WINDOW is deprecated; use SYNC_INTERVAL instead")
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -307,10 +303,6 @@ func (c *Config) Validate() error {
 	validActions := map[string]bool{"drop": true, "reject": true}
 	if !validActions[c.FirewallBlockAction] {
 		return fmt.Errorf("FIREWALL_BLOCK_ACTION must be drop or reject; got %q", c.FirewallBlockAction)
-	}
-
-	if c.PoolWorkers < 1 || c.PoolWorkers > 64 {
-		return fmt.Errorf("POOL_WORKERS must be 1–64; got %d", c.PoolWorkers)
 	}
 
 	// Validate Go templates
@@ -365,10 +357,6 @@ func (c *Config) Validate() error {
 
 	if c.FirewallGroupCapacity != 0 && c.FirewallGroupCapacity < 1 {
 		return fmt.Errorf("FIREWALL_GROUP_CAPACITY must be >= 1; got %d", c.FirewallGroupCapacity)
-	}
-
-	if c.PoolQueueDepth < 1 {
-		return fmt.Errorf("POOL_QUEUE_DEPTH must be >= 1; got %d", c.PoolQueueDepth)
 	}
 
 	if c.BanTTL <= 0 {

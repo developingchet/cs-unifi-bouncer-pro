@@ -133,18 +133,6 @@ func TestInvalidFirewallMode(t *testing.T) {
 	}
 }
 
-func TestInvalidPoolWorkers(t *testing.T) {
-	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
-	setEnv(t, "UNIFI_API_KEY", "key")
-	setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
-	setEnv(t, "POOL_WORKERS", "100") // > 64
-
-	_, err := Load()
-	if err == nil {
-		t.Error("expected error for invalid POOL_WORKERS")
-	}
-}
-
 func TestInvalidTemplateValidation(t *testing.T) {
 	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
 	setEnv(t, "UNIFI_API_KEY", "key")
@@ -163,10 +151,8 @@ func TestDefaults(t *testing.T) {
 	setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
 	// Clear any previously set env vars that override defaults
 	os.Unsetenv("FIREWALL_MODE")
-	os.Unsetenv("POOL_WORKERS")
 	os.Unsetenv("ZONE_PAIRS")
 	os.Unsetenv("GROUP_NAME_TEMPLATE")
-	os.Unsetenv("POOL_WORKERS")
 
 	cfg, err := Load()
 	if err != nil {
@@ -174,9 +160,6 @@ func TestDefaults(t *testing.T) {
 	}
 	if cfg.FirewallMode != "auto" {
 		t.Errorf("default FirewallMode: got %q", cfg.FirewallMode)
-	}
-	if cfg.PoolWorkers != 4 {
-		t.Errorf("default PoolWorkers: got %d", cfg.PoolWorkers)
 	}
 	if cfg.GroupNameTemplate != "crowdsec-block-{{.Family}}-{{.Index}}" {
 		t.Errorf("default GroupNameTemplate: got %q", cfg.GroupNameTemplate)
@@ -241,7 +224,6 @@ func baseEnv(t *testing.T) {
 	os.Unsetenv("BLOCK_WHITELIST")
 	os.Unsetenv("CROWDSEC_LAPI_URL")
 	os.Unsetenv("FIREWALL_GROUP_CAPACITY")
-	os.Unsetenv("POOL_QUEUE_DEPTH")
 	os.Unsetenv("BAN_TTL")
 	os.Unsetenv("JANITOR_INTERVAL")
 	os.Unsetenv("FIREWALL_MODE")
@@ -338,13 +320,6 @@ func TestValidation(t *testing.T) {
 			},
 			wantErr: true,
 		},
-		{
-			name: "invalid_pool_queue_depth_zero",
-			setup: func(t *testing.T) {
-				setEnv(t, "POOL_QUEUE_DEPTH", "0")
-			},
-			wantErr: true,
-		},
 	}
 
 	for _, tc := range cases {
@@ -359,5 +334,37 @@ func TestValidation(t *testing.T) {
 				t.Errorf("expected no error, got: %v", err)
 			}
 		})
+	}
+}
+
+func TestDeprecationAlias_FirewallBatchWindow(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("FIREWALL_BATCH_WINDOW", "60s")
+	os.Unsetenv("SYNC_INTERVAL")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SyncInterval.Seconds() != 60 {
+		t.Errorf("expected SyncInterval=60s from FIREWALL_BATCH_WINDOW, got %s", cfg.SyncInterval)
+	}
+	if len(cfg.DeprecationWarnings) == 0 {
+		t.Error("expected deprecation warning for FIREWALL_BATCH_WINDOW")
+	}
+}
+
+func TestDeprecationAlias_SyncIntervalWins(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("FIREWALL_BATCH_WINDOW", "60s")
+	t.Setenv("SYNC_INTERVAL", "120s")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// SYNC_INTERVAL takes precedence over the deprecated FIREWALL_BATCH_WINDOW
+	if cfg.SyncInterval.Seconds() != 120 {
+		t.Errorf("expected SyncInterval=120s (SYNC_INTERVAL wins), got %s", cfg.SyncInterval)
 	}
 }

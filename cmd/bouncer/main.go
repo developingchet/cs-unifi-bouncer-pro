@@ -73,6 +73,9 @@ func runDaemon() error {
 	}
 
 	log := buildLogger(cfg)
+	for _, w := range cfg.DeprecationWarnings {
+		log.Warn().Msg(w)
+	}
 	log.Info().Str("version", Version).Msg("cs-unifi-bouncer-pro starting")
 	log.Info().
 		Str("bouncer_type", capabilities.BouncerType).
@@ -127,7 +130,6 @@ func runDaemon() error {
 		EnableIPv6:       cfg.FirewallEnableIPv6,
 		GroupCapacityV4:  v4Cap,
 		GroupCapacityV6:  v6Cap,
-		BatchWindow:      cfg.FirewallBatchWindow,
 		DryRun:           cfg.DryRun,
 		APIShardDelay:    cfg.FirewallAPIShardDelay,
 		FlushConcurrency: cfg.FirewallFlushConcurrency,
@@ -196,7 +198,7 @@ func runDaemon() error {
 	}
 
 	// Start janitor
-	janitor := bouncer.NewJanitor(store, nil, cfg.JanitorInterval, cfg.RateLimitWindow, log)
+	janitor := bouncer.NewJanitor(store, cfg.JanitorInterval, log)
 	go func() {
 		if err := janitor.Run(ctx); err != nil {
 			log.Warn().Err(err).Msg("janitor exited")
@@ -285,6 +287,9 @@ func reconcileCmd() *cobra.Command {
 			}
 
 			log := buildLogger(cfg)
+			for _, w := range cfg.DeprecationWarnings {
+				log.Warn().Msg(w)
+			}
 
 			store, err := storage.NewBboltStore(cfg.DataDir)
 			if err != nil {
@@ -325,8 +330,7 @@ func reconcileCmd() *cobra.Command {
 				EnableIPv6:       cfg.FirewallEnableIPv6,
 				GroupCapacityV4:  rcV4Cap,
 				GroupCapacityV6:  rcV6Cap,
-				BatchWindow:      cfg.FirewallBatchWindow,
-				DryRun:           cfg.DryRun,
+						DryRun:           cfg.DryRun,
 				APIShardDelay:    cfg.FirewallAPIShardDelay,
 				FlushConcurrency: cfg.FirewallFlushConcurrency,
 				LegacyCfg: firewall.LegacyConfig{
