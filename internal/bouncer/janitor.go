@@ -5,28 +5,23 @@ import (
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/pool"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/rs/zerolog"
 )
 
 // Janitor performs periodic housekeeping: pruning expired bans, updating gauges.
 type Janitor struct {
-	store      storage.Store
-	workerPool *pool.Pool
-	interval   time.Duration
-	rateWindow time.Duration
-	log        zerolog.Logger
+	store    storage.Store
+	interval time.Duration
+	log      zerolog.Logger
 }
 
 // NewJanitor creates a Janitor.
-func NewJanitor(store storage.Store, workerPool *pool.Pool, interval, rateWindow time.Duration, log zerolog.Logger) *Janitor {
+func NewJanitor(store storage.Store, interval time.Duration, log zerolog.Logger) *Janitor {
 	return &Janitor{
-		store:      store,
-		workerPool: workerPool,
-		interval:   interval,
-		rateWindow: rateWindow,
-		log:        log,
+		store:    store,
+		interval: interval,
+		log:      log,
 	}
 }
 
@@ -57,22 +52,12 @@ func (j *Janitor) tick() {
 		j.log.Info().Int("count", pruned).Msg("janitor: pruned expired bans")
 	}
 
-	// Prune expired rate entries
-	if _, err := j.store.PruneExpiredRateEntries(j.rateWindow); err != nil {
-		j.log.Warn().Err(err).Msg("janitor: prune expired rate entries failed")
-	}
-
 	// Update DB size gauge
 	size, err := j.store.SizeBytes()
 	if err != nil {
 		j.log.Warn().Err(err).Msg("janitor: read db size failed")
 	} else {
 		metrics.DBSizeBytes.Set(float64(size))
-	}
-
-	// Update queue depth gauge
-	if j.workerPool != nil {
-		metrics.WorkerQueueDepth.Set(float64(j.workerPool.Depth()))
 	}
 
 	j.log.Debug().Msg("janitor: tick complete")

@@ -5,12 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/pool"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
@@ -23,8 +22,21 @@ type MetricsRecorder interface {
 	RecordDeletion()
 }
 
-// makeJobHandler returns a JobHandler that performs idempotency checks,
-// rate gating, and firewall API calls for each SyncJob.
+// SyncJob represents a single ban or unban operation.
+type SyncJob struct {
+	Action          string // "ban" or "delete"
+	IP              string
+	IPv6            bool
+	ExpiresAt       time.Time
+	Origin          string // CrowdSec decision origin (e.g. "CAPI", "crowdsec")
+	RemediationType string // CrowdSec remediation type (e.g. "ban")
+}
+
+// JobHandler processes a single SyncJob.
+type JobHandler func(ctx context.Context, job SyncJob) error
+
+// makeJobHandler returns a JobHandler that performs idempotency checks
+// and firewall API calls for each SyncJob.
 func makeJobHandler(
 	ctrl controller.Controller,
 	store storage.Store,
@@ -32,47 +44,24 @@ func makeJobHandler(
 	cfg *config.Config,
 	recorder MetricsRecorder,
 	log zerolog.Logger,
-) pool.JobHandler {
-	return func(ctx context.Context, job pool.SyncJob) error {
+) JobHandler {
+	return func(ctx context.Context, job SyncJob) error {
 		// Step 1: Idempotency check
 		exists, err := store.BanExists(job.IP)
 		if err != nil {
 			return fmt.Errorf("BanExists: %w", err)
 		}
 		if job.Action == "ban" && exists {
-			metrics.JobsDropped.WithLabelValues("already_banned").Inc()
 			log.Debug().Str("ip", job.IP).Msg("skipping: already banned")
 			return nil
 		}
 		if job.Action == "delete" && !exists {
-			metrics.JobsDropped.WithLabelValues("not_found").Inc()
 			log.Debug().Str("ip", job.IP).Msg("skipping: not in ban list")
 			return nil
 		}
 
-		// Step 2: API rate gate
-		if cfg.RateLimitMaxCalls > 0 {
-			allowed, gateErr := store.APIRateGate("unifi-group-update", cfg.RateLimitWindow, cfg.RateLimitMaxCalls)
-			if gateErr != nil {
-				return fmt.Errorf("APIRateGate: %w", gateErr)
-			}
-			if !allowed {
-				metrics.JobsDropped.WithLabelValues("rate_limited").Inc()
-				rateLimitMsg := "rate limited: re-enqueue"
-				if cfg.DryRun {
-					rateLimitMsg = "[DRY-RUN] rate limited: re-enqueue"
-				}
-				log.Warn().Str("ip", job.IP).Msg(rateLimitMsg)
-				return fmt.Errorf("rate limited") // triggers retry with backoff
-			}
-		}
-
-		// Step 3: Apply to all sites
+		// Step 2: Apply to all sites
 		sites := cfg.UnifiSites
-		if job.Site != "" {
-			sites = []string{job.Site}
-		}
-
 		for _, site := range sites {
 			var applyErr error
 			switch job.Action {
@@ -86,16 +75,16 @@ func makeJobHandler(
 				var unauth *controller.ErrUnauthorized
 				var rateLimit *controller.ErrRateLimit
 				if errors.As(applyErr, &unauth) {
-					return applyErr // pool will retry; session.EnsureAuth is called inside ApplyBan
+					return applyErr
 				}
 				if errors.As(applyErr, &rateLimit) {
-					return applyErr // pool will retry
+					return applyErr
 				}
 				return fmt.Errorf("apply %s for site %s: %w", job.Action, site, applyErr)
 			}
 		}
 
-		// Step 4: Persist to bbolt and record LAPI metrics
+		// Step 3: Persist to bbolt and record LAPI metrics.
 		// In dry run, ApplyBan/ApplyUnban already returned without writing to UniFi.
 		// Skip bbolt state mutations and recorder calls to keep state consistent.
 		if cfg.DryRun {

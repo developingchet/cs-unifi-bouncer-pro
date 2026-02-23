@@ -14,7 +14,6 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/pool"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
@@ -23,13 +22,13 @@ import (
 // BinaryVersion is set at startup from the -X main.Version ldflags value.
 var BinaryVersion = "dev"
 
-// Bouncer wires together the CrowdSec stream, filter pipeline, worker pool, and firewall manager.
+// Bouncer wires together the CrowdSec stream, filter pipeline, and firewall manager.
 type Bouncer struct {
 	cfg       *config.Config
 	ctrl      controller.Controller
 	store     storage.Store
 	fwMgr     firewall.Manager
-	pool      *pool.Pool
+	handler   JobHandler
 	filterCfg decision.FilterConfig
 	log       zerolog.Logger
 	streamBnc *csbouncer.StreamBouncer
@@ -53,17 +52,6 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 
 	handler := makeJobHandler(ctrl, store, fwMgr, cfg, recorder, log)
 
-	p, err := pool.New(pool.Config{
-		Workers:    cfg.PoolWorkers,
-		QueueDepth: cfg.PoolQueueDepth,
-		MaxRetries: cfg.PoolMaxRetries,
-		RetryBase:  cfg.PoolRetryBase,
-		DryRun:     cfg.DryRun,
-	}, handler, log)
-	if err != nil {
-		return nil, fmt.Errorf("create pool: %w", err)
-	}
-
 	// StreamBouncer.TickerInterval is a string like "30s"
 	tickerStr := cfg.CrowdSecPollInterval.String()
 	skipVerify := !cfg.CrowdSecLAPIVerifyTLS
@@ -81,7 +69,7 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 		ctrl:      ctrl,
 		store:     store,
 		fwMgr:     fwMgr,
-		pool:      p,
+		handler:   handler,
 		filterCfg: filterCfg,
 		log:       log,
 		streamBnc: streamBnc,
@@ -97,13 +85,19 @@ func (b *Bouncer) Run(ctx context.Context) error {
 
 	g, gctx := errgroup.WithContext(ctx)
 
-	// Start worker pool
-	b.pool.Start(gctx)
-
 	// CrowdSec stream processor
 	g.Go(func() error {
 		return b.processStream(gctx)
 	})
+
+	// Periodic sync ticker: retries any dirty shards that failed to flush
+	// after a decision block. Only launched when SyncInterval > 0.
+	if b.cfg.SyncInterval > 0 {
+		g.Go(func() error {
+			b.runPeriodicSync(gctx)
+			return nil
+		})
+	}
 
 	// Prometheus metrics server
 	if b.cfg.MetricsEnabled {
@@ -120,16 +114,33 @@ func (b *Bouncer) Run(ctx context.Context) error {
 	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
-
-	b.pool.Stop()
 	return nil
 }
 
-// processStream reads decisions from the CrowdSec LAPI and enqueues them.
+// runPeriodicSync fires SyncDirty at every SyncInterval tick to retry any
+// shards that failed to flush after a decision block.
+func (b *Bouncer) runPeriodicSync(ctx context.Context) {
+	ticker := time.NewTicker(b.cfg.SyncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := b.fwMgr.SyncDirty(ctx, b.cfg.UnifiSites); err != nil {
+				b.log.Warn().Err(err).Msg("periodic SyncDirty failed")
+			}
+		}
+	}
+}
+
+// processStream reads decisions from the CrowdSec LAPI and processes them directly.
+// After every decision block it calls SyncDirty to flush in-memory dirty shards to
+// the UniFi API. The first flush is logged at Info as the startup sync boundary.
 func (b *Bouncer) processStream(ctx context.Context) error {
-	// Run returns when ctx is cancelled
 	go b.streamBnc.Run(ctx)
 
+	startupSynced := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -138,12 +149,19 @@ func (b *Bouncer) processStream(ctx context.Context) error {
 			if !ok {
 				return fmt.Errorf("CrowdSec stream closed")
 			}
-			b.handleDecisionBlock(decisions)
+			b.handleDecisionBlock(ctx, decisions)
+			if err := b.fwMgr.SyncDirty(ctx, b.cfg.UnifiSites); err != nil {
+				b.log.Warn().Err(err).Msg("SyncDirty after decision block failed")
+			}
+			if !startupSynced {
+				startupSynced = true
+				b.log.Info().Msg("startup stream batch synced to UniFi")
+			}
 		}
 	}
 }
 
-func (b *Bouncer) handleDecisionBlock(decisions *models.DecisionsStreamResponse) {
+func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.DecisionsStreamResponse) {
 	source := "stream"
 
 	for _, d := range decisions.New {
@@ -162,15 +180,16 @@ func (b *Bouncer) handleDecisionBlock(decisions *models.DecisionsStreamResponse)
 			remType = *d.Type
 		}
 
-		b.enqueueJob(pool.SyncJob{
+		if err := b.handler(ctx, SyncJob{
 			Action:          "ban",
 			IP:              result.Value,
 			IPv6:            result.IPv6,
-			Site:            "", // worker applies to all sites
 			ExpiresAt:       expiresAt(result.Duration),
 			Origin:          origin,
 			RemediationType: remType,
-		})
+		}); err != nil {
+			b.log.Error().Err(err).Str("ip", result.Value).Msg("failed to apply ban")
+		}
 	}
 
 	for _, d := range decisions.Deleted {
@@ -179,17 +198,14 @@ func (b *Bouncer) handleDecisionBlock(decisions *models.DecisionsStreamResponse)
 			continue
 		}
 		metrics.DecisionsProcessed.WithLabelValues("unban", source).Inc()
-		b.enqueueJob(pool.SyncJob{
+
+		if err := b.handler(ctx, SyncJob{
 			Action: "delete",
 			IP:     result.Value,
 			IPv6:   result.IPv6,
-		})
-	}
-}
-
-func (b *Bouncer) enqueueJob(job pool.SyncJob) {
-	if !b.pool.Enqueue(job) {
-		b.log.Warn().Str("ip", job.IP).Msg("job dropped: queue full")
+		}); err != nil {
+			b.log.Error().Err(err).Str("ip", result.Value).Msg("failed to apply unban")
+		}
 	}
 }
 
