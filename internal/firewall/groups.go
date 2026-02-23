@@ -27,13 +27,22 @@ type Shard struct {
 	IPs    *IPSet // in-memory authoritative IP set
 }
 
+// ShardFamily tracks shard state and unique IP ownership for one IP family.
+type ShardFamily struct {
+	Shards []*Shard
+	// ipOwner maps each banned IP to the shard index that owns it.
+	// Guarded by ShardManager.mu.
+	ipOwner map[string]int
+}
+
 // ShardManager manages a set of firewall group shards for one address family on one site.
 // In zone mode, shards are Traffic Matching Lists; in legacy mode, they are firewall groups.
 type ShardManager struct {
 	mu         sync.RWMutex
 	site       string
 	ipv6       bool
-	capacity   int // deprecated: use ShardLimit constant instead
+	family     string
+	shardLimit int
 	namer      *Namer
 	ctrl       controller.Controller
 	store      storage.Store
@@ -43,8 +52,10 @@ type ShardManager struct {
 	dryRun     bool
 	mode       string // "legacy" or "zone" (used for log messaging only)
 
-	// In-memory shadow of each shard's members
-	shards []Shard // index == shard number
+	// Per-family shard state. In this codebase each ShardManager owns one
+	// family ("v4" for ipv6=false, "v6" for ipv6=true), but the map keeps
+	// AddIP/RemoveIP explicit and future-proof.
+	families map[string]*ShardFamily
 }
 
 // flushSnapshot captures the data needed to flush a dirty shard without holding the lock.
@@ -62,10 +73,18 @@ func NewShardManager(site string, ipv6 bool, capacity int, namer *Namer,
 	if mode == "" {
 		mode = "legacy"
 	}
+
+	family := Family(ipv6)
+	limit := capacity
+	if limit <= 0 {
+		limit = ShardLimit
+	}
+
 	return &ShardManager{
 		site:       site,
 		ipv6:       ipv6,
-		capacity:   capacity,
+		family:     family,
+		shardLimit: limit,
 		namer:      namer,
 		ctrl:       ctrl,
 		store:      store,
@@ -74,6 +93,12 @@ func NewShardManager(site string, ipv6 bool, capacity int, namer *Namer,
 		flushSem:   flushSem,
 		dryRun:     dryRun,
 		mode:       mode,
+		families: map[string]*ShardFamily{
+			family: {
+				Shards:  []*Shard{},
+				ipOwner: make(map[string]int),
+			},
+		},
 	}
 }
 
@@ -84,19 +109,46 @@ func (sm *ShardManager) shardObjectKind() string {
 	return "firewall group"
 }
 
+func (sm *ShardManager) familyStateLocked(ipFamily string) *ShardFamily {
+	family := sm.families[ipFamily]
+	if family == nil {
+		family = &ShardFamily{
+			Shards:  []*Shard{},
+			ipOwner: make(map[string]int),
+		}
+		sm.families[ipFamily] = family
+	}
+	if family.ipOwner == nil {
+		family.ipOwner = make(map[string]int)
+	}
+	return family
+}
+
+func (sm *ShardManager) findShardByIndexLocked(family *ShardFamily, shardIdx int) (*Shard, int) {
+	for pos, shard := range family.Shards {
+		if shard.Index == shardIdx {
+			return shard, pos
+		}
+	}
+	return nil, -1
+}
+
 // EnsureShards bootstraps group shards: loads from bbolt cache, then reconciles with API.
 func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Load all known group records from bbolt
+	family := sm.familyStateLocked(sm.family)
+	family.Shards = family.Shards[:0]
+	clear(family.ipOwner)
+
+	// Load all known group records from bbolt.
 	allGroups, err := sm.store.ListGroups()
 	if err != nil {
 		return fmt.Errorf("list groups from store: %w", err)
 	}
 
 	// Fetch current state from UniFi (dispatched by mode).
-	// In zone mode, use TML API; in legacy mode, use firewall groups.
 	var apiGroupByID map[string]controller.FirewallGroup
 	var apiTMLByName map[string]controller.TrafficMatchingList
 	if sm.mode == "zone" {
@@ -119,7 +171,7 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 		}
 	}
 
-	// Rebuild shard slice from bbolt records
+	// Rebuild shards from bbolt records by naming sequence.
 	idx := 0
 	for {
 		name, err := sm.namer.GroupName(NameData{
@@ -133,150 +185,222 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 
 		rec, ok := allGroups[name]
 		if !ok {
-			break // no more shards recorded
+			break
 		}
 		if rec.IPv6 != sm.ipv6 || rec.Site != sm.site {
 			idx++
 			continue
 		}
 
+		var shard *Shard
 		foundInAPI := false
 
-		// Prefer live API data over stale bbolt cache.
-		// In zone mode, match by name (TMLs have stable UUIDs stored in bbolt already).
-		// In legacy mode, match by ID.
 		if sm.mode == "zone" {
 			if tml, exists := apiTMLByName[name]; exists {
-				// Load existing members as baseline
 				members := make([]string, 0, len(tml.Items))
 				for _, item := range tml.Items {
 					members = append(members, item.Value)
 				}
-				shard := &Shard{
-					ID:     tml.ID,
-					Name:   tml.Name,
-					Index:  idx,
-					Family: Family(sm.ipv6),
-					IPs:    NewIPSet(),
-				}
+				shard = &Shard{ID: tml.ID, Name: tml.Name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet()}
 				shard.IPs.Replace(members)
-				shard.IPs.MarkClean() // baseline is not dirty
+				shard.IPs.MarkClean()
 
-				// Update bbolt record with current TML ID in case it changed.
-				rec.UnifiID = tml.ID
+				if rec.UnifiID != tml.ID {
+					if err := sm.store.SetGroup(name, storage.GroupRecord{
+						UnifiID: tml.ID,
+						Site:    sm.site,
+						Members: members,
+						IPv6:    sm.ipv6,
+					}); err != nil {
+						sm.log.Warn().Err(err).Str("shard", name).Msg("failed to refresh shard cache entry")
+					}
+				}
 				foundInAPI = true
-				sm.shards = append(sm.shards, *shard)
-				idx++
-				continue
 			}
 		} else {
 			if apiGroup, exists := apiGroupByID[rec.UnifiID]; exists {
-				// Load existing members as baseline
 				members := make([]string, len(apiGroup.GroupMembers))
 				copy(members, apiGroup.GroupMembers)
-				shard := &Shard{
-					ID:     rec.UnifiID,
-					Name:   name,
-					Index:  idx,
-					Family: Family(sm.ipv6),
-					IPs:    NewIPSet(),
-				}
+				shard = &Shard{ID: rec.UnifiID, Name: name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet()}
 				shard.IPs.Replace(members)
-				shard.IPs.MarkClean() // baseline is not dirty
-				sm.shards = append(sm.shards, *shard)
+				shard.IPs.MarkClean()
 				foundInAPI = true
-				idx++
-				continue
 			}
 		}
 
 		if !foundInAPI {
-			// Cached object no longer exists in API for this mode. Recreate and
-			// mark dirty so members are pushed on the next flush.
-			if err := sm.createShard(ctx, idx); err != nil {
+			shard, err = sm.createShard(ctx, idx)
+			if err != nil {
 				return err
 			}
-			// The new shard already has an empty IPSet
 			if len(rec.Members) > 0 {
-				// Mark dirty to push the old members
-				sm.shards[idx].IPs.Replace(rec.Members)
-				sm.shards[idx].IPs.MarkClean() // will be set dirty by replace above, but let's be explicit
+				// Keep dirty so old members are restored on next sync tick.
+				shard.IPs.Replace(rec.Members)
 			}
-			idx++
 		}
+
+		family.Shards = append(family.Shards, shard)
+		idx++
 	}
 
-	// If no shards yet, create the first one
-	if len(sm.shards) == 0 {
-		if err := sm.createShard(ctx, 0); err != nil {
+	if len(family.Shards) == 0 {
+		shard, err := sm.createShard(ctx, 0)
+		if err != nil {
 			return err
 		}
+		family.Shards = append(family.Shards, shard)
 	}
 
-	sm.updateMetrics()
+	sort.Slice(family.Shards, func(i, j int) bool {
+		return family.Shards[i].Index < family.Shards[j].Index
+	})
+
+	// Duplicate resolution rule:
+	// When loading baseline state and duplicates exist across shards, the
+	// lowest-index shard is the keeper. Duplicates are removed from higher-index
+	// shards and those shards are left dirty for sync.
+	for _, shard := range family.Shards {
+		for _, ip := range shard.IPs.Members() {
+			if _, exists := family.ipOwner[ip]; exists {
+				shard.IPs.Remove(ip)
+				sm.log.Warn().Str("shard", shard.Name).Str("ip", ip).
+					Msg("removed duplicate IP from higher-index shard during baseline load")
+				continue
+			}
+			family.ipOwner[ip] = shard.Index
+		}
+	}
+
+	sm.updateMetricsLocked()
 	return nil
 }
 
-// Add adds an IP to the appropriate shard, creating new shards as needed.
-// Returns the shard name that was modified (for batch flushing) and the index of a
-// newly created shard (newShardIdx >= 0), or newShardIdx == -1 if no new shard was created.
-func (sm *ShardManager) Add(ctx context.Context, ip string) (shardName string, newShardIdx int, err error) {
+// AddIP adds ip to the appropriate shard for ipFamily ("v4" or "v6").
+// If ip is already tracked in any shard, it is a no-op (deduplication).
+// If all shards are full, a new shard is created.
+func (sm *ShardManager) AddIP(ctx context.Context, ip, ipFamily string) error {
+	sm.mu.Lock()
+	family := sm.familyStateLocked(ipFamily)
+
+	if _, owned := family.ipOwner[ip]; owned {
+		sm.mu.Unlock()
+		return nil
+	}
+
+	for _, shard := range family.Shards {
+		if shard.IPs.Capacity(sm.shardLimit) > 0 {
+			shard.IPs.Add(ip)
+			family.ipOwner[ip] = shard.Index
+			sm.updateMetricsLocked()
+			sm.mu.Unlock()
+			return nil
+		}
+	}
+
+	nextIndex := len(family.Shards)
+	sm.mu.Unlock()
+
+	shard, err := sm.createShard(ctx, nextIndex)
+	if err != nil {
+		return fmt.Errorf("create shard for family %s: %w", ipFamily, err)
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	family = sm.familyStateLocked(ipFamily)
+
+	if existing, _ := sm.findShardByIndexLocked(family, nextIndex); existing == nil {
+		family.Shards = append(family.Shards, shard)
+		sort.Slice(family.Shards, func(i, j int) bool {
+			return family.Shards[i].Index < family.Shards[j].Index
+		})
+	}
+
+	if _, owned := family.ipOwner[ip]; owned {
+		sm.updateMetricsLocked()
+		return nil
+	}
+
+	for _, s := range family.Shards {
+		if s.IPs.Capacity(sm.shardLimit) > 0 {
+			s.IPs.Add(ip)
+			family.ipOwner[ip] = s.Index
+			sm.updateMetricsLocked()
+			return nil
+		}
+	}
+
+	return fmt.Errorf("no available shard capacity for family %s", ipFamily)
+}
+
+// RemoveIP removes ip from whichever shard owns it. No-op if not tracked.
+func (sm *ShardManager) RemoveIP(ip, ipFamily string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	newShardIdx = -1
-
-	// Check if already present
-	for _, s := range sm.shards {
-		if s.IPs.Contains(ip) {
-			return "", -1, nil // already there
-		}
+	family := sm.familyStateLocked(ipFamily)
+	shardIdx, owned := family.ipOwner[ip]
+	if !owned {
+		return
 	}
 
-	// Find a shard with capacity
-	shardIdx := -1
-	for i, s := range sm.shards {
-		if s.IPs.Capacity(sm.capacity) > 0 {
-			shardIdx = i
-			break
-		}
+	if shard, _ := sm.findShardByIndexLocked(family, shardIdx); shard != nil {
+		shard.IPs.Remove(ip)
+	}
+	delete(family.ipOwner, ip)
+	sm.updateMetricsLocked()
+}
+
+// Add adds an IP to the manager family and returns shard details for callers
+// that need to provision rule/policy infrastructure when a new shard appears.
+func (sm *ShardManager) Add(ctx context.Context, ip string) (shardName string, newShardIdx int, err error) {
+	sm.mu.RLock()
+	family := sm.families[sm.family]
+	before := len(family.Shards)
+	sm.mu.RUnlock()
+
+	if err := sm.AddIP(ctx, ip, sm.family); err != nil {
+		return "", -1, err
 	}
 
-	// All shards full — create a new one
-	if shardIdx < 0 {
-		shardIdx = len(sm.shards)
-		if err := sm.createShard(ctx, shardIdx); err != nil {
-			return "", -1, err
-		}
-		newShardIdx = shardIdx
+	sm.mu.RLock()
+	family = sm.families[sm.family]
+	ownerIdx, owned := family.ipOwner[ip]
+	after := len(family.Shards)
+	sm.mu.RUnlock()
+	if !owned {
+		return "", -1, nil
 	}
 
-	sm.shards[shardIdx].IPs.Add(ip)
-
-	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: shardIdx, Site: sm.site})
+	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: ownerIdx, Site: sm.site})
 	if err != nil {
-		return "", newShardIdx, err
+		return "", -1, err
 	}
-	sm.updateMetrics()
+
+	newShardIdx = -1
+	if after > before && ownerIdx >= before {
+		newShardIdx = ownerIdx
+	}
 	return name, newShardIdx, nil
 }
 
 // Remove removes an IP from whichever shard contains it.
 func (sm *ShardManager) Remove(ctx context.Context, ip string) (string, error) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	for i, s := range sm.shards {
-		if s.IPs.Remove(ip) {
-			name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: i, Site: sm.site})
-			if err != nil {
-				return "", err
-			}
-			sm.updateMetrics()
-			return name, nil
-		}
+	sm.mu.RLock()
+	family := sm.families[sm.family]
+	shardIdx, owned := family.ipOwner[ip]
+	sm.mu.RUnlock()
+	if !owned {
+		return "", nil
 	}
-	return "", nil // not found — idempotent
+
+	sm.RemoveIP(ip, sm.family)
+
+	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: shardIdx, Site: sm.site})
+	if err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 // FlushDirty pushes all dirty shards to the UniFi API.
@@ -295,9 +419,10 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 
 	// --- Phase 1: snapshot dirty shards under lock, clear dirty flags ---
 	sm.mu.Lock()
+	family := sm.familyStateLocked(sm.family)
 	var snapshots []flushSnapshot
-	for i := range sm.shards {
-		ips, dirty := sm.shards[i].IPs.PeekDirty()
+	for i := range family.Shards {
+		ips, dirty := family.Shards[i].IPs.PeekDirty()
 		if !dirty {
 			continue
 		}
@@ -308,7 +433,7 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 		}
 		sort.Strings(members)
 
-		name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: i, Site: sm.site})
+		name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: family.Shards[i].Index, Site: sm.site})
 		if err != nil {
 			sm.mu.Unlock()
 			return err
@@ -316,12 +441,12 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 
 		snapshots = append(snapshots, flushSnapshot{
 			idx:     i,
-			unifiID: sm.shards[i].ID,
+			unifiID: family.Shards[i].ID,
 			name:    name,
 			members: members,
 		})
-		// Clear dirty flag now so Add/Remove can proceed
-		sm.shards[i].IPs.MarkClean()
+		// Clear dirty flag now so Add/Remove can proceed.
+		family.Shards[i].IPs.MarkClean()
 	}
 	sm.mu.Unlock()
 
@@ -338,31 +463,28 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 	// --- Phase 2: flush each snapshot without holding the lock ---
 	var firstErr error
 	for i, snap := range snapshots {
-		// Apply inter-shard delay (not before the first one)
 		if i > 0 && sm.flushDelay > 0 {
 			select {
 			case <-time.After(sm.flushDelay):
 			case <-ctx.Done():
-				// Re-mark remaining snapshots as dirty
 				sm.mu.Lock()
+				family := sm.familyStateLocked(sm.family)
 				for _, s := range snapshots[i:] {
-					// Restore dirty flag
-					sm.shards[s.idx].IPs.Replace(snap.members)
+					family.Shards[s.idx].IPs.Replace(s.members)
 				}
 				sm.mu.Unlock()
 				return ctx.Err()
 			}
 		}
 
-		// Acquire semaphore slot
 		if sm.flushSem != nil {
 			select {
 			case sm.flushSem <- struct{}{}:
 			case <-ctx.Done():
 				sm.mu.Lock()
+				family := sm.familyStateLocked(sm.family)
 				for _, s := range snapshots[i:] {
-					// Restore dirty flag
-					sm.shards[s.idx].IPs.Replace(snap.members)
+					family.Shards[s.idx].IPs.Replace(s.members)
 				}
 				sm.mu.Unlock()
 				return ctx.Err()
@@ -391,24 +513,22 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 			})
 		}
 
-		// Release semaphore slot
 		if sm.flushSem != nil {
 			<-sm.flushSem
 		}
 
 		if putErr != nil {
-			// Re-mark as dirty for retry on next flush
 			sm.mu.Lock()
-			sm.shards[snap.idx].IPs.Replace(snap.members)
+			family := sm.familyStateLocked(sm.family)
+			family.Shards[snap.idx].IPs.Replace(snap.members)
 			sm.mu.Unlock()
 
 			if firstErr == nil {
 				firstErr = fmt.Errorf("flush shard %d (%s): %w", snap.idx, snap.name, putErr)
 			}
-			continue // attempt remaining shards
+			continue
 		}
 
-		// Update bbolt cache
 		if err := sm.store.SetGroup(snap.name, storage.GroupRecord{
 			UnifiID: snap.unifiID,
 			Site:    sm.site,
@@ -428,30 +548,38 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 func (sm *ShardManager) PrunableTail() (unifiID string, shardIdx int, ok bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+	family := sm.families[sm.family]
 
-	if len(sm.shards) <= 1 {
+	if len(family.Shards) <= 1 {
 		return "", -1, false
 	}
 
-	last := sm.shards[len(sm.shards)-1]
+	last := family.Shards[len(family.Shards)-1]
 	if last.IPs.Len() > 0 {
 		return "", -1, false
 	}
 
-	return last.ID, len(sm.shards) - 1, true
+	return last.ID, last.Index, true
 }
 
 // RemoveTail removes the last shard from in-memory slice and bbolt.
 // Call only after the API group has been successfully deleted.
 func (sm *ShardManager) RemoveTail() error {
 	sm.mu.Lock()
-	n := len(sm.shards)
+	family := sm.familyStateLocked(sm.family)
+	n := len(family.Shards)
 	if n == 0 {
 		sm.mu.Unlock()
 		return nil
 	}
-	name, nameErr := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: n - 1, Site: sm.site})
-	sm.shards = sm.shards[:n-1]
+	last := family.Shards[n-1]
+	name, nameErr := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: last.Index, Site: sm.site})
+	for ip, owner := range family.ipOwner {
+		if owner == last.Index {
+			delete(family.ipOwner, ip)
+		}
+	}
+	family.Shards = family.Shards[:n-1]
 	sm.mu.Unlock()
 
 	if nameErr != nil {
@@ -473,20 +601,18 @@ func (sm *ShardManager) DeleteShardObject(ctx context.Context, unifiID string) e
 func (sm *ShardManager) Contains(ip string) bool {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	for _, s := range sm.shards {
-		if s.IPs.Contains(ip) {
-			return true
-		}
-	}
-	return false
+	family := sm.families[sm.family]
+	_, ok := family.ipOwner[ip]
+	return ok
 }
 
 // AllMembers returns all IPs across all shards.
 func (sm *ShardManager) AllMembers() []string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+	family := sm.families[sm.family]
 	var all []string
-	for _, s := range sm.shards {
+	for _, s := range family.Shards {
 		all = append(all, s.IPs.Members()...)
 	}
 	return all
@@ -494,10 +620,10 @@ func (sm *ShardManager) AllMembers() []string {
 
 // createShard creates a new empty shard in UniFi and registers it in bbolt.
 // In zone mode this creates a Traffic Matching List; in legacy mode a FirewallGroup.
-func (sm *ShardManager) createShard(ctx context.Context, idx int) error {
+func (sm *ShardManager) createShard(ctx context.Context, idx int) (*Shard, error) {
 	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: idx, Site: sm.site})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	objectKind := sm.shardObjectKind()
@@ -505,14 +631,9 @@ func (sm *ShardManager) createShard(ctx context.Context, idx int) error {
 	if sm.dryRun {
 		sm.log.Info().Str("name", name).Bool("ipv6", sm.ipv6).Int("shard", idx).
 			Msgf("[DRY-RUN] would create %s", objectKind)
-		sm.shards = append(sm.shards, Shard{
-			ID:      "dry-run-no-id",
-			Name:    name,
-			Index:   idx,
-			Family:  Family(sm.ipv6),
-			IPs:     NewIPSet(),
-		})
-		return nil
+		shard := &Shard{ID: "dry-run-no-id", Name: name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet()}
+		shard.IPs.MarkClean()
+		return shard, nil
 	}
 
 	var createdID string
@@ -531,7 +652,7 @@ func (sm *ShardManager) createShard(ctx context.Context, idx int) error {
 			Items:     []controller.TrafficMatchingListItem{},
 		})
 		if err != nil {
-			return fmt.Errorf("create shard %s: %w", name, err)
+			return nil, fmt.Errorf("create shard %s: %w", name, err)
 		}
 		createdID = created.ID
 	} else {
@@ -545,18 +666,13 @@ func (sm *ShardManager) createShard(ctx context.Context, idx int) error {
 			GroupMembers: []string{},
 		})
 		if err != nil {
-			return fmt.Errorf("create shard %s: %w", name, err)
+			return nil, fmt.Errorf("create shard %s: %w", name, err)
 		}
 		createdID = created.ID
 	}
 
-	sm.shards = append(sm.shards, Shard{
-		ID:      createdID,
-		Name:    name,
-		Index:   idx,
-		Family:  Family(sm.ipv6),
-		IPs:     NewIPSet(),
-	})
+	shard := &Shard{ID: createdID, Name: name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet()}
+	shard.IPs.MarkClean()
 
 	if err := sm.store.SetGroup(name, storage.GroupRecord{
 		UnifiID: createdID,
@@ -568,24 +684,135 @@ func (sm *ShardManager) createShard(ctx context.Context, idx int) error {
 	}
 
 	sm.log.Info().Str("name", name).Str("id", createdID).Msgf("created %s", objectKind)
-	return nil
+	return shard, nil
 }
 
 // GroupIDs returns all UniFi IDs of the managed shards.
 func (sm *ShardManager) GroupIDs() []string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	ids := make([]string, 0, len(sm.shards))
-	for _, s := range sm.shards {
+	family := sm.families[sm.family]
+	ids := make([]string, 0, len(family.Shards))
+	for _, s := range family.Shards {
 		ids = append(ids, s.ID)
 	}
 	return ids
 }
 
-func (sm *ShardManager) updateMetrics() {
-	family := Family(sm.ipv6)
-	for i, s := range sm.shards {
-		name, _ := sm.namer.GroupName(NameData{Family: family, Index: i, Site: sm.site})
-		metrics.FirewallGroupSize.WithLabelValues(family, name, sm.site).Set(float64(s.IPs.Len()))
+func (sm *ShardManager) updateMetricsLocked() {
+	family := sm.families[sm.family]
+	familyName := Family(sm.ipv6)
+	for i, s := range family.Shards {
+		name, _ := sm.namer.GroupName(NameData{Family: familyName, Index: i, Site: sm.site})
+		metrics.FirewallGroupSize.WithLabelValues(familyName, name, sm.site).Set(float64(s.IPs.Len()))
 	}
+}
+
+func (sm *ShardManager) updateMetrics() {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	sm.updateMetricsLocked()
+}
+
+// countDirty returns the number of shards that currently have dirty IPs.
+func (sm *ShardManager) countDirty() int {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	managed := sm.families[sm.family]
+	if managed == nil {
+		return 0
+	}
+	n := 0
+	for _, shard := range managed.Shards {
+		if shard.IPs.IsDirty() {
+			n++
+		}
+	}
+	return n
+}
+
+// syncAllFamilies flushes dirty shards for every family managed by this ShardManager.
+func (sm *ShardManager) syncAllFamilies(ctx context.Context) {
+	managed := sm.families[sm.family]
+	if managed == nil {
+		return
+	}
+	for _, shard := range managed.Shards {
+		sm.syncShard(ctx, shard)
+	}
+}
+
+func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
+	ips, dirty := shard.IPs.PeekDirty()
+	if !dirty {
+		return
+	}
+
+	start := time.Now()
+	shardLabel := fmt.Sprintf("%d", shard.Index)
+	metrics.ShardIPCount.WithLabelValues(shard.Family, shardLabel, sm.site).Set(float64(len(ips)))
+
+	if sm.dryRun {
+		sm.log.Info().Str("shard", shard.Name).Int("member_count", len(ips)).
+			Msgf("[DRY-RUN] would sync %s", sm.shardObjectKind())
+		shard.IPs.CommitClean()
+		return
+	}
+
+	sort.Strings(ips)
+
+	groupType := "address-group"
+	if sm.ipv6 {
+		groupType = "ipv6-address-group"
+	}
+
+	var putErr error
+	if sm.mode == "zone" {
+		items := make([]controller.TrafficMatchingListItem, 0, len(ips))
+		for _, ip := range ips {
+			items = append(items, controller.TrafficMatchingListItem{Value: ip})
+		}
+		putErr = sm.ctrl.UpdateTrafficMatchingList(ctx, sm.site, controller.TrafficMatchingList{
+			ID:        shard.ID,
+			Name:      shard.Name,
+			Type:      tmlTypeForFamily(shard.Family),
+			GroupType: groupType,
+			Items:     items,
+		})
+	} else {
+		putErr = sm.ctrl.UpdateFirewallGroup(ctx, sm.site, controller.FirewallGroup{
+			ID:           shard.ID,
+			Name:         shard.Name,
+			GroupType:    groupType,
+			GroupMembers: ips,
+		})
+	}
+
+	if putErr != nil {
+		metrics.ShardSyncTotal.WithLabelValues(shard.Family, shardLabel, sm.site, "error").Inc()
+		metrics.ShardSyncDuration.WithLabelValues(shard.Family, shardLabel, sm.site).Observe(time.Since(start).Seconds())
+		sm.log.Error().Err(putErr).Str("shard", shard.Name).Int("ip_count", len(ips)).
+			Msg("shard sync failed, will retry next tick")
+		return
+	}
+
+	shard.IPs.CommitClean()
+	if err := sm.store.SetGroup(shard.Name, storage.GroupRecord{
+		UnifiID: shard.ID,
+		Site:    sm.site,
+		Members: ips,
+		IPv6:    sm.ipv6,
+	}); err != nil {
+		sm.log.Warn().Err(err).Str("shard", shard.Name).Msg("failed to update bbolt group cache after sync")
+	}
+	metrics.ShardSyncTotal.WithLabelValues(shard.Family, shardLabel, sm.site, "ok").Inc()
+	metrics.ShardSyncDuration.WithLabelValues(shard.Family, shardLabel, sm.site).Observe(time.Since(start).Seconds())
+	sm.log.Debug().Str("shard", shard.Name).Int("count", len(ips)).Msg("shard synced")
+}
+
+func tmlTypeForFamily(family string) string {
+	if family == "v6" {
+		return "IPV6_ADDRESSES"
+	}
+	return "IPV4_ADDRESSES"
 }

@@ -18,7 +18,6 @@ func defaultManagerConfig() ManagerConfig {
 		EnableIPv6:      false,
 		GroupCapacityV4: 5,
 		GroupCapacityV6: 5,
-		BatchWindow:     10 * time.Millisecond,
 		DryRun:          false,
 		LegacyCfg: LegacyConfig{
 			RuleIndexStartV4: 22000,
@@ -343,6 +342,43 @@ func TestApplyBan_OverflowProvisionRule(t *testing.T) {
 
 	if got := ctrl.Calls("CreateFirewallRule"); got <= rulesAfterFirst {
 		t.Errorf("CreateFirewallRule calls: got %d, want > %d (new shard needs a rule)", got, rulesAfterFirst)
+	}
+}
+
+// TestSyncDirty_FlushesAllSites verifies that SyncDirty calls the API for each
+// managed site with dirty shards and leaves clean shards untouched.
+func TestSyncDirty_FlushesAllSites(t *testing.T) {
+	cfg := defaultManagerConfig()
+	cfg.FirewallMode = "legacy"
+
+	mgr, ctrl, _ := newTestManager(t, cfg)
+	if err := mgr.EnsureInfrastructure(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("EnsureInfrastructure: %v", err)
+	}
+
+	// Add an IP to make shard0 dirty.
+	if err := mgr.ApplyBan(context.Background(), testSite, "10.0.0.1", false); err != nil {
+		t.Fatalf("ApplyBan: %v", err)
+	}
+
+	updatesBefore := ctrl.Calls("UpdateFirewallGroup")
+
+	if err := mgr.SyncDirty(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("SyncDirty: %v", err)
+	}
+
+	// Exactly one dirty shard should have been flushed.
+	if got := ctrl.Calls("UpdateFirewallGroup") - updatesBefore; got != 1 {
+		t.Errorf("UpdateFirewallGroup calls after SyncDirty = %d, want 1", got)
+	}
+
+	// Second SyncDirty: shard is now clean, no further API call.
+	updatesBefore = ctrl.Calls("UpdateFirewallGroup")
+	if err := mgr.SyncDirty(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("SyncDirty (second): %v", err)
+	}
+	if got := ctrl.Calls("UpdateFirewallGroup") - updatesBefore; got != 0 {
+		t.Errorf("UpdateFirewallGroup calls on clean sync = %d, want 0", got)
 	}
 }
 

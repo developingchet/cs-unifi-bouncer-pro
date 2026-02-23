@@ -26,6 +26,7 @@ type Manager interface {
 	ApplyBan(ctx context.Context, site, ip string, ipv6 bool) error
 	ApplyUnban(ctx context.Context, site, ip string, ipv6 bool) error
 	EnsureInfrastructure(ctx context.Context, sites []string) error
+	SyncDirty(ctx context.Context, sites []string) error
 }
 
 // ManagerConfig holds all firewall manager configuration.
@@ -34,7 +35,6 @@ type ManagerConfig struct {
 	EnableIPv6       bool
 	GroupCapacityV4  int
 	GroupCapacityV6  int
-	BatchWindow      time.Duration
 	DryRun           bool
 	APIShardDelay    time.Duration
 	FlushConcurrency int
@@ -65,10 +65,6 @@ type managerImpl struct {
 	// Cached resolved mode per site (avoids repeated HasFeature API calls)
 	siteMode map[string]string
 	siteMu   sync.RWMutex
-
-	// Batch flush timers per site (one per site, flushes both v4 and v6)
-	batchMu     sync.Mutex
-	batchTimers map[string]*time.Timer
 }
 
 // NewManager constructs a Manager.
@@ -91,9 +87,8 @@ func NewManager(cfg ManagerConfig, ctrl controller.Controller, store storage.Sto
 		v6Mgrs:      make(map[string]*ShardManager),
 		legacyMgr:   legacyMgr,
 		zoneMgr:     zoneMgr,
-		flushSem:    make(chan struct{}, conc),
-		siteMode:    make(map[string]string),
-		batchTimers: make(map[string]*time.Timer),
+		flushSem: make(chan struct{}, conc),
+		siteMode: make(map[string]string),
 	}
 }
 
@@ -187,7 +182,7 @@ func (m *managerImpl) ApplyBan(ctx context.Context, site, ip string, ipv6 bool) 
 		return fmt.Errorf("no shard manager for site %s (ipv6=%v)", site, ipv6)
 	}
 
-	shardName, newShardIdx, err := sm.Add(ctx, ip)
+	_, newShardIdx, err := sm.Add(ctx, ip)
 	if err != nil {
 		return err
 	}
@@ -200,9 +195,6 @@ func (m *managerImpl) ApplyBan(ctx context.Context, site, ip string, ipv6 bool) 
 		}
 	}
 
-	if shardName != "" {
-		m.scheduleBatchFlush(ctx, site)
-	}
 	return nil
 }
 
@@ -224,7 +216,6 @@ func (m *managerImpl) ApplyUnban(ctx context.Context, site, ip string, ipv6 bool
 	if _, err := sm.Remove(ctx, ip); err != nil {
 		return err
 	}
-	m.scheduleBatchFlush(ctx, site)
 	return nil
 }
 
@@ -336,13 +327,9 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 				Msg("[DRY-RUN] reconcile diff computed; no changes written to UniFi")
 		}
 	} else {
-		if err := v4Mgr.FlushDirty(ctx); err != nil {
-			errs = append(errs, err)
-		}
+		v4Mgr.syncAllFamilies(ctx)
 		if v6Mgr != nil {
-			if err := v6Mgr.FlushDirty(ctx); err != nil {
-				errs = append(errs, err)
-			}
+			v6Mgr.syncAllFamilies(ctx)
 		}
 		m.pruneEmptyTailShards(ctx, site, v4Mgr, v6Mgr)
 	}
@@ -350,41 +337,40 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 	return
 }
 
-// scheduleBatchFlush resets (or starts) the batch window timer for a site.
-// One timer per site handles both v4 and v6 families.
-func (m *managerImpl) scheduleBatchFlush(ctx context.Context, site string) {
-	m.batchMu.Lock()
-	defer m.batchMu.Unlock()
-
-	if t, ok := m.batchTimers[site]; ok {
-		t.Reset(m.cfg.BatchWindow)
-		return
-	}
-
-	m.batchTimers[site] = time.AfterFunc(m.cfg.BatchWindow, func() {
+// SyncDirty flushes all dirty shards to the UniFi API for the given sites.
+// Errors are logged per-shard and those shards remain dirty for retry on the next call.
+// Updates the DirtyShards gauge with the pre-sync dirty count before flushing.
+func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
+	var totalDirty int
+	for _, site := range sites {
 		m.mu.RLock()
 		v4 := m.v4Mgrs[site]
 		v6 := m.v6Mgrs[site]
 		m.mu.RUnlock()
 
 		if v4 != nil {
-			if err := v4.FlushDirty(ctx); err != nil {
-				m.log.Error().Err(err).Str("site", site).Msg("batch flush v4 failed")
-			}
+			totalDirty += v4.countDirty()
 		}
 		if v6 != nil {
-			if err := v6.FlushDirty(ctx); err != nil {
-				m.log.Error().Err(err).Str("site", site).Msg("batch flush v6 failed")
-			}
+			totalDirty += v6.countDirty()
 		}
+	}
+	metrics.DirtyShards.Set(float64(totalDirty))
 
-		// Prune empty tail shards after flush
-		m.pruneEmptyTailShards(ctx, site, v4, v6)
+	for _, site := range sites {
+		m.mu.RLock()
+		v4 := m.v4Mgrs[site]
+		v6 := m.v6Mgrs[site]
+		m.mu.RUnlock()
 
-		m.batchMu.Lock()
-		delete(m.batchTimers, site)
-		m.batchMu.Unlock()
-	})
+		if v4 != nil {
+			v4.syncAllFamilies(ctx)
+		}
+		if v6 != nil {
+			v6.syncAllFamilies(ctx)
+		}
+	}
+	return nil
 }
 
 // ensureNewShardInfrastructure provisions the firewall rule/policy for a newly created shard.
