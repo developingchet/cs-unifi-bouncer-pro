@@ -732,12 +732,22 @@ func (sm *ShardManager) countDirty() int {
 }
 
 // syncAllFamilies flushes dirty shards for every family managed by this ShardManager.
+// Takes a snapshot of shard pointers under lock to avoid data races with concurrent AddIP calls
+// that may append to the Shards slice.
 func (sm *ShardManager) syncAllFamilies(ctx context.Context) {
+	// Snapshot shard pointers under read lock.
+	// Individual shard operations (IPSet) are internally lock-protected,
+	// so iterating snapshots outside the lock is safe.
+	sm.mu.RLock()
 	managed := sm.families[sm.family]
-	if managed == nil {
-		return
+	var shards []*Shard
+	if managed != nil {
+		shards = make([]*Shard, len(managed.Shards))
+		copy(shards, managed.Shards)
 	}
-	for _, shard := range managed.Shards {
+	sm.mu.RUnlock()
+
+	for _, shard := range shards {
 		sm.syncShard(ctx, shard)
 	}
 }

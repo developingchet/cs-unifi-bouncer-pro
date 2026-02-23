@@ -3,6 +3,7 @@ package firewall
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
@@ -363,4 +364,36 @@ func TestEnsureShards_LoadsExisting(t *testing.T) {
 	if family.Shards[0].IPs.IsDirty() {
 		t.Fatal("expected baseline shard to be clean")
 	}
+}
+
+func TestSyncAllFamilies_ConcurrentWithAddIP(t *testing.T) {
+	sm, _ := newShardTestManager(t, "zone", 3)
+	ctx := context.Background()
+
+	// Use enough IPs to force shard overflow (capacity=3 in test config).
+	// Each overflow calls AddIP again with nextIndex, which allocates and appends
+	// a new shard to family.Shards under sm.mu. This ensures the Shards slice is
+	// actually mutated during the race window, not just accessed.
+	const iterations = 200
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Goroutine 1: repeatedly add IPs (mutates Shards slice when overflow occurs)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			ip := fmt.Sprintf("10.0.%d.%d", i/256, i%256)
+			_ = sm.AddIP(ctx, ip, "v4")
+		}
+	}()
+
+	// Goroutine 2: repeatedly call syncAllFamilies (walks Shards slice)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			sm.syncAllFamilies(ctx)
+		}
+	}()
+
+	wg.Wait()
 }
