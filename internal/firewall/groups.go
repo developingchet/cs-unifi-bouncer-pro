@@ -36,14 +36,32 @@ func tmlPlaceholderItems(ipv6 bool) []controller.TrafficMatchingListItem {
 	return []controller.TrafficMatchingListItem{{Type: "IP_ADDRESS", Value: val}}
 }
 
+// ShardState represents the lifecycle state of a shard.
+type ShardState uint8
+
+// Shard state constants.
+const (
+	ShardStatePending  ShardState = iota // allocated in-memory, not yet in UniFi (no IPs assigned)
+	ShardStateActive                      // exists in UniFi, has ≥1 real IP
+	ShardStateDraining                    // IPs all removed, deletion sequence in progress
+)
+
 // Shard represents a single Traffic Matching List shard in zone mode.
 // In legacy mode, it represents a firewall group shard.
 type Shard struct {
-	ID     string // TML UUID (integration v1) or firewall group ID (legacy)
-	Name   string // "crowdsec-block-v4-0" or similar
-	Index  int    // shard number (0, 1, 2, ...)
-	Family string // "v4" or "v6"
-	IPs    *IPSet // in-memory authoritative IP set
+	ID     string     // TML UUID (integration v1) or firewall group ID (legacy), empty if Pending
+	Name   string     // "crowdsec-block-v4-0" or similar
+	Index  int        // shard number (0, 1, 2, ...)
+	Family string     // "v4" or "v6"
+	IPs    *IPSet     // in-memory authoritative IP set
+	State  ShardState // current lifecycle state
+}
+
+// orphanedGroup represents a placeholder-only UniFi group found during EnsureShards
+// that should be deleted (policies/rules first, then the group itself).
+type orphanedGroup struct {
+	UnifiID string // group ID in UniFi
+	Name    string // group name (for logging)
 }
 
 // ShardFamily tracks shard state and unique IP ownership for one IP family.
@@ -75,10 +93,20 @@ type ShardManager struct {
 	// family ("v4" for ipv6=false, "v6" for ipv6=true), but the map keeps
 	// AddIP/RemoveIP explicit and future-proof.
 	families map[string]*ShardFamily
+
+	// onActivated is called when a Pending shard becomes Active (transitions to UniFi after first flush).
+	// Called with (ctx, shardIdx, groupID).
+	onActivated func(ctx context.Context, shardIdx int, groupID string)
+
+	// orphanedGroups is populated by EnsureShards with placeholder-only groups found in UniFi.
+	// These groups should be deleted (policies/rules first, then the group).
+	// Guarded by mu.
+	orphanedGroups []orphanedGroup
 }
 
 // flushSnapshot captures the data needed to flush a dirty shard without holding the lock.
 type flushSnapshot struct {
+	shard   *Shard  // reference to the shard (for state transitions and callbacks)
 	idx     int
 	unifiID string
 	name    string
@@ -119,6 +147,22 @@ func NewShardManager(site string, ipv6 bool, capacity int, namer *Namer,
 			},
 		},
 	}
+}
+
+// SetActivationCallback sets the function to be called when a shard transitions from Pending to Active.
+// Called during syncShard() with (ctx, shardIdx, groupID).
+func (sm *ShardManager) SetActivationCallback(fn func(ctx context.Context, shardIdx int, groupID string)) {
+	sm.onActivated = fn
+}
+
+// TakeOrphanedGroups returns and clears the list of placeholder-only groups found during EnsureShards.
+// These are groups that exist in UniFi but contain only placeholder IPs and should be deleted.
+func (sm *ShardManager) TakeOrphanedGroups() []orphanedGroup {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	result := sm.orphanedGroups
+	sm.orphanedGroups = nil
+	return result
 }
 
 func (sm *ShardManager) shardObjectKind() string {
@@ -223,55 +267,70 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 					}
 					members = append(members, item.Value)
 				}
-				shard = &Shard{ID: tml.ID, Name: tml.Name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet()}
-				shard.IPs.Replace(members)
-				shard.IPs.MarkClean()
 
-				if rec.UnifiID != tml.ID {
-					if err := sm.store.SetGroup(name, storage.GroupRecord{
-						UnifiID: tml.ID,
-						Site:    sm.site,
-						Members: members,
-						IPv6:    sm.ipv6,
-					}); err != nil {
-						sm.log.Warn().Err(err).Str("shard", name).Msg("failed to refresh shard cache entry")
+				// Detect placeholder-only groups (orphans)
+				if len(members) == 0 {
+					sm.orphanedGroups = append(sm.orphanedGroups, orphanedGroup{UnifiID: tml.ID, Name: tml.Name})
+				} else {
+					shard = &Shard{ID: tml.ID, Name: tml.Name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet(), State: ShardStateActive}
+					shard.IPs.Replace(members)
+					shard.IPs.MarkClean()
+
+					if rec.UnifiID != tml.ID {
+						if err := sm.store.SetGroup(name, storage.GroupRecord{
+							UnifiID: tml.ID,
+							Site:    sm.site,
+							Members: members,
+							IPv6:    sm.ipv6,
+						}); err != nil {
+							sm.log.Warn().Err(err).Str("shard", name).Msg("failed to refresh shard cache entry")
+						}
 					}
 				}
 				foundInAPI = true
 			}
 		} else {
 			if apiGroup, exists := apiGroupByID[rec.UnifiID]; exists {
-				members := make([]string, len(apiGroup.GroupMembers))
-				copy(members, apiGroup.GroupMembers)
-				shard = &Shard{ID: rec.UnifiID, Name: name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet()}
-				shard.IPs.Replace(members)
-				shard.IPs.MarkClean()
+				// Legacy mode: strip placeholder from GroupMembers like zone mode does
+				members := make([]string, 0, len(apiGroup.GroupMembers))
+				for _, m := range apiGroup.GroupMembers {
+					if m == TMLPlaceholderV4 || m == TMLPlaceholderV6 {
+						continue // strip creation placeholder
+					}
+					members = append(members, m)
+				}
+
+				// Detect placeholder-only groups (orphans)
+				if len(members) == 0 {
+					sm.orphanedGroups = append(sm.orphanedGroups, orphanedGroup{UnifiID: apiGroup.ID, Name: apiGroup.Name})
+				} else {
+					shard = &Shard{ID: rec.UnifiID, Name: name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet(), State: ShardStateActive}
+					shard.IPs.Replace(members)
+					shard.IPs.MarkClean()
+				}
 				foundInAPI = true
 			}
 		}
 
 		if !foundInAPI {
-			shard, err = sm.createShard(ctx, idx)
-			if err != nil {
-				return err
-			}
+			// Allocate a Pending shard in-memory without creating in UniFi yet.
+			shard = sm.allocShard(idx)
 			if len(rec.Members) > 0 {
 				// Keep dirty so old members are restored on next sync tick.
 				shard.IPs.Replace(rec.Members)
 			}
 		}
 
-		family.Shards = append(family.Shards, shard)
+		// Only add to family.Shards if shard was created (not an orphan)
+		if shard != nil {
+			family.Shards = append(family.Shards, shard)
+		}
 		idx++
 	}
 
-	if len(family.Shards) == 0 {
-		shard, err := sm.createShard(ctx, 0)
-		if err != nil {
-			return err
-		}
-		family.Shards = append(family.Shards, shard)
-	}
+	// Lazy shard creation: do not create an initial shard if none are loaded from bbolt.
+	// Shards are created only when the first IP is assigned to them (via AddIP).
+	// This prevents empty shards from existing in UniFi unnecessarily.
 
 	sort.Slice(family.Shards, func(i, j int) bool {
 		return family.Shards[i].Index < family.Shards[j].Index
@@ -320,12 +379,9 @@ func (sm *ShardManager) AddIP(ctx context.Context, ip, ipFamily string) error {
 	}
 
 	nextIndex := len(family.Shards)
-	sm.mu.Unlock()
 
-	shard, err := sm.createShard(ctx, nextIndex)
-	if err != nil {
-		return fmt.Errorf("create shard for family %s: %w", ipFamily, err)
-	}
+	// Allocate a Pending shard in-memory. It will be created in UniFi on first flush.
+	shard := sm.allocShard(nextIndex)
 
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -444,9 +500,51 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 	family := sm.familyStateLocked(sm.family)
 	var snapshots []flushSnapshot
 	for i := range family.Shards {
-		ips, dirty := family.Shards[i].IPs.PeekDirty()
+		shard := family.Shards[i]
+		ips, dirty := shard.IPs.PeekDirty()
 		if !dirty {
 			continue
+		}
+
+		// Skip Draining shards; they are handled by pruneEmptyTailShards.
+		if shard.State == ShardStateDraining {
+			continue
+		}
+
+		// Handle Pending→Active transition: POST to create the group first
+		if shard.State == ShardStatePending {
+			// If Pending and has no IPs, don't create it in UniFi yet.
+			if len(ips) == 0 {
+				// Clear dirty flag but don't add to snapshots (skip the PUT)
+				shard.IPs.MarkClean()
+				continue
+			}
+			// POST to create the group with placeholder
+			sm.mu.Unlock()
+			createdID, err := sm.doCreateUniFiGroup(ctx, shard.Name)
+			if err != nil {
+				sm.log.Error().Err(err).Str("shard", shard.Name).Msg("failed to create shard in UniFi during flush")
+				sm.mu.Lock()
+				// Re-mark as dirty so it will be retried
+				shard.IPs.Replace(ips)
+				sm.mu.Unlock()
+				return err
+			}
+			shard.ID = createdID
+			sm.log.Debug().Str("shard", shard.Name).Str("id", createdID).Msg("created shard in UniFi during flush")
+			// Re-acquire lock for the rest of the phase
+			sm.mu.Lock()
+			// Cache the newly created shard with empty members (will be updated by the PUT below)
+			sm.mu.Unlock()
+			if err := sm.store.SetGroup(shard.Name, storage.GroupRecord{
+				UnifiID: createdID,
+				Site:    sm.site,
+				Members: []string{},
+				IPv6:    sm.ipv6,
+			}); err != nil {
+				sm.log.Warn().Err(err).Str("shard", shard.Name).Msg("failed to cache new shard in bbolt after POST")
+			}
+			sm.mu.Lock()
 		}
 
 		members := make([]string, 0, len(ips))
@@ -465,20 +563,21 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 			}
 		}
 
-		name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: family.Shards[i].Index, Site: sm.site})
+		name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: shard.Index, Site: sm.site})
 		if err != nil {
 			sm.mu.Unlock()
 			return err
 		}
 
 		snapshots = append(snapshots, flushSnapshot{
+			shard:   shard,
 			idx:     i,
-			unifiID: family.Shards[i].ID,
+			unifiID: shard.ID,
 			name:    name,
 			members: members,
 		})
 		// Clear dirty flag now so Add/Remove can proceed.
-		family.Shards[i].IPs.MarkClean()
+		shard.IPs.MarkClean()
 	}
 	sm.mu.Unlock()
 
@@ -561,6 +660,12 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 			continue
 		}
 
+		// Pending→Active transition: mark as Active and fire activation callback
+		wasCreating := snap.shard.State == ShardStatePending
+		if wasCreating {
+			snap.shard.State = ShardStateActive
+		}
+
 		if err := sm.store.SetGroup(snap.name, storage.GroupRecord{
 			UnifiID: snap.unifiID,
 			Site:    sm.site,
@@ -569,6 +674,11 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 		}); err != nil {
 			sm.log.Warn().Err(err).Str("shard", snap.name).Msg("failed to update bbolt group cache")
 		}
+
+		// Call activation callback after state transition and bbolt write
+		if wasCreating && sm.onActivated != nil {
+			sm.onActivated(ctx, snap.shard.Index, snap.shard.ID)
+		}
 	}
 
 	return firstErr
@@ -576,6 +686,9 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 
 // PrunableTail returns the last shard's UniFi ID and index if it is pruneable:
 // empty (0 members) AND not the only shard (len > 1).
+// Returns ok=false if pruning is not applicable.
+// PrunableTail returns the last shard's UniFi ID and index if it is pruneable:
+// empty (0 members) AND not the only shard (len > 1) AND Active (not Pending/Draining).
 // Returns ok=false if pruning is not applicable.
 func (sm *ShardManager) PrunableTail() (unifiID string, shardIdx int, ok bool) {
 	sm.mu.RLock()
@@ -587,7 +700,8 @@ func (sm *ShardManager) PrunableTail() (unifiID string, shardIdx int, ok bool) {
 	}
 
 	last := family.Shards[len(family.Shards)-1]
-	if last.IPs.Len() > 0 {
+	// Only prune Active shards that are empty; skip Pending and Draining
+	if last.State != ShardStateActive || last.IPs.Len() > 0 {
 		return "", -1, false
 	}
 
@@ -650,25 +764,27 @@ func (sm *ShardManager) AllMembers() []string {
 	return all
 }
 
-// createShard creates a new empty shard in UniFi and registers it in bbolt.
-// In zone mode this creates a Traffic Matching List; in legacy mode a FirewallGroup.
-func (sm *ShardManager) createShard(ctx context.Context, idx int) (*Shard, error) {
-	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: idx, Site: sm.site})
-	if err != nil {
-		return nil, err
+// allocShard allocates an in-memory Pending shard without making any UniFi API or bbolt calls.
+// The shard will transition from Pending to Active during the first flush when syncShard() posts to UniFi.
+func (sm *ShardManager) allocShard(idx int) *Shard {
+	name, _ := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: idx, Site: sm.site})
+	// Ignore error because we'll get the same error later if it's a real problem
+	// (e.g., in syncShard or FlushDirty when we try to use the name).
+	return &Shard{
+		ID:     "",                    // Empty ID indicates Pending state
+		Name:   name,
+		Index:  idx,
+		Family: Family(sm.ipv6),
+		IPs:    NewIPSet(),
+		State:  ShardStatePending,
 	}
+}
 
+// doCreateUniFiGroup performs the POST API call to create a group (TML in zone mode,
+// FirewallGroup in legacy mode) with the placeholder item.
+// Returns the created group's ID.
+func (sm *ShardManager) doCreateUniFiGroup(ctx context.Context, name string) (string, error) {
 	objectKind := sm.shardObjectKind()
-
-	if sm.dryRun {
-		sm.log.Info().Str("name", name).Bool("ipv6", sm.ipv6).Int("shard", idx).
-			Msgf("[DRY-RUN] would create %s", objectKind)
-		shard := &Shard{ID: "dry-run-no-id", Name: name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet()}
-		shard.IPs.MarkClean()
-		return shard, nil
-	}
-
-	var createdID string
 
 	if sm.mode == "zone" {
 		tmlType := "IPV4_ADDRESSES"
@@ -684,32 +800,60 @@ func (sm *ShardManager) createShard(ctx context.Context, idx int) (*Shard, error
 			Items:     tmlPlaceholderItems(sm.ipv6), // API requires non-empty items on create
 		})
 		if err != nil {
-			return nil, fmt.Errorf("create shard %s: %w", name, err)
+			return "", fmt.Errorf("create %s %s: %w", objectKind, name, err)
 		}
-		createdID = created.ID
-		if createdID == "" {
-			return nil, fmt.Errorf("create shard %s: API returned empty ID", name)
+		if created.ID == "" {
+			return "", fmt.Errorf("create %s %s: API returned empty ID", objectKind, name)
 		}
-	} else {
-		groupType := "address-group"
-		if sm.ipv6 {
-			groupType = "ipv6-address-group"
-		}
-		created, err := sm.ctrl.CreateFirewallGroup(ctx, sm.site, controller.FirewallGroup{
-			Name:         name,
-			GroupType:    groupType,
-			GroupMembers: []string{},
-		})
-		if err != nil {
-			return nil, fmt.Errorf("create shard %s: %w", name, err)
-		}
-		createdID = created.ID
-		if createdID == "" {
-			return nil, fmt.Errorf("create shard %s: API returned empty ID", name)
-		}
+		return created.ID, nil
 	}
 
-	shard := &Shard{ID: createdID, Name: name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet()}
+	groupType := "address-group"
+	if sm.ipv6 {
+		groupType = "ipv6-address-group"
+	}
+	placeholder := TMLPlaceholderV4
+	if sm.ipv6 {
+		placeholder = TMLPlaceholderV6
+	}
+	created, err := sm.ctrl.CreateFirewallGroup(ctx, sm.site, controller.FirewallGroup{
+		Name:         name,
+		GroupType:    groupType,
+		GroupMembers: []string{placeholder},
+	})
+	if err != nil {
+		return "", fmt.Errorf("create %s %s: %w", objectKind, name, err)
+	}
+	if created.ID == "" {
+		return "", fmt.Errorf("create %s %s: API returned empty ID", objectKind, name)
+	}
+	return created.ID, nil
+}
+
+// createShard creates a new empty shard in UniFi and registers it in bbolt.
+// In zone mode this creates a Traffic Matching List; in legacy mode a FirewallGroup.
+func (sm *ShardManager) createShard(ctx context.Context, idx int) (*Shard, error) {
+	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: idx, Site: sm.site})
+	if err != nil {
+		return nil, err
+	}
+
+	objectKind := sm.shardObjectKind()
+
+	if sm.dryRun {
+		sm.log.Info().Str("name", name).Bool("ipv6", sm.ipv6).Int("shard", idx).
+			Msgf("[DRY-RUN] would create %s", objectKind)
+		shard := &Shard{ID: "dry-run-no-id", Name: name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet(), State: ShardStateActive}
+		shard.IPs.MarkClean()
+		return shard, nil
+	}
+
+	createdID, err := sm.doCreateUniFiGroup(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+
+	shard := &Shard{ID: createdID, Name: name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet(), State: ShardStateActive}
 	shard.IPs.MarkClean()
 
 	if err := sm.store.SetGroup(name, storage.GroupRecord{
@@ -726,13 +870,20 @@ func (sm *ShardManager) createShard(ctx context.Context, idx int) (*Shard, error
 }
 
 // GroupIDs returns all UniFi IDs of the managed shards.
+// GroupIDs returns the UniFi IDs of all non-Pending shards (Active and Draining).
+// Pending shards (not yet created in UniFi) have empty IDs and are filtered out.
+// This is safe because all callers (manager.go, legacy.go, zone.go) need only Active/Draining
+// shard IDs for rule/policy provisioning or deletion.
 func (sm *ShardManager) GroupIDs() []string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	family := sm.families[sm.family]
 	ids := make([]string, 0, len(family.Shards))
 	for _, s := range family.Shards {
-		ids = append(ids, s.ID)
+		// Skip Pending shards (ID is empty and they don't exist in UniFi yet)
+		if s.State != ShardStatePending && s.ID != "" {
+			ids = append(ids, s.ID)
+		}
 	}
 	return ids
 }
@@ -796,6 +947,16 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 		return
 	}
 
+	// Skip Draining shards; they are handled by pruneEmptyTailShards.
+	if shard.State == ShardStateDraining {
+		return
+	}
+
+	// If the shard is Pending and has no IPs, don't create it in UniFi yet.
+	if shard.State == ShardStatePending && len(ips) == 0 {
+		return
+	}
+
 	start := time.Now()
 	shardLabel := fmt.Sprintf("%d", shard.Index)
 	metrics.ShardIPCount.WithLabelValues(shard.Family, shardLabel, sm.site).Set(float64(len(ips)))
@@ -804,7 +965,36 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 		sm.log.Info().Str("shard", shard.Name).Int("member_count", len(ips)).
 			Msgf("[DRY-RUN] would sync %s", sm.shardObjectKind())
 		shard.IPs.CommitClean()
+		// In dry-run, transition Pending to Active for consistency
+		if shard.State == ShardStatePending {
+			shard.State = ShardStateActive
+			if sm.onActivated != nil {
+				sm.onActivated(ctx, shard.Index, shard.ID)
+			}
+		}
 		return
+	}
+
+	// Pending→Active transition: POST to create the group first
+	wasCreating := false
+	if shard.State == ShardStatePending {
+		createdID, err := sm.doCreateUniFiGroup(ctx, shard.Name)
+		if err != nil {
+			sm.log.Error().Err(err).Str("shard", shard.Name).Msg("failed to create shard in UniFi")
+			return
+		}
+		shard.ID = createdID
+		wasCreating = true
+		// Cache the newly created shard with empty members (will be updated by the PUT below)
+		if err := sm.store.SetGroup(shard.Name, storage.GroupRecord{
+			UnifiID: createdID,
+			Site:    sm.site,
+			Members: []string{},
+			IPv6:    sm.ipv6,
+		}); err != nil {
+			sm.log.Warn().Err(err).Str("shard", shard.Name).Msg("failed to cache new shard in bbolt after POST")
+		}
+		sm.log.Debug().Str("shard", shard.Name).Str("id", createdID).Msg("created shard in UniFi")
 	}
 
 	sort.Strings(ips)
@@ -863,6 +1053,15 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 	}); err != nil {
 		sm.log.Warn().Err(err).Str("shard", shard.Name).Msg("failed to update bbolt group cache after sync")
 	}
+
+	// Pending→Active transition: mark as Active and fire activation callback
+	if wasCreating {
+		shard.State = ShardStateActive
+		if sm.onActivated != nil {
+			sm.onActivated(ctx, shard.Index, shard.ID)
+		}
+	}
+
 	metrics.ShardSyncTotal.WithLabelValues(shard.Family, shardLabel, sm.site, "ok").Inc()
 	metrics.ShardSyncDuration.WithLabelValues(shard.Family, shardLabel, sm.site).Observe(time.Since(start).Seconds())
 	sm.log.Debug().Str("shard", shard.Name).Int("count", len(ips)).Msg("shard synced")

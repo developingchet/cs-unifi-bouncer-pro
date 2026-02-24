@@ -46,8 +46,8 @@ func newV4ShardManager(t *testing.T, capacity int, ctrl controller.Controller, s
 	return NewShardManager(testSite, false, capacity, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
 }
 
-// TestEnsureShards_FirstRun verifies that an empty store causes the first shard
-// to be created via the API (CreateFirewallGroup called once).
+// TestEnsureShards_FirstRun verifies that lazy creation means an empty store
+// does NOT create any shards. Shards are created only when IPs are added.
 func TestEnsureShards_FirstRun(t *testing.T) {
 	ctrl := testutil.NewMockController()
 	store := newBboltStore(t)
@@ -57,11 +57,12 @@ func TestEnsureShards_FirstRun(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	if got := ctrl.Calls("CreateFirewallGroup"); got != 1 {
-		t.Errorf("CreateFirewallGroup calls: got %d, want 1", got)
+	// With lazy creation, no shard should be created at startup.
+	if got := ctrl.Calls("CreateFirewallGroup"); got != 0 {
+		t.Errorf("CreateFirewallGroup calls: got %d, want 0", got)
 	}
-	if len(sm.GroupIDs()) != 1 {
-		t.Errorf("GroupIDs len: got %d, want 1", len(sm.GroupIDs()))
+	if len(sm.GroupIDs()) != 0 {
+		t.Errorf("GroupIDs len: got %d, want 0 (lazy creation)", len(sm.GroupIDs()))
 	}
 }
 
@@ -426,6 +427,7 @@ func TestConcurrentAddRemove(t *testing.T) {
 
 // TestAdd_NewShardOnOverflow_ReturnsNewIdx verifies that when a new shard is
 // created on overflow, Add returns the correct newShardIdx (>= 0).
+// With lazy creation, the first IP creates shard 0 (newIdx = 0).
 func TestAdd_NewShardOnOverflow_ReturnsNewIdx(t *testing.T) {
 	const capacity = 2
 	ctrl := testutil.NewMockController()
@@ -436,8 +438,18 @@ func TestAdd_NewShardOnOverflow_ReturnsNewIdx(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	// Fill first shard to capacity — newShardIdx should be -1 each time.
-	for i := 0; i < capacity; i++ {
+	// With lazy creation, first IP creates shard 0 (newIdx = 0).
+	ip := fmt.Sprintf("10.0.0.%d", 1)
+	_, newIdx, err := sm.Add(context.Background(), ip)
+	if err != nil {
+		t.Fatalf("Add(%s): %v", ip, err)
+	}
+	if newIdx != 0 {
+		t.Errorf("Add(%s): newShardIdx = %d; want 0 (first shard created)", ip, newIdx)
+	}
+
+	// Fill first shard to capacity — newShardIdx should be -1 for remaining IPs.
+	for i := 1; i < capacity; i++ {
 		ip := fmt.Sprintf("10.0.0.%d", i+1)
 		_, newIdx, err := sm.Add(context.Background(), ip)
 		if err != nil {
@@ -449,12 +461,12 @@ func TestAdd_NewShardOnOverflow_ReturnsNewIdx(t *testing.T) {
 	}
 
 	// One more IP forces a new shard — newShardIdx should be 1.
-	_, newIdx, err := sm.Add(context.Background(), "10.0.0.99")
+	_, overflowIdx, err := sm.Add(context.Background(), "10.0.0.99")
 	if err != nil {
 		t.Fatalf("Add overflow IP: %v", err)
 	}
-	if newIdx != 1 {
-		t.Errorf("Add overflow: newShardIdx = %d; want 1", newIdx)
+	if overflowIdx != 1 {
+		t.Errorf("Add overflow: newShardIdx = %d; want 1", overflowIdx)
 	}
 }
 
@@ -565,32 +577,35 @@ func newZoneV4ShardManager(t *testing.T, capacity int, ctrl controller.Controlle
 
 // TestCreateShard_SendsNonEmptyItems verifies that TML creation always
 // sends at least one item (API constraint: items must not be empty).
+// With lazy creation, a shard is created when the first IP is added.
 func TestCreateShard_SendsNonEmptyItems(t *testing.T) {
 	ctrl := testutil.NewMockController()
 	store := newBboltStore(t)
 
 	sm := newZoneV4ShardManager(t, 5, ctrl, store)
 
-	// Call createShard directly (it's not exported, so we use the internal API)
-	// We'll use reflection or test the behavior through EnsureShards
-
-	// Instead, we test by triggering shard creation through Add overflow
-	// or by directly calling the internal createShard via a test helper
-	// Since createShard is private, we'll verify via the API call count
-	// and checking the TML items that were created
-
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	// Verify that CreateTrafficMatchingList was called
-	if got := ctrl.Calls("CreateTrafficMatchingList"); got != 1 {
-		t.Errorf("CreateTrafficMatchingList calls: got %d, want 1", got)
+	// With lazy creation, no shard is created at startup
+	if got := ctrl.Calls("CreateTrafficMatchingList"); got != 0 {
+		t.Errorf("CreateTrafficMatchingList calls after EnsureShards: got %d, want 0", got)
 	}
 
-	// Verify the TML was created with non-empty items
-	// The mock controller returns what we set, but we can't inspect the call args easily
-	// Instead, we check that the shard was created and has a valid ID
+	// Add an IP to trigger shard creation
+	if _, newIdx, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+		t.Fatalf("Add: %v", err)
+	} else if newIdx != 0 {
+		t.Errorf("Add: newIdx = %d, want 0", newIdx)
+	}
+
+	// Verify that CreateTrafficMatchingList was called during Add
+	if got := ctrl.Calls("CreateTrafficMatchingList"); got != 1 {
+		t.Errorf("CreateTrafficMatchingList calls after Add: got %d, want 1", got)
+	}
+
+	// Verify the TML was created with a valid ID
 	if len(sm.GroupIDs()) != 1 {
 		t.Errorf("GroupIDs len: got %d, want 1", len(sm.GroupIDs()))
 	}
@@ -609,6 +624,13 @@ func TestSyncShard_SendsPlaceholderWhenEmpty(t *testing.T) {
 	sm := newZoneV4ShardManager(t, 5, ctrl, store)
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
+	}
+
+	// Add an IP to create a shard
+	if _, newIdx, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+		t.Fatalf("Add: %v", err)
+	} else if newIdx != 0 {
+		t.Errorf("Add: newIdx = %d, want 0", newIdx)
 	}
 
 	// Mark the shard as dirty with empty IPs (simulating all bans expired)

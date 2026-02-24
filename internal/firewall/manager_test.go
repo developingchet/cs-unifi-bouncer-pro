@@ -58,8 +58,9 @@ func managerTestNamer(t *testing.T) *Namer {
 	return n
 }
 
-// TestEnsureInfrastructure_LegacyMode verifies that in legacy mode,
-// EnsureInfrastructure calls CreateFirewallRule for the v4 shard.
+// TestEnsureInfrastructure_LegacyMode verifies that with lazy creation,
+// EnsureInfrastructure does NOT create rules upfront. Rules are created
+// only when shards are created (when IPs are added).
 func TestEnsureInfrastructure_LegacyMode(t *testing.T) {
 	cfg := defaultManagerConfig()
 	cfg.FirewallMode = "legacy"
@@ -69,13 +70,15 @@ func TestEnsureInfrastructure_LegacyMode(t *testing.T) {
 		t.Fatalf("EnsureInfrastructure: %v", err)
 	}
 
-	if got := ctrl.Calls("CreateFirewallRule"); got < 1 {
-		t.Errorf("CreateFirewallRule calls: got %d, want >= 1", got)
+	// With lazy creation, no rules are created at startup
+	if got := ctrl.Calls("CreateFirewallRule"); got != 0 {
+		t.Errorf("CreateFirewallRule calls: got %d, want 0 (lazy creation)", got)
 	}
 }
 
-// TestEnsureInfrastructure_ZoneMode verifies that in zone mode,
-// EnsureInfrastructure calls CreateZonePolicy.
+// TestEnsureInfrastructure_ZoneMode verifies that with lazy creation,
+// EnsureInfrastructure does NOT create policies upfront. Policies are created
+// only when shards are created (when IPs are added).
 func TestEnsureInfrastructure_ZoneMode(t *testing.T) {
 	cfg := defaultManagerConfig()
 	cfg.FirewallMode = "zone"
@@ -86,13 +89,15 @@ func TestEnsureInfrastructure_ZoneMode(t *testing.T) {
 		t.Fatalf("EnsureInfrastructure: %v", err)
 	}
 
-	if got := ctrl.Calls("CreateZonePolicy"); got < 1 {
-		t.Errorf("CreateZonePolicy calls: got %d, want >= 1", got)
+	// With lazy creation, no policies are created at startup
+	if got := ctrl.Calls("CreateZonePolicy"); got != 0 {
+		t.Errorf("CreateZonePolicy calls: got %d, want 0 (lazy creation)", got)
 	}
 }
 
 // TestEnsureInfrastructure_AutoMode_Zone verifies that in auto mode, when the
-// controller reports zone-based firewall support, zone policies are created.
+// controller reports zone-based firewall support, lazy creation still applies
+// (no policies created at startup, only when shards are needed).
 func TestEnsureInfrastructure_AutoMode_Zone(t *testing.T) {
 	cfg := defaultManagerConfig()
 	cfg.FirewallMode = "auto"
@@ -105,8 +110,9 @@ func TestEnsureInfrastructure_AutoMode_Zone(t *testing.T) {
 		t.Fatalf("EnsureInfrastructure: %v", err)
 	}
 
-	if got := ctrl.Calls("CreateZonePolicy"); got < 1 {
-		t.Errorf("CreateZonePolicy calls: got %d, want >= 1", got)
+	// With lazy creation, no policies are created at startup
+	if got := ctrl.Calls("CreateZonePolicy"); got != 0 {
+		t.Errorf("CreateZonePolicy calls: got %d, want 0 (lazy creation)", got)
 	}
 	if got := ctrl.Calls("CreateFirewallRule"); got != 0 {
 		t.Errorf("CreateFirewallRule calls: got %d, want 0 (should use zone path)", got)
@@ -114,7 +120,8 @@ func TestEnsureInfrastructure_AutoMode_Zone(t *testing.T) {
 }
 
 // TestEnsureInfrastructure_AutoMode_Legacy verifies that in auto mode, when the
-// controller reports no zone-based firewall support, legacy rules are created.
+// controller reports no zone-based firewall support, lazy creation still applies
+// (no rules created at startup, only when shards are needed).
 func TestEnsureInfrastructure_AutoMode_Legacy(t *testing.T) {
 	cfg := defaultManagerConfig()
 	cfg.FirewallMode = "auto"
@@ -126,13 +133,14 @@ func TestEnsureInfrastructure_AutoMode_Legacy(t *testing.T) {
 		t.Fatalf("EnsureInfrastructure: %v", err)
 	}
 
-	if got := ctrl.Calls("CreateFirewallRule"); got < 1 {
-		t.Errorf("CreateFirewallRule calls: got %d, want >= 1 (should fall back to legacy)", got)
+	// With lazy creation, no rules are created at startup
+	if got := ctrl.Calls("CreateFirewallRule"); got != 0 {
+		t.Errorf("CreateFirewallRule calls: got %d, want 0 (lazy creation)", got)
 	}
 }
 
 // TestEnsureInfrastructure_AutoMode_FeatureError verifies that when HasFeature
-// returns an error, the manager falls back to legacy mode gracefully.
+// returns an error, the manager falls back to legacy mode gracefully (with lazy creation).
 func TestEnsureInfrastructure_AutoMode_FeatureError(t *testing.T) {
 	cfg := defaultManagerConfig()
 	cfg.FirewallMode = "auto"
@@ -145,8 +153,9 @@ func TestEnsureInfrastructure_AutoMode_FeatureError(t *testing.T) {
 		t.Fatalf("EnsureInfrastructure: %v", err)
 	}
 
-	if got := ctrl.Calls("CreateFirewallRule"); got < 1 {
-		t.Errorf("CreateFirewallRule calls: got %d, want >= 1 (fallback to legacy)", got)
+	// With lazy creation, no rules are created at startup
+	if got := ctrl.Calls("CreateFirewallRule"); got != 0 {
+		t.Errorf("CreateFirewallRule calls: got %d, want 0 (lazy creation)", got)
 	}
 }
 

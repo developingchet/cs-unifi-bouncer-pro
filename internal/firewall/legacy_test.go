@@ -27,6 +27,14 @@ func ensuredV4Shard(t *testing.T, ctrl controller.Controller, store storage.Stor
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
+	// With lazy creation, add a dummy IP to create shard 0 for testing
+	if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+		t.Fatalf("Add dummy IP: %v", err)
+	}
+	// Remove it so the shard exists but is empty (for testing rule creation)
+	if _, err := sm.Remove(context.Background(), "10.0.0.1"); err != nil {
+		t.Fatalf("Remove dummy IP: %v", err)
+	}
 	return sm
 }
 
@@ -35,6 +43,14 @@ func ensuredV6Shard(t *testing.T, ctrl controller.Controller, store storage.Stor
 	sm := NewShardManager(testSite, true, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
+	}
+	// With lazy creation, add a dummy IP to create shard 0 for testing
+	if _, _, err := sm.Add(context.Background(), "2001:db8::1"); err != nil {
+		t.Fatalf("Add dummy IP: %v", err)
+	}
+	// Remove it so the shard exists but is empty (for testing rule creation)
+	if _, err := sm.Remove(context.Background(), "2001:db8::1"); err != nil {
+		t.Fatalf("Remove dummy IP: %v", err)
 	}
 	return sm
 }
