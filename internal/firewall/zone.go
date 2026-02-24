@@ -3,7 +3,6 @@ package firewall
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
@@ -14,12 +13,11 @@ import (
 
 // ZoneConfig holds configuration for zone-based firewall mode.
 type ZoneConfig struct {
-	ZonePairs            []config.ZonePair
-	ZoneConnectionStates []string
-	Description          string
-	LogDrops             bool
-	APIWriteDelay        time.Duration
-	PolicyReorder        bool // reorder bouncer policies to run before system-defined ones
+	ZonePairs   []config.ZonePair
+	Description string
+	LogDrops    bool
+	APIWriteDelay time.Duration
+	PolicyReorder bool // reorder bouncer policies to run before system-defined ones
 }
 
 // ZoneManager manages zone-based firewall policies.
@@ -34,18 +32,6 @@ type ZoneManager struct {
 // NewZoneManager constructs a ZoneManager.
 func NewZoneManager(cfg ZoneConfig, namer *Namer, ctrl controller.Controller, store storage.Store, log zerolog.Logger) *ZoneManager {
 	return &ZoneManager{cfg: cfg, namer: namer, ctrl: ctrl, store: store, log: log}
-}
-
-func normalizeConnectionStates(states []string) []string {
-	out := make([]string, 0, len(states))
-	for _, state := range states {
-		upper := strings.ToUpper(strings.TrimSpace(state))
-		if upper == "" {
-			continue
-		}
-		out = append(out, upper)
-	}
-	return out
 }
 
 // Bootstrap performs fail-fast startup discovery for all configured sites:
@@ -97,8 +83,6 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 		zoneMap[pair.Dst] = dstZoneID
 	}
 
-	connectionStates := normalizeConnectionStates(zm.cfg.ZoneConnectionStates)
-
 	// Fetch ALL existing policies once for all zone pairs (avoids one GET per pair).
 	existingPolicies, err := zm.ctrl.ListZonePolicies(ctx, site)
 	if err != nil {
@@ -110,11 +94,12 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	}
 
 	for _, pair := range zm.cfg.ZonePairs {
-		if err := zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, connectionStates, existingByID, false, v4Shards); err != nil {
+		// ConnectionStateFilter = nil means "All" states in UniFi API.
+		if err := zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, existingByID, false, v4Shards); err != nil {
 			return err
 		}
 		if v6Shards != nil {
-			if err := zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, connectionStates, existingByID, true, v6Shards); err != nil {
+			if err := zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, existingByID, true, v6Shards); err != nil {
 				return err
 			}
 		}
@@ -129,7 +114,7 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	return nil
 }
 
-func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, pair config.ZonePair, zoneMap map[string]string, connectionStates []string, existingByID map[string]bool, ipv6 bool, sm *ShardManager) error {
+func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, pair config.ZonePair, zoneMap map[string]string, existingByID map[string]bool, ipv6 bool, sm *ShardManager) error {
 	family := Family(ipv6)
 	ipVersion := "IPV4"
 	if ipv6 {
@@ -158,7 +143,29 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 			return fmt.Errorf("lookup policy %s: %w", policyName, lookupErr)
 		}
 
+		// Check if policy exists in API and needs update (reconcile mode)
 		if existing != nil && existing.UnifiID != "" && existingByID[existing.UnifiID] {
+			// Fetch the actual policy from API to check if it needs updating
+			policies, err := zm.ctrl.ListZonePolicies(ctx, site)
+			if err != nil {
+				return fmt.Errorf("list policies for reconcile: %w", err)
+			}
+			var apiPolicy *controller.ZonePolicy
+			for i := range policies {
+				if policies[i].ID == existing.UnifiID {
+					apiPolicy = &policies[i]
+					break
+				}
+			}
+			if apiPolicy != nil && needsUpdateZonePolicy(apiPolicy, groupID) {
+				zm.log.Info().Str("policy", policyName).Msg("zone policy needs update, applying reconcile")
+				// Update the policy in place
+				if err := zm.updateZonePolicy(ctx, site, *apiPolicy, groupID); err != nil {
+					return fmt.Errorf("update zone policy %s: %w", policyName, err)
+				}
+				existingByID[apiPolicy.ID] = true // mark as processed
+				continue
+			}
 			zm.log.Debug().Str("policy", policyName).Msg("zone policy already exists")
 			continue
 		}
@@ -174,6 +181,10 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 		firstCreate = false
 
 		// groupID is the TML UUID in zone mode (integration v1).
+		// ConnectionStateFilter = nil means "All" states in UniFi API.
+		if groupID == "" {
+			return fmt.Errorf("shard %d for %s->%s has empty TML ID — cannot create block policy without source filter", i, pair.Src, pair.Dst)
+		}
 		policy := controller.ZonePolicy{
 			Name:                   policyName,
 			Enabled:                true,
@@ -183,7 +194,7 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 			DstZone:                dstZoneID,
 			IPVersion:              ipVersion,
 			TrafficMatchingListIDs: []string{groupID},
-			ConnectionStateFilter:  connectionStates,
+			ConnectionStateFilter:  nil, // nil = All connection states
 			LoggingEnabled:         zm.cfg.LogDrops,
 		}
 
@@ -278,7 +289,6 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 		zoneMap[pair.Src] = srcZoneID
 		zoneMap[pair.Dst] = dstZoneID
 	}
-	connectionStates := normalizeConnectionStates(zm.cfg.ZoneConnectionStates)
 
 	for _, pair := range zm.cfg.ZonePairs {
 		policyName, err := zm.namer.PolicyName(NameData{
@@ -319,6 +329,9 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 		srcZoneID := zoneMap[pair.Src]
 		dstZoneID := zoneMap[pair.Dst]
 
+		if groupID == "" {
+			return fmt.Errorf("new shard %d for %s->%s has empty TML ID — cannot create block policy without source filter", shardIdx, pair.Src, pair.Dst)
+		}
 		policy := controller.ZonePolicy{
 			Name:                   policyName,
 			Enabled:                true,
@@ -328,7 +341,7 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 			DstZone:                dstZoneID,
 			IPVersion:              ipVersion,
 			TrafficMatchingListIDs: []string{groupID},
-			ConnectionStateFilter:  connectionStates,
+			ConnectionStateFilter:  nil, // nil = All connection states
 			LoggingEnabled:         zm.cfg.LogDrops,
 		}
 
@@ -432,4 +445,28 @@ func (zm *ZoneManager) UpdateGroupReference(ctx context.Context, site, oldGroupI
 		}
 	}
 	return nil
+}
+
+// needsUpdateZonePolicy returns true if the policy needs to be updated to match the desired state.
+// It checks for two conditions:
+// 1. ConnectionStateFilter is not nil ( UniFi API will show "Custom" instead of "All")
+// 2. TrafficMatchingListIDs is empty or has the wrong TML ID
+func needsUpdateZonePolicy(policy *controller.ZonePolicy, desiredTMLID string) bool {
+	// ConnectionStateFilter should be nil for "All" states
+	if policy.ConnectionStateFilter != nil {
+		return true
+	}
+	// TrafficMatchingListIDs should have exactly one entry with the desired TML ID
+	if len(policy.TrafficMatchingListIDs) != 1 || policy.TrafficMatchingListIDs[0] != desiredTMLID {
+		return true
+	}
+	return false
+}
+
+// updateZonePolicy updates an existing zone policy with the correct settings.
+func (zm *ZoneManager) updateZonePolicy(ctx context.Context, site string, policy controller.ZonePolicy, newGroupID string) error {
+	policy.TrafficMatchingListIDs = []string{newGroupID}
+	policy.ConnectionStateFilter = nil
+	policy.LoggingEnabled = zm.cfg.LogDrops
+	return zm.ctrl.UpdateZonePolicy(ctx, site, policy)
 }

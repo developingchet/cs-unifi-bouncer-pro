@@ -201,7 +201,7 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 		return nil, &ErrUnauthorized{Msg: "HTTP 401"}
 	case http.StatusNotFound:
 		_ = resp.Body.Close()
-		return nil, &ErrNotFound{}
+		return nil, &ErrNotFound{URL: req.URL.Path}
 	case http.StatusTooManyRequests:
 		retryAfter := 10 * time.Second
 		if ra := resp.Header.Get("Retry-After"); ra != "" {

@@ -58,9 +58,15 @@ type Config struct {
 	LegacyRulesetV6        string `koanf:"legacy_ruleset_v6"`
 
 	// Zone-Based Firewall Mode
-	ZonePairs            []string `koanf:"zone_pairs"`
-	ZoneConnectionStates []string `koanf:"zone_connection_states"`
-	ZonePolicyReorder    bool     `koanf:"zone_policy_reorder"`
+	ZonePairs         []string `koanf:"zone_pairs"`
+	ZonePolicyReorder bool     `koanf:"zone_policy_reorder"`
+
+	// Cloudflare Whitelist
+	CloudflareWhitelistEnabled  bool          `koanf:"cloudflare_whitelist_enabled"`
+	CloudflareRefreshInterval   time.Duration `koanf:"cloudflare_refresh_interval"`
+	CloudflareIPv4URL           string        `koanf:"cloudflare_ipv4_url"`
+	CloudflareIPv6URL           string        `koanf:"cloudflare_ipv6_url"`
+	CloudflareZonePairs         []string      `koanf:"cloudflare_zone_pairs"`
 
 	// CrowdSec Decision Filtering
 	CrowdSecLAPIURL         string        `koanf:"crowdsec_lapi_url"`
@@ -143,6 +149,8 @@ func (c *Config) sanitise() {
 	c.LogFormat = stripEnvQuotes(c.LogFormat)
 	c.MetricsAddr = stripEnvQuotes(c.MetricsAddr)
 	c.HealthAddr = stripEnvQuotes(c.HealthAddr)
+	c.CloudflareIPv4URL = stripEnvQuotes(c.CloudflareIPv4URL)
+	c.CloudflareIPv6URL = stripEnvQuotes(c.CloudflareIPv6URL)
 
 	// Slice fields: strip each element
 	for i, s := range c.UnifiSites {
@@ -160,8 +168,8 @@ func (c *Config) sanitise() {
 	for i, s := range c.ZonePairs {
 		c.ZonePairs[i] = stripEnvQuotes(s)
 	}
-	for i, s := range c.ZoneConnectionStates {
-		c.ZoneConnectionStates[i] = stripEnvQuotes(s)
+	for i, s := range c.CloudflareZonePairs {
+		c.CloudflareZonePairs[i] = stripEnvQuotes(s)
 	}
 }
 
@@ -190,9 +198,12 @@ func defaults() map[string]interface{} {
 		"legacy_rule_index_start_v6":  27000,
 		"legacy_ruleset_v4":           "WAN_IN",
 		"legacy_ruleset_v6":           "WANv6_IN",
-		"zone_pairs":                  "External->Internal",
-		"zone_connection_states":      "new,invalid",
-		"zone_policy_reorder":         true,
+		"zone_pairs":         "External->Internal",
+		"zone_policy_reorder": true,
+		"cloudflare_whitelist_enabled": false,
+		"cloudflare_refresh_interval":  "168h",
+		"cloudflare_ipv4_url":          "https://www.cloudflare.com/ips-v4",
+		"cloudflare_ipv6_url":          "https://www.cloudflare.com/ips-v6",
 		"crowdsec_lapi_url":           "http://crowdsec:8080",
 		"crowdsec_lapi_verify_tls":    true,
 		"crowdsec_poll_interval":      "30s",
@@ -262,7 +273,7 @@ func Load() (*Config, error) {
 	cfg.BlockScenarioExclude = splitCSV(k.String("block_scenario_exclude"))
 	cfg.BlockWhitelist = splitCSV(k.String("block_whitelist"))
 	cfg.ZonePairs = splitCSV(k.String("zone_pairs"))
-	cfg.ZoneConnectionStates = splitCSV(k.String("zone_connection_states"))
+	cfg.CloudflareZonePairs = splitCSV(k.String("cloudflare_zone_pairs"))
 
 	// Strip Docker env-file quoting from all string values
 	cfg.sanitise()
@@ -372,6 +383,16 @@ func (c *Config) Validate() error {
 	}
 	if c.ShardLimit < 1 || c.ShardLimit > 10000 {
 		return fmt.Errorf("SHARD_LIMIT must be between 1 and 10000 (got %d)", c.ShardLimit)
+	}
+
+	// Validate Cloudflare whitelist config
+	if c.CloudflareWhitelistEnabled {
+		if c.CloudflareRefreshInterval <= 0 {
+			return fmt.Errorf("CLOUDFLARE_REFRESH_INTERVAL must be > 0")
+		}
+		if len(c.CloudflareZonePairs) == 0 {
+			return fmt.Errorf("CLOUDFLARE_WHITELIST_ENABLED is set but CLOUDFLARE_ZONE_PAIRS is empty")
+		}
 	}
 
 	return nil

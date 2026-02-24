@@ -148,7 +148,7 @@ func doPOST(ctx context.Context, c *unifiClient, url, endpoint string, payload i
 		return nil, err
 	}
 	var result json.RawMessage
-	return result, c.withReauth(ctx, func() error {
+	err = c.withReauth(ctx, func() error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
 		if err != nil {
 			return err
@@ -168,6 +168,7 @@ func doPOST(ctx context.Context, c *unifiClient, url, endpoint string, payload i
 		}
 		return nil
 	})
+	return result, err
 }
 
 func doPOSTv2(ctx context.Context, c *unifiClient, url, endpoint string, payload interface{}) (json.RawMessage, error) {
@@ -176,7 +177,7 @@ func doPOSTv2(ctx context.Context, c *unifiClient, url, endpoint string, payload
 		return nil, err
 	}
 	var result json.RawMessage
-	return result, c.withReauth(ctx, func() error {
+	err = c.withReauth(ctx, func() error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
 		if err != nil {
 			return err
@@ -192,6 +193,7 @@ func doPOSTv2(ctx context.Context, c *unifiClient, url, endpoint string, payload
 		}
 		return nil
 	})
+	return result, err
 }
 
 func doPUT(ctx context.Context, c *unifiClient, url, endpoint string, payload interface{}) error {

@@ -126,11 +126,14 @@ func (e *ErrUnauthorized) Error() string {
 
 // ErrNotFound is returned when a resource does not exist.
 type ErrNotFound struct {
-	ID string
+	URL string
 }
 
 func (e *ErrNotFound) Error() string {
-	return fmt.Sprintf("not found: %s", e.ID)
+	if e.URL != "" {
+		return "not found: " + e.URL
+	}
+	return "not found"
 }
 
 // ErrRateLimit is returned when the controller signals rate limiting.

@@ -655,6 +655,9 @@ func (sm *ShardManager) createShard(ctx context.Context, idx int) (*Shard, error
 			return nil, fmt.Errorf("create shard %s: %w", name, err)
 		}
 		createdID = created.ID
+		if createdID == "" {
+			return nil, fmt.Errorf("create shard %s: API returned empty ID", name)
+		}
 	} else {
 		groupType := "address-group"
 		if sm.ipv6 {
@@ -669,6 +672,9 @@ func (sm *ShardManager) createShard(ctx context.Context, idx int) (*Shard, error
 			return nil, fmt.Errorf("create shard %s: %w", name, err)
 		}
 		createdID = created.ID
+		if createdID == "" {
+			return nil, fmt.Errorf("create shard %s: API returned empty ID", name)
+		}
 	}
 
 	shard := &Shard{ID: createdID, Name: name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet()}
@@ -801,7 +807,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 	if putErr != nil {
 		metrics.ShardSyncTotal.WithLabelValues(shard.Family, shardLabel, sm.site, "error").Inc()
 		metrics.ShardSyncDuration.WithLabelValues(shard.Family, shardLabel, sm.site).Observe(time.Since(start).Seconds())
-		sm.log.Error().Err(putErr).Str("shard", shard.Name).Int("ip_count", len(ips)).
+		sm.log.Error().Err(putErr).Str("shard", shard.Name).Str("shard_id", shard.ID).Int("ip_count", len(ips)).
 			Msg("shard sync failed, will retry next tick")
 		return
 	}

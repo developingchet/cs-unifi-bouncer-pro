@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/whitelist"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 )
@@ -125,6 +127,37 @@ func runDaemon() error {
 		return fmt.Errorf("parse zone pairs: %w", err)
 	}
 
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	// Parse Cloudflare zone pairs if enabled (after ctx is created for zone resolution)
+	var cfZonePairs []whitelist.ZonePairConfig
+	if cfg.CloudflareWhitelistEnabled {
+		for _, raw := range cfg.CloudflareZonePairs {
+			parts := strings.SplitN(raw, ":", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("invalid CLOUDFLARE_ZONE_PAIRS entry %q: expected SrcName:DstName", raw)
+			}
+			srcName, dstName := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+
+			// Resolve zone names to UUIDs - independent of main zone pair resolution.
+			srcID, err := ctrl.GetZoneID(ctx, cfg.UnifiSites[0], srcName)
+			if err != nil {
+				return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: resolve src zone %q: %w", srcName, err)
+			}
+			dstID, err := ctrl.GetZoneID(ctx, cfg.UnifiSites[0], dstName)
+			if err != nil {
+				return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: resolve dst zone %q: %w", dstName, err)
+			}
+			cfZonePairs = append(cfZonePairs, whitelist.ZonePairConfig{
+				SrcName:   srcName,
+				DstName:   dstName,
+				SrcZoneID: srcID,
+				DstZoneID: dstID,
+			})
+		}
+	}
+
 	fwMgr := firewall.NewManager(firewall.ManagerConfig{
 		FirewallMode:     cfg.FirewallMode,
 		EnableIPv6:       cfg.FirewallEnableIPv6,
@@ -144,22 +177,32 @@ func runDaemon() error {
 			APIWriteDelay:    cfg.FirewallAPIShardDelay,
 		},
 		ZoneCfg: firewall.ZoneConfig{
-			ZonePairs:            zonePairs,
-			ZoneConnectionStates: cfg.ZoneConnectionStates,
-			Description:          cfg.ObjectDescription,
-			LogDrops:             cfg.FirewallLogDrops,
-			APIWriteDelay:        cfg.FirewallAPIShardDelay,
-			PolicyReorder:        cfg.ZonePolicyReorder,
+			ZonePairs:     zonePairs,
+			Description:   cfg.ObjectDescription,
+			LogDrops:      cfg.FirewallLogDrops,
+			APIWriteDelay: cfg.FirewallAPIShardDelay,
+			PolicyReorder: cfg.ZonePolicyReorder,
 		},
 	}, ctrl, store, namer, log)
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
 	// Bootstrap infrastructure
 	log.Info().Strs("sites", cfg.UnifiSites).Msg("ensuring firewall infrastructure")
 	if err := fwMgr.EnsureInfrastructure(ctx, cfg.UnifiSites); err != nil {
 		return fmt.Errorf("ensure infrastructure: %w", err)
+	}
+
+	// Start Cloudflare whitelist sync if enabled
+	var cfManager *whitelist.Manager
+	if cfg.CloudflareWhitelistEnabled {
+		cfProvider := whitelist.NewCloudflareProvider(cfg.CloudflareIPv4URL, cfg.CloudflareIPv6URL)
+		cfManager = whitelist.NewManager(ctrl, cfg.UnifiSites, cfProvider, log)
+
+		// cfZonePairs are already resolved above
+		if err := cfManager.Sync(ctx, cfZonePairs); err != nil {
+			log.Warn().Err(err).Msg("initial Cloudflare whitelist sync failed - will retry on next tick")
+		} else {
+			log.Info().Msg("Cloudflare whitelist initial sync complete")
+		}
 	}
 
 	// Startup reconcile
@@ -208,6 +251,26 @@ func runDaemon() error {
 	// Start periodic reconcile if configured
 	if cfg.FirewallReconcileInterval > 0 {
 		go runPeriodicReconcile(ctx, fwMgr, cfg.UnifiSites, cfg.FirewallReconcileInterval, log)
+	}
+
+	// Start periodic Cloudflare whitelist refresh if enabled
+	if cfManager != nil {
+		go func() {
+			ticker := time.NewTicker(cfg.CloudflareRefreshInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := cfManager.Sync(ctx, cfZonePairs); err != nil {
+						log.Error().Err(err).Msg("Cloudflare whitelist refresh failed")
+					} else {
+						log.Info().Msg("Cloudflare whitelist refresh complete")
+					}
+				}
+			}
+		}()
 	}
 
 	return bnc.Run(ctx)
@@ -344,12 +407,11 @@ func reconcileCmd() *cobra.Command {
 					APIWriteDelay:    cfg.FirewallAPIShardDelay,
 				},
 				ZoneCfg: firewall.ZoneConfig{
-					ZonePairs:            zonePairs,
-					ZoneConnectionStates: cfg.ZoneConnectionStates,
-					Description:          cfg.ObjectDescription,
-					LogDrops:             cfg.FirewallLogDrops,
-					APIWriteDelay:        cfg.FirewallAPIShardDelay,
-					PolicyReorder:        cfg.ZonePolicyReorder,
+					ZonePairs:     zonePairs,
+					Description:   cfg.ObjectDescription,
+					LogDrops:      cfg.FirewallLogDrops,
+					APIWriteDelay: cfg.FirewallAPIShardDelay,
+					PolicyReorder: cfg.ZonePolicyReorder,
 				},
 			}, ctrl, store, namer, log)
 

@@ -354,3 +354,109 @@ func TestZoneManager_Bootstrap_FailsWhenZonesFail(t *testing.T) {
 		t.Fatal("Bootstrap: expected error when DiscoverZones fails, got nil")
 	}
 }
+
+// TestZoneManager_EnsurePolicies_AlwaysHasTMLSourceFilter verifies that
+// block policies are never created with "Any IP" source.
+func TestZoneManager_EnsurePolicies_AlwaysHasTMLSourceFilter(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore()
+	namer := zoneTestNamer(t)
+
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	zm := newTestZoneManager(ctrl, store, namer)
+
+	if err := zm.EnsurePolicies(context.Background(), testSite, v4, nil); err != nil {
+		t.Fatalf("EnsurePolicies: %v", err)
+	}
+
+	// Get all created policies
+	policies, err := ctrl.ListZonePolicies(context.Background(), testSite)
+	if err != nil {
+		t.Fatalf("ListZonePolicies: %v", err)
+	}
+
+	// Verify each policy has TrafficMatchingListIDs set correctly
+	for i, p := range policies {
+		if len(p.TrafficMatchingListIDs) != 1 {
+			t.Errorf("policy[%d] (%s): len(TrafficMatchingListIDs) = %d, want 1",
+				i, p.Name, len(p.TrafficMatchingListIDs))
+		}
+		if p.TrafficMatchingListIDs[0] == "" {
+			t.Errorf("policy[%d] (%s): TrafficMatchingListIDs[0] is empty, want non-empty TML ID",
+				i, p.Name)
+		}
+		if p.ConnectionStateFilter != nil {
+			t.Errorf("policy[%d] (%s): ConnectionStateFilter = %v, want nil (All states)",
+				i, p.Name, p.ConnectionStateFilter)
+		}
+	}
+}
+
+// TestZoneManager_EnsurePolicies_ReconcileFixesMissingTML verifies that
+// existing policies missing a TML source filter are updated.
+func TestZoneManager_EnsurePolicies_ReconcileFixesMissingTML(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore()
+	namer := zoneTestNamer(t)
+
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	zm := newTestZoneManager(ctrl, store, namer)
+
+	// First call - creates policies with correct TML
+	if err := zm.EnsurePolicies(context.Background(), testSite, v4, nil); err != nil {
+		t.Fatalf("EnsurePolicies (first): %v", err)
+	}
+
+	// Get the created policy's ID
+	policies, err := ctrl.ListZonePolicies(context.Background(), testSite)
+	if err != nil {
+		t.Fatalf("ListZonePolicies: %v", err)
+	}
+	if len(policies) == 0 {
+		t.Fatal("no policies created")
+	}
+	policyID := policies[0].ID
+
+	// Simulate a policy being corrupted (missing TML ID)
+	// This simulates a policy that was created before TML enforcement was added
+	corruptedPolicy := controller.ZonePolicy{
+		ID:                     policyID,
+		Name:                   policies[0].Name,
+		Enabled:                true,
+		Action:                 "BLOCK",
+		Description:            policies[0].Description,
+		SrcZone:                policies[0].SrcZone,
+		DstZone:                policies[0].DstZone,
+		IPVersion:              policies[0].IPVersion,
+		TrafficMatchingListIDs: []string{}, // Missing TML - this is the bug we're testing
+		ConnectionStateFilter:  nil,
+		LoggingEnabled:         policies[0].LoggingEnabled,
+	}
+	ctrl.SetPolicies(testSite, []controller.ZonePolicy{corruptedPolicy})
+
+	// Second call - should detect missing TML and call UpdateZonePolicy
+	if err := zm.EnsurePolicies(context.Background(), testSite, v4, nil); err != nil {
+		t.Fatalf("EnsurePolicies (second): %v", err)
+	}
+
+	// Verify UpdateZonePolicy was called to fix the policy
+	if got := ctrl.Calls("UpdateZonePolicy"); got != 1 {
+		t.Errorf("UpdateZonePolicy calls: got %d, want 1 (policy should be updated)", got)
+	}
+
+	// Verify the updated policy has the correct TML ID
+	policies, err = ctrl.ListZonePolicies(context.Background(), testSite)
+	if err != nil {
+		t.Fatalf("ListZonePolicies: %v", err)
+	}
+	if len(policies) != 1 {
+		t.Fatalf("expected 1 policy, got %d", len(policies))
+	}
+	if len(policies[0].TrafficMatchingListIDs) != 1 {
+		t.Errorf("updated policy: len(TrafficMatchingListIDs) = %d, want 1",
+			len(policies[0].TrafficMatchingListIDs))
+	}
+	if policies[0].TrafficMatchingListIDs[0] == "" {
+		t.Error("updated policy: TrafficMatchingListIDs[0] is empty, want non-empty TML ID")
+	}
+}
