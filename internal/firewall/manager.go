@@ -123,8 +123,11 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		for _, orphan := range v4.TakeOrphanedGroups() {
 			m.log.Info().Str("site", site).Str("group_name", orphan.Name).Str("group_id", orphan.UnifiID).
 				Msg("deleting orphaned placeholder-only group")
+			// Best-effort cleanup of any policies/rules that reference this group.
+			// This handles migration from pre-lazy-creation code where rules were created eagerly.
+			m.deleteOrphanedReferencingObjects(ctx, site, mode, orphan.UnifiID)
 			// Orphaned groups were never adopted into our memory management, so they have no policies/rules created by us.
-			// Simply delete the group object.
+			// Delete the group object.
 			if err := v4.DeleteShardObject(ctx, orphan.UnifiID); err != nil {
 				m.log.Warn().Err(err).Str("group_id", orphan.UnifiID).Msg("failed to delete orphaned group (will continue)")
 			}
@@ -139,6 +142,20 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 				m.cfg.APIShardDelay, m.flushSem, m.cfg.DryRun, mode)
 			if err := v6.EnsureShards(ctx); err != nil {
 				return fmt.Errorf("ensure v6 shards for site %s: %w", site, err)
+			}
+
+			// Clean up placeholder-only (orphaned) groups found in UniFi
+			for _, orphan := range v6.TakeOrphanedGroups() {
+				m.log.Info().Str("site", site).Str("group_name", orphan.Name).Str("group_id", orphan.UnifiID).
+					Msg("deleting orphaned placeholder-only group")
+				// Best-effort cleanup of any policies/rules that reference this group.
+				// This handles migration from pre-lazy-creation code where rules were created eagerly.
+				m.deleteOrphanedReferencingObjects(ctx, site, mode, orphan.UnifiID)
+				// Orphaned groups were never adopted into our memory management, so they have no policies/rules created by us.
+				// Delete the group object.
+				if err := v6.DeleteShardObject(ctx, orphan.UnifiID); err != nil {
+					m.log.Warn().Err(err).Str("group_id", orphan.UnifiID).Msg("failed to delete orphaned group (will continue)")
+				}
 			}
 			m.mu.Lock()
 			m.v6Mgrs[site] = v6
@@ -510,6 +527,58 @@ func (m *managerImpl) pruneEmptyTailShards(ctx context.Context, site string, v4,
 
 			m.log.Info().Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
 				Msg("pruned empty shard and its firewall rule/policy")
+		}
+	}
+}
+
+// deleteOrphanedReferencingObjects performs best-effort cleanup of any policies/rules that reference
+// an orphaned group. This handles migration from pre-lazy-creation code where rules were created eagerly.
+// Errors are logged as warnings and do not cause the overall orphan cleanup to fail.
+func (m *managerImpl) deleteOrphanedReferencingObjects(ctx context.Context, site, mode, groupID string) {
+	switch mode {
+	case "legacy":
+		rules, err := m.ctrl.ListFirewallRules(ctx, site)
+		if err != nil {
+			m.log.Warn().Err(err).Str("site", site).Str("group_id", groupID).
+				Msg("failed to list firewall rules for orphan cleanup (skipping)")
+			return
+		}
+		for _, rule := range rules {
+			// Check if this rule references the orphaned group
+			for _, ruleGroupID := range rule.SrcFirewallGroupIDs {
+				if ruleGroupID == groupID {
+					if err := m.ctrl.DeleteFirewallRule(ctx, site, rule.ID); err != nil {
+						m.log.Warn().Err(err).Str("site", site).Str("rule_id", rule.ID).Str("group_id", groupID).
+							Msg("failed to delete orphaned firewall rule (will continue)")
+					} else {
+						m.log.Info().Str("site", site).Str("rule_id", rule.ID).Str("group_id", groupID).
+							Msg("deleted firewall rule referencing orphaned group")
+					}
+					break
+				}
+			}
+		}
+	case "zone":
+		policies, err := m.ctrl.ListZonePolicies(ctx, site)
+		if err != nil {
+			m.log.Warn().Err(err).Str("site", site).Str("group_id", groupID).
+				Msg("failed to list zone policies for orphan cleanup (skipping)")
+			return
+		}
+		for _, policy := range policies {
+			// Check if this policy references the orphaned group
+			for _, policyGroupID := range policy.TrafficMatchingListIDs {
+				if policyGroupID == groupID {
+					if err := m.ctrl.DeleteZonePolicy(ctx, site, policy.ID); err != nil {
+						m.log.Warn().Err(err).Str("site", site).Str("policy_id", policy.ID).Str("group_id", groupID).
+							Msg("failed to delete orphaned zone policy (will continue)")
+					} else {
+						m.log.Info().Str("site", site).Str("policy_id", policy.ID).Str("group_id", groupID).
+							Msg("deleted zone policy referencing orphaned group")
+					}
+					break
+				}
+			}
 		}
 	}
 }
