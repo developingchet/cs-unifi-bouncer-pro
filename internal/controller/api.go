@@ -75,6 +75,13 @@ type apiTMLV1 struct {
 	Items []apiTMLItemV1 `json:"items"`
 }
 
+// apiTMLV1Update is the wire type for TML PUT requests (excludes id field per UniFi API).
+type apiTMLV1Update struct {
+	Type  string         `json:"type"`  // "IPV4_ADDRESSES", "IPV6_ADDRESSES", "PORTS"
+	Name  string         `json:"name"`
+	Items []apiTMLItemV1 `json:"items"`
+}
+
 // Integration v1 zone policy wire types.
 type apiV1PolicyAction struct {
 	Type               string `json:"type"`                         // "BLOCK", "ALLOW", "REJECT"
@@ -508,7 +515,7 @@ func createTML(ctx context.Context, c *unifiClient, siteID string, list TrafficM
 func updateTML(ctx context.Context, c *unifiClient, siteID string, list TrafficMatchingList) error {
 	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/traffic-matching-lists/%s",
 		c.cfg.BaseURL, siteID, list.ID)
-	return doPUT(ctx, c, endpointURL, "update-tml", tmlToWire(list))
+	return doPUT(ctx, c, endpointURL, "update-tml", tmlToWireUpdate(list))
 }
 
 func deleteTML(ctx context.Context, c *unifiClient, siteID, id string) error {
@@ -539,6 +546,30 @@ func tmlToWire(list TrafficMatchingList) apiTMLV1 {
 		}
 	}
 	return apiTMLV1{ID: list.ID, Type: tmlType, Name: list.Name, Items: items}
+}
+
+func tmlToWireUpdate(list TrafficMatchingList) apiTMLV1Update {
+	items := make([]apiTMLItemV1, 0, len(list.Items))
+	for _, item := range list.Items {
+		t := item.Type
+		if t == "" {
+			// Fallback to inference if Type is not set
+			t = "IP_ADDRESS"
+			if strings.Contains(item.Value, "/") {
+				t = "SUBNET"
+			}
+		}
+		items = append(items, apiTMLItemV1{Type: t, Value: item.Value})
+	}
+	tmlType := list.Type
+	if tmlType == "" {
+		if list.GroupType == "ipv6-address-group" {
+			tmlType = "IPV6_ADDRESSES"
+		} else {
+			tmlType = "IPV4_ADDRESSES"
+		}
+	}
+	return apiTMLV1Update{Type: tmlType, Name: list.Name, Items: items}
 }
 
 func tmlFromWire(t apiTMLV1) TrafficMatchingList {
