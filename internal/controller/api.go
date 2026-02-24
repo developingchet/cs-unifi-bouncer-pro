@@ -639,16 +639,17 @@ func v1PolicyToModel(p apiV1Policy) ZonePolicy {
 		ipVersion = "BOTH"
 	}
 	return ZonePolicy{
-		ID:                    p.ID,
-		Name:                  p.Name,
-		Description:           p.Description,
-		Enabled:               p.Enabled,
-		Action:                p.Action.Type,
-		SrcZone:               p.Source.ZoneID,
-		DstZone:               p.Destination.ZoneID,
-		IPVersion:             ipVersion,
-		ConnectionStateFilter: p.ConnectionStateFilter,
-		LoggingEnabled:        p.LoggingEnabled,
+		ID:                     p.ID,
+		Name:                   p.Name,
+		Description:            p.Description,
+		Enabled:                p.Enabled,
+		Action:                 p.Action.Type,
+		AllowReturnTraffic:     p.Action.AllowReturnTraffic,
+		SrcZone:                p.Source.ZoneID,
+		DstZone:                p.Destination.ZoneID,
+		IPVersion:              ipVersion,
+		ConnectionStateFilter:  p.ConnectionStateFilter,
+		LoggingEnabled:         p.LoggingEnabled,
 		TrafficMatchingListIDs: tmlIDs,
 	}
 }
@@ -677,7 +678,7 @@ func modelToV1Policy(p ZonePolicy) apiV1Policy {
 		Enabled:               p.Enabled,
 		Name:                  p.Name,
 		Description:           p.Description,
-		Action:                apiV1PolicyAction{Type: p.Action},
+		Action:                apiV1PolicyAction{Type: p.Action, AllowReturnTraffic: p.AllowReturnTraffic},
 		Source:                src,
 		Destination:           apiV1PolicyDst{ZoneID: p.DstZone},
 		IPProtocolScope:       apiV1IPScope{IPVersion: ipVersion},

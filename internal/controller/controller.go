@@ -33,7 +33,8 @@ type ZonePolicy struct {
 	ID                     string
 	Name                   string
 	Enabled                bool
-	Action                 string // "BLOCK"
+	Action                 string // "BLOCK", "ALLOW", "REJECT"
+	AllowReturnTraffic     bool   // only valid for ALLOW action
 	Description            string
 	SrcZone                string
 	DstZone                string

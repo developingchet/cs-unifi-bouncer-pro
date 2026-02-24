@@ -290,6 +290,15 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 		zoneMap[pair.Dst] = dstZoneID
 	}
 
+	existingPolicies, err := zm.ctrl.ListZonePolicies(ctx, site)
+	if err != nil {
+		return fmt.Errorf("list policies for shard %d: %w", shardIdx, err)
+	}
+	existingByUnifiID := make(map[string]bool, len(existingPolicies))
+	for _, p := range existingPolicies {
+		existingByUnifiID[p.ID] = true
+	}
+
 	for _, pair := range zm.cfg.ZonePairs {
 		policyName, err := zm.namer.PolicyName(NameData{
 			Family:  family,
@@ -307,23 +316,9 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 			return fmt.Errorf("lookup policy %s: %w", policyName, lookupErr)
 		}
 
-		if existing != nil && existing.UnifiID != "" {
-			// Verify it still exists in the API
-			policies, apiErr := zm.ctrl.ListZonePolicies(ctx, site)
-			if apiErr != nil {
-				return apiErr
-			}
-			found := false
-			for _, p := range policies {
-				if p.ID == existing.UnifiID {
-					found = true
-					break
-				}
-			}
-			if found {
-				zm.log.Debug().Str("policy", policyName).Msg("zone policy already exists for new shard")
-				continue
-			}
+		if existing != nil && existing.UnifiID != "" && existingByUnifiID[existing.UnifiID] {
+			zm.log.Debug().Str("policy", policyName).Msg("zone policy already exists for new shard")
+			continue
 		}
 
 		srcZoneID := zoneMap[pair.Src]

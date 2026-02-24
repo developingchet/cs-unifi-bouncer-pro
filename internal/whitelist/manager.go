@@ -142,18 +142,20 @@ func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZoneP
 			}
 			p.TrafficMatchingListIDs = []string{tmlID}
 			p.ConnectionStateFilter = nil
+			p.AllowReturnTraffic = true
 			return m.ctrl.UpdateZonePolicy(ctx, site, p)
 		}
 	}
 
 	_, err = m.ctrl.CreateZonePolicy(ctx, site, controller.ZonePolicy{
-		Name:        policyName,
-		Enabled:     true,
-		Action:      "ALLOW",
-		SrcZone:     pair.SrcZoneID,
-		DstZone:     pair.DstZoneID,
-		IPVersion:   ipVersion,
-		Description: "Managed by cs-unifi-bouncer-pro. Cloudflare whitelist. Do not edit manually.",
+		Name:               policyName,
+		Enabled:            true,
+		Action:             "ALLOW",
+		AllowReturnTraffic: true,
+		SrcZone:            pair.SrcZoneID,
+		DstZone:            pair.DstZoneID,
+		IPVersion:          ipVersion,
+		Description:        "Managed by cs-unifi-bouncer-pro. Cloudflare whitelist. Do not edit manually.",
 		TrafficMatchingListIDs: []string{tmlID},
 		ConnectionStateFilter:  nil, // All
 	})
