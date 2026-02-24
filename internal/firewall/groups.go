@@ -379,6 +379,7 @@ func (sm *ShardManager) AddIP(ctx context.Context, ip, ipFamily string) error {
 	}
 
 	nextIndex := len(family.Shards)
+	sm.mu.Unlock()
 
 	// Allocate a Pending shard in-memory. It will be created in UniFi on first flush.
 	shard := sm.allocShard(nextIndex)
@@ -675,9 +676,18 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 			sm.log.Warn().Err(err).Str("shard", snap.name).Msg("failed to update bbolt group cache")
 		}
 
-		// Call activation callback after state transition and bbolt write
+		// Capture callback, fire after loop with no lock held
+		var pendingCB func()
 		if wasCreating && sm.onActivated != nil {
-			sm.onActivated(ctx, snap.shard.Index, snap.shard.ID)
+			cb := sm.onActivated
+			idx := snap.shard.Index
+			id := snap.shard.ID
+			pendingCB = func() { cb(ctx, idx, id) }
+		}
+
+		// Fire callback outside loop with no lock held
+		if pendingCB != nil {
+			pendingCB()
 		}
 	}
 
@@ -966,11 +976,19 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 			Msgf("[DRY-RUN] would sync %s", sm.shardObjectKind())
 		shard.IPs.CommitClean()
 		// In dry-run, transition Pending to Active for consistency
+		var pendingCB func()
 		if shard.State == ShardStatePending {
 			shard.State = ShardStateActive
 			if sm.onActivated != nil {
-				sm.onActivated(ctx, shard.Index, shard.ID)
+				cb := sm.onActivated
+				idx := shard.Index
+				id := shard.ID
+				pendingCB = func() { cb(ctx, idx, id) }
 			}
+		}
+		// Fire callback with no lock held
+		if pendingCB != nil {
+			pendingCB()
 		}
 		return
 	}
@@ -1055,11 +1073,20 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 	}
 
 	// Pending→Active transition: mark as Active and fire activation callback
+	var pendingCB func()
 	if wasCreating {
 		shard.State = ShardStateActive
 		if sm.onActivated != nil {
-			sm.onActivated(ctx, shard.Index, shard.ID)
+			cb := sm.onActivated
+			idx := shard.Index
+			id := shard.ID
+			pendingCB = func() { cb(ctx, idx, id) }
 		}
+	}
+
+	// Fire callback with no lock held
+	if pendingCB != nil {
+		pendingCB()
 	}
 
 	metrics.ShardSyncTotal.WithLabelValues(shard.Family, shardLabel, sm.site, "ok").Inc()
