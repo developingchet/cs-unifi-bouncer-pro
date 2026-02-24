@@ -17,6 +17,25 @@ import (
 // UniFi integration v1 supports up to 10,000 items per TML.
 const ShardLimit = 10_000
 
+// TMLPlaceholderV4 and TMLPlaceholderV6 are RFC 5737 / RFC 3849 documentation
+// addresses used as placeholder items when creating an empty TML shard.
+// The UniFi API rejects empty items arrays on both create and update (HTTP 400).
+// These addresses are in reserved documentation ranges and will never match real traffic.
+const (
+	TMLPlaceholderV4 = "192.0.2.0/32"   // RFC 5737 TEST-NET-1
+	TMLPlaceholderV6 = "2001:db8::/128" // RFC 3849 documentation prefix
+)
+
+// tmlPlaceholderItems returns a slice with the appropriate placeholder IP
+// for the given IPv6 flag. This ensures the TML always has at least one item.
+func tmlPlaceholderItems(ipv6 bool) []controller.TrafficMatchingListItem {
+	val := TMLPlaceholderV4
+	if ipv6 {
+		val = TMLPlaceholderV6
+	}
+	return []controller.TrafficMatchingListItem{{Value: val}}
+}
+
 // Shard represents a single Traffic Matching List shard in zone mode.
 // In legacy mode, it represents a firewall group shard.
 type Shard struct {
@@ -199,6 +218,9 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 			if tml, exists := apiTMLByName[name]; exists {
 				members := make([]string, 0, len(tml.Items))
 				for _, item := range tml.Items {
+					if item.Value == TMLPlaceholderV4 || item.Value == TMLPlaceholderV6 {
+						continue // strip creation placeholder
+					}
 					members = append(members, item.Value)
 				}
 				shard = &Shard{ID: tml.ID, Name: tml.Name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet()}
@@ -433,6 +455,16 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 		}
 		sort.Strings(members)
 
+		// UniFi API rejects empty items arrays on both create and update (HTTP 400).
+		// Substitute the RFC 5737/3849 placeholder when no real bans exist.
+		if len(members) == 0 {
+			if sm.ipv6 {
+				members = []string{TMLPlaceholderV6}
+			} else {
+				members = []string{TMLPlaceholderV4}
+			}
+		}
+
 		name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: family.Shards[i].Index, Site: sm.site})
 		if err != nil {
 			sm.mu.Unlock()
@@ -649,7 +681,7 @@ func (sm *ShardManager) createShard(ctx context.Context, idx int) (*Shard, error
 			Name:      name,
 			Type:      tmlType,
 			GroupType: groupType,
-			Items:     []controller.TrafficMatchingListItem{},
+			Items:     tmlPlaceholderItems(sm.ipv6), // API requires non-empty items on create
 		})
 		if err != nil {
 			return nil, fmt.Errorf("create shard %s: %w", name, err)
@@ -776,6 +808,16 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 	}
 
 	sort.Strings(ips)
+
+	// UniFi API rejects empty items arrays on both create and update (HTTP 400).
+	// Substitute the RFC 5737/3849 placeholder when no real bans exist.
+	if len(ips) == 0 {
+		if sm.ipv6 {
+			ips = []string{TMLPlaceholderV6}
+		} else {
+			ips = []string{TMLPlaceholderV4}
+		}
+	}
 
 	groupType := "address-group"
 	if sm.ipv6 {

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -196,6 +197,10 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 	}
 
 	switch resp.StatusCode {
+	case http.StatusBadRequest:
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("bad request: %s", string(body))
 	case http.StatusUnauthorized:
 		_ = resp.Body.Close()
 		return nil, &ErrUnauthorized{Msg: "HTTP 401"}

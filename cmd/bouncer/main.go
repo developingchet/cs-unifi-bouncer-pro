@@ -134,9 +134,9 @@ func runDaemon() error {
 	var cfZonePairs []whitelist.ZonePairConfig
 	if cfg.CloudflareWhitelistEnabled {
 		for _, raw := range cfg.CloudflareZonePairs {
-			parts := strings.SplitN(raw, ":", 2)
+			parts := strings.SplitN(raw, "->", 2)
 			if len(parts) != 2 {
-				return fmt.Errorf("invalid CLOUDFLARE_ZONE_PAIRS entry %q: expected SrcName:DstName", raw)
+				return fmt.Errorf("invalid CLOUDFLARE_ZONE_PAIRS entry %q: expected SrcName->DstName", raw)
 			}
 			srcName, dstName := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 
