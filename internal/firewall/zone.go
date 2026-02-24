@@ -3,6 +3,7 @@ package firewall
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
@@ -27,6 +28,9 @@ type ZoneManager struct {
 	ctrl  controller.Controller
 	store storage.Store
 	log   zerolog.Logger
+
+	mu        sync.RWMutex
+	zoneCache map[string]map[string]string // site -> zone name -> zone ID
 }
 
 // NewZoneManager constructs a ZoneManager.
@@ -63,24 +67,46 @@ func (zm *ZoneManager) Bootstrap(ctx context.Context, sites []string) error {
 					Msg("discovered zone")
 			}
 		}
+
+		// Populate zone cache for this site.
+		siteZones := make(map[string]string)
+		for _, pair := range zm.cfg.ZonePairs {
+			for _, name := range []string{pair.Src, pair.Dst} {
+				if _, ok := siteZones[name]; ok {
+					continue
+				}
+				id, err := zm.ctrl.GetZoneID(ctx, site, name)
+				if err != nil {
+					return fmt.Errorf("cache zone %q for site %q: %w", name, site, err)
+				}
+				siteZones[name] = id
+			}
+		}
+		zm.mu.Lock()
+		if zm.zoneCache == nil {
+			zm.zoneCache = make(map[string]map[string]string)
+		}
+		zm.zoneCache[site] = siteZones
+		zm.mu.Unlock()
 	}
 	return nil
 }
 
 // EnsurePolicies idempotently creates zone policies for each shard and zone pair.
 func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards, v6Shards *ShardManager) error {
-	zoneMap := make(map[string]string)
+	zm.mu.RLock()
+	zoneMap, ok := zm.zoneCache[site]
+	zm.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("zone cache not populated for site %q — was Bootstrap called?", site)
+	}
 	for _, pair := range zm.cfg.ZonePairs {
-		srcZoneID, err := zm.ctrl.GetZoneID(ctx, site, pair.Src)
-		if err != nil {
-			return fmt.Errorf("resolve source zone %q: %w", pair.Src, err)
+		if _, ok := zoneMap[pair.Src]; !ok {
+			return fmt.Errorf("zone %q not in cache for site %q", pair.Src, site)
 		}
-		dstZoneID, err := zm.ctrl.GetZoneID(ctx, site, pair.Dst)
-		if err != nil {
-			return fmt.Errorf("resolve destination zone %q: %w", pair.Dst, err)
+		if _, ok := zoneMap[pair.Dst]; !ok {
+			return fmt.Errorf("zone %q not in cache for site %q", pair.Dst, site)
 		}
-		zoneMap[pair.Src] = srcZoneID
-		zoneMap[pair.Dst] = dstZoneID
 	}
 
 	// Fetch ALL existing policies once for all zone pairs (avoids one GET per pair).
@@ -106,7 +132,7 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	}
 
 	if zm.cfg.PolicyReorder {
-		if err := zm.reorderPolicies(ctx, site, zoneMap); err != nil {
+		if err := zm.reorderPolicies(ctx, site, zoneMap, existingPolicies); err != nil {
 			zm.log.Warn().Err(err).Str("site", site).Msg("policy reorder failed (non-fatal)")
 		}
 	}
@@ -220,12 +246,7 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 }
 
 // reorderPolicies places bouncer policies before system-defined ones for each zone pair.
-func (zm *ZoneManager) reorderPolicies(ctx context.Context, site string, zoneMap map[string]string) error {
-	policies, err := zm.ctrl.ListZonePolicies(ctx, site)
-	if err != nil {
-		return fmt.Errorf("list zone policies for reorder: %w", err)
-	}
-
+func (zm *ZoneManager) reorderPolicies(ctx context.Context, site string, zoneMap map[string]string, policies []controller.ZonePolicy) error {
 	// Build a prefix to identify our bouncer policies (check all namer-derived names).
 	// We group by zone pair and collect matching policy IDs in order.
 	for _, pair := range zm.cfg.ZonePairs {
@@ -276,18 +297,19 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 		ipVersion = "IPV6"
 	}
 
-	zoneMap := make(map[string]string)
+	zm.mu.RLock()
+	zoneMap, ok := zm.zoneCache[site]
+	zm.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("zone cache not populated for site %q — was Bootstrap called?", site)
+	}
 	for _, pair := range zm.cfg.ZonePairs {
-		srcZoneID, err := zm.ctrl.GetZoneID(ctx, site, pair.Src)
-		if err != nil {
-			return fmt.Errorf("resolve source zone %q: %w", pair.Src, err)
+		if _, ok := zoneMap[pair.Src]; !ok {
+			return fmt.Errorf("zone %q not in cache for site %q", pair.Src, site)
 		}
-		dstZoneID, err := zm.ctrl.GetZoneID(ctx, site, pair.Dst)
-		if err != nil {
-			return fmt.Errorf("resolve destination zone %q: %w", pair.Dst, err)
+		if _, ok := zoneMap[pair.Dst]; !ok {
+			return fmt.Errorf("zone %q not in cache for site %q", pair.Dst, site)
 		}
-		zoneMap[pair.Src] = srcZoneID
-		zoneMap[pair.Dst] = dstZoneID
 	}
 
 	existingPolicies, err := zm.ctrl.ListZonePolicies(ctx, site)

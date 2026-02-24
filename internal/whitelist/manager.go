@@ -66,12 +66,17 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 		return fmt.Errorf("ensure v6 TML: %w", err)
 	}
 
+	existingPolicies, err := m.ctrl.ListZonePolicies(ctx, site)
+	if err != nil {
+		return fmt.Errorf("list zone policies for site %s: %w", site, err)
+	}
+
 	// Ensure ALLOW policies for each zone pair.
 	for _, pair := range zonePairs {
-		if err := m.ensureAllowPolicy(ctx, site, pair, tmlV4.ID, "IPV4", "crowdsec-whitelist-cloudflare-External-"+pair.DstName+"-v4"); err != nil {
+		if err := m.ensureAllowPolicy(ctx, site, pair, tmlV4.ID, "IPV4", "crowdsec-whitelist-cloudflare-External-"+pair.DstName+"-v4", existingPolicies); err != nil {
 			m.log.Error().Err(err).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure v4 allow policy failed")
 		}
-		if err := m.ensureAllowPolicy(ctx, site, pair, tmlV6.ID, "IPV6", "crowdsec-whitelist-cloudflare-External-"+pair.DstName+"-v6"); err != nil {
+		if err := m.ensureAllowPolicy(ctx, site, pair, tmlV6.ID, "IPV6", "crowdsec-whitelist-cloudflare-External-"+pair.DstName+"-v6", existingPolicies); err != nil {
 			m.log.Error().Err(err).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure v6 allow policy failed")
 		}
 	}
@@ -123,18 +128,13 @@ func (m *Manager) ensureTML(ctx context.Context, site, name, tmlType string, cid
 	return *found, nil
 }
 
-func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZonePairConfig, tmlID, ipVersion, policyName string) error {
+func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZonePairConfig, tmlID, ipVersion, policyName string, existingPolicies []controller.ZonePolicy) error {
 	// Guard against empty TML ID - Cloudflare ALLOW policies MUST have a source filter
 	if tmlID == "" {
 		return fmt.Errorf("Cloudflare TML ID is empty for policy %s in site %s — cannot create ALLOW policy without source filter", policyName, site)
 	}
 
-	policies, err := m.ctrl.ListZonePolicies(ctx, site)
-	if err != nil {
-		return err
-	}
-
-	for _, p := range policies {
+	for _, p := range existingPolicies {
 		if p.Name == policyName {
 			// Already exists; check if TML ID matches.
 			if len(p.TrafficMatchingListIDs) > 0 && p.TrafficMatchingListIDs[0] == tmlID {
@@ -147,7 +147,7 @@ func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZoneP
 		}
 	}
 
-	_, err = m.ctrl.CreateZonePolicy(ctx, site, controller.ZonePolicy{
+	_, err := m.ctrl.CreateZonePolicy(ctx, site, controller.ZonePolicy{
 		Name:               policyName,
 		Enabled:            true,
 		Action:             "ALLOW",

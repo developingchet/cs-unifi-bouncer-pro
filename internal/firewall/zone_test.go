@@ -88,6 +88,9 @@ func TestZoneManager_EnsurePolicies_Create(t *testing.T) {
 	v4 := ensuredZoneV4Shard(t, ctrl, store)
 	zm := newTestZoneManager(ctrl, store, namer)
 
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
 	if err := zm.EnsurePolicies(context.Background(), testSite, v4, nil); err != nil {
 		t.Fatalf("EnsurePolicies: %v", err)
 	}
@@ -109,6 +112,9 @@ func TestZoneManager_EnsurePolicies_Idempotent(t *testing.T) {
 	v4 := ensuredZoneV4Shard(t, ctrl, store)
 	zm := newTestZoneManager(ctrl, store, namer)
 
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
 	// First call — creates the policy.
 	if err := zm.EnsurePolicies(context.Background(), testSite, v4, nil); err != nil {
 		t.Fatalf("EnsurePolicies (first): %v", err)
@@ -144,6 +150,9 @@ func TestZoneManager_EnsurePolicies_MultiPair(t *testing.T) {
 		Description: "test",
 	}, namer, ctrl, store, zerolog.Nop())
 
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
 	if err := zm.EnsurePolicies(context.Background(), testSite, v4, nil); err != nil {
 		t.Fatalf("EnsurePolicies: %v", err)
 	}
@@ -165,6 +174,9 @@ func TestZoneManager_EnsurePolicies_IPv6(t *testing.T) {
 	v6 := ensuredZoneV6Shard(t, ctrl, store)
 	zm := newTestZoneManager(ctrl, store, namer)
 
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
 	if err := zm.EnsurePolicies(context.Background(), testSite, v4, v6); err != nil {
 		t.Fatalf("EnsurePolicies: %v", err)
 	}
@@ -201,6 +213,9 @@ func TestZoneManager_EnsurePolicies_RecreatesDeleted(t *testing.T) {
 	v4 := ensuredZoneV4Shard(t, ctrl, store)
 	zm := newTestZoneManager(ctrl, store, namer)
 
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
 	// First call — creates the policy.
 	if err := zm.EnsurePolicies(context.Background(), testSite, v4, nil); err != nil {
 		t.Fatalf("EnsurePolicies (first): %v", err)
@@ -231,6 +246,9 @@ func TestZoneManager_EnsurePoliciesForShard_Create(t *testing.T) {
 	v4 := ensuredZoneV4Shard(t, ctrl, store)
 	zm := newTestZoneManager(ctrl, store, namer)
 
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
 	groupIDs := v4.GroupIDs()
 	if len(groupIDs) == 0 {
 		t.Fatal("expected at least one shard")
@@ -256,6 +274,9 @@ func TestZoneManager_EnsurePoliciesForShard_Idempotent(t *testing.T) {
 	v4 := ensuredZoneV4Shard(t, ctrl, store)
 	zm := newTestZoneManager(ctrl, store, namer)
 
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
 	groupIDs := v4.GroupIDs()
 	if err := zm.EnsurePoliciesForShard(context.Background(), testSite, groupIDs[0], false, 0); err != nil {
 		t.Fatalf("EnsurePoliciesForShard (first): %v", err)
@@ -281,6 +302,9 @@ func TestZoneManager_DeletePoliciesForShard(t *testing.T) {
 	v4 := ensuredZoneV4Shard(t, ctrl, store)
 	zm := newTestZoneManager(ctrl, store, namer)
 
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
 	groupIDs := v4.GroupIDs()
 	// Create first
 	if err := zm.EnsurePoliciesForShard(context.Background(), testSite, groupIDs[0], false, 0); err != nil {
@@ -333,6 +357,9 @@ func TestZoneManager_EnsurePolicies_ListsOnce(t *testing.T) {
 		Description: "test",
 	}, namer, ctrl, store, zerolog.Nop())
 
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
 	listsBefore := ctrl.Calls("ListZonePolicies")
 
 	if err := zm.EnsurePolicies(context.Background(), testSite, v4, v6); err != nil {
@@ -387,6 +414,9 @@ func TestZoneManager_EnsurePolicies_AlwaysHasTMLSourceFilter(t *testing.T) {
 	v4 := ensuredZoneV4Shard(t, ctrl, store)
 	zm := newTestZoneManager(ctrl, store, namer)
 
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
 	if err := zm.EnsurePolicies(context.Background(), testSite, v4, nil); err != nil {
 		t.Fatalf("EnsurePolicies: %v", err)
 	}
@@ -424,6 +454,9 @@ func TestZoneManager_EnsurePolicies_ReconcileFixesMissingTML(t *testing.T) {
 	v4 := ensuredZoneV4Shard(t, ctrl, store)
 	zm := newTestZoneManager(ctrl, store, namer)
 
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
 	// First call - creates policies with correct TML
 	if err := zm.EnsurePolicies(context.Background(), testSite, v4, nil); err != nil {
 		t.Fatalf("EnsurePolicies (first): %v", err)
