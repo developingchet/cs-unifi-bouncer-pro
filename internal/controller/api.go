@@ -520,9 +520,13 @@ func deleteTML(ctx context.Context, c *unifiClient, siteID, id string) error {
 func tmlToWire(list TrafficMatchingList) apiTMLV1 {
 	items := make([]apiTMLItemV1, 0, len(list.Items))
 	for _, item := range list.Items {
-		t := "IP_ADDRESS"
-		if strings.Contains(item.Value, "/") {
-			t = "SUBNET"
+		t := item.Type
+		if t == "" {
+			// Fallback to inference if Type is not set
+			t = "IP_ADDRESS"
+			if strings.Contains(item.Value, "/") {
+				t = "SUBNET"
+			}
 		}
 		items = append(items, apiTMLItemV1{Type: t, Value: item.Value})
 	}
@@ -541,7 +545,7 @@ func tmlFromWire(t apiTMLV1) TrafficMatchingList {
 	items := make([]TrafficMatchingListItem, 0, len(t.Items))
 	for _, item := range t.Items {
 		val := fmt.Sprintf("%v", item.Value)
-		items = append(items, TrafficMatchingListItem{Value: val})
+		items = append(items, TrafficMatchingListItem{Type: item.Type, Value: val})
 	}
 	return TrafficMatchingList{ID: t.ID, Type: t.Type, Name: t.Name, Items: items}
 }

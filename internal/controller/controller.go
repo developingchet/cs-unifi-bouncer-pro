@@ -62,6 +62,7 @@ type TrafficMatchingList struct {
 
 // TrafficMatchingListItem is one entry in a TrafficMatchingList.
 type TrafficMatchingListItem struct {
+	Type  string `json:"-"` // "IP_ADDRESS", "SUBNET", "PORT_NUMBER"; omitted from JSON to match wire format
 	Value string
 }
 

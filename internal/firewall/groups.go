@@ -22,8 +22,8 @@ const ShardLimit = 10_000
 // The UniFi API rejects empty items arrays on both create and update (HTTP 400).
 // These addresses are in reserved documentation ranges and will never match real traffic.
 const (
-	TMLPlaceholderV4 = "192.0.2.0/32"   // RFC 5737 TEST-NET-1
-	TMLPlaceholderV6 = "2001:db8::/128" // RFC 3849 documentation prefix
+	TMLPlaceholderV4 = "192.0.2.1"      // RFC 5737 TEST-NET-1 (plain IP, not CIDR)
+	TMLPlaceholderV6 = "2001:db8::1"    // RFC 3849 (plain IP, not CIDR)
 )
 
 // tmlPlaceholderItems returns a slice with the appropriate placeholder IP
@@ -33,7 +33,7 @@ func tmlPlaceholderItems(ipv6 bool) []controller.TrafficMatchingListItem {
 	if ipv6 {
 		val = TMLPlaceholderV6
 	}
-	return []controller.TrafficMatchingListItem{{Value: val}}
+	return []controller.TrafficMatchingListItem{{Type: "IP_ADDRESS", Value: val}}
 }
 
 // Shard represents a single Traffic Matching List shard in zone mode.
@@ -527,7 +527,7 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 		if sm.mode == "zone" {
 			items := make([]controller.TrafficMatchingListItem, 0, len(snap.members))
 			for _, m := range snap.members {
-				items = append(items, controller.TrafficMatchingListItem{Value: m})
+				items = append(items, controller.TrafficMatchingListItem{Type: "IP_ADDRESS", Value: m})
 			}
 			putErr = sm.ctrl.UpdateTrafficMatchingList(ctx, sm.site, controller.TrafficMatchingList{
 				ID:        snap.unifiID,
@@ -828,7 +828,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 	if sm.mode == "zone" {
 		items := make([]controller.TrafficMatchingListItem, 0, len(ips))
 		for _, ip := range ips {
-			items = append(items, controller.TrafficMatchingListItem{Value: ip})
+			items = append(items, controller.TrafficMatchingListItem{Type: "IP_ADDRESS", Value: ip})
 		}
 		putErr = sm.ctrl.UpdateTrafficMatchingList(ctx, sm.site, controller.TrafficMatchingList{
 			ID:        shard.ID,

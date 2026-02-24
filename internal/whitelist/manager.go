@@ -94,7 +94,7 @@ func (m *Manager) ensureTML(ctx context.Context, site, name, tmlType string, cid
 
 	items := make([]controller.TrafficMatchingListItem, 0, len(cidrs))
 	for _, cidr := range cidrs {
-		items = append(items, controller.TrafficMatchingListItem{Value: cidr})
+		items = append(items, controller.TrafficMatchingListItem{Type: "SUBNET", Value: cidr})
 	}
 
 	if found == nil {
