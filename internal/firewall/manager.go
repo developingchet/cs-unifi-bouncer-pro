@@ -78,17 +78,17 @@ func NewManager(cfg ManagerConfig, ctrl controller.Controller, store storage.Sto
 	zoneMgr := NewZoneManager(cfg.ZoneCfg, namer, ctrl, store, log)
 
 	return &managerImpl{
-		cfg:         cfg,
-		ctrl:        ctrl,
-		store:       store,
-		namer:       namer,
-		log:         log,
-		v4Mgrs:      make(map[string]*ShardManager),
-		v6Mgrs:      make(map[string]*ShardManager),
-		legacyMgr:   legacyMgr,
-		zoneMgr:     zoneMgr,
-		flushSem: make(chan struct{}, conc),
-		siteMode: make(map[string]string),
+		cfg:       cfg,
+		ctrl:      ctrl,
+		store:     store,
+		namer:     namer,
+		log:       log,
+		v4Mgrs:    make(map[string]*ShardManager),
+		v6Mgrs:    make(map[string]*ShardManager),
+		legacyMgr: legacyMgr,
+		zoneMgr:   zoneMgr,
+		flushSem:  make(chan struct{}, conc),
+		siteMode:  make(map[string]string),
 	}
 }
 
@@ -119,21 +119,16 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 			return fmt.Errorf("ensure v4 shards for site %s: %w", site, err)
 		}
 
-	// Clean up placeholder-only (orphaned) groups found in UniFi
-	for _, orphan := range v4.TakeOrphanedGroups() {
-		m.log.Info().Str("site", site).Str("group_name", orphan.Name).Str("group_id", orphan.UnifiID).
-			Msg("deleting orphaned placeholder-only group")
-		// For zone mode, delete policies first; for legacy mode, skip (firewall rules are deleted with the group)
-		if mode == "zone" {
-			if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, false, -1); err != nil {
-				m.log.Warn().Err(err).Str("group_id", orphan.UnifiID).Msg("failed to delete policies for orphaned group (will continue)")
+		// Clean up placeholder-only (orphaned) groups found in UniFi
+		for _, orphan := range v4.TakeOrphanedGroups() {
+			m.log.Info().Str("site", site).Str("group_name", orphan.Name).Str("group_id", orphan.UnifiID).
+				Msg("deleting orphaned placeholder-only group")
+			// Orphaned groups were never adopted into our memory management, so they have no policies/rules created by us.
+			// Simply delete the group object.
+			if err := v4.DeleteShardObject(ctx, orphan.UnifiID); err != nil {
+				m.log.Warn().Err(err).Str("group_id", orphan.UnifiID).Msg("failed to delete orphaned group (will continue)")
 			}
 		}
-		if err := v4.DeleteShardObject(ctx, orphan.UnifiID); err != nil {
-			m.log.Warn().Err(err).Str("group_id", orphan.UnifiID).Msg("failed to delete orphaned group (will continue)")
-		}
-	}
-
 
 		m.mu.Lock()
 		m.v4Mgrs[site] = v4
@@ -153,23 +148,23 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		m.mu.RLock()
 		v4Mgr := m.v4Mgrs[site]
 		v6Mgr := m.v6Mgrs[site]
-			// Set activation callbacks to provision infrastructure when Pending shards become Active
-	v4Mgr.SetActivationCallback(func(ctx context.Context, shardIdx int, groupID string) {
-		if err := m.ensureNewShardInfrastructure(ctx, site, false, shardIdx, v4Mgr); err != nil {
-			m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).Str("group_id", groupID).
-				Msg("failed to provision infrastructure for newly activated v4 shard")
-		}
-	})
-	if m.cfg.EnableIPv6 && v6Mgr != nil {
-		v6Mgr.SetActivationCallback(func(ctx context.Context, shardIdx int, groupID string) {
-			if err := m.ensureNewShardInfrastructure(ctx, site, true, shardIdx, v6Mgr); err != nil {
+		// Set activation callbacks to provision infrastructure when Pending shards become Active
+		v4Mgr.SetActivationCallback(func(ctx context.Context, shardIdx int, groupID string) {
+			if err := m.ensureNewShardInfrastructure(ctx, site, false, shardIdx, v4Mgr); err != nil {
 				m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).Str("group_id", groupID).
-					Msg("failed to provision infrastructure for newly activated v6 shard")
+					Msg("failed to provision infrastructure for newly activated v4 shard")
 			}
 		})
-	}
+		if m.cfg.EnableIPv6 && v6Mgr != nil {
+			v6Mgr.SetActivationCallback(func(ctx context.Context, shardIdx int, groupID string) {
+				if err := m.ensureNewShardInfrastructure(ctx, site, true, shardIdx, v6Mgr); err != nil {
+					m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).Str("group_id", groupID).
+						Msg("failed to provision infrastructure for newly activated v6 shard")
+				}
+			})
+		}
 
-	m.mu.RUnlock()
+		m.mu.RUnlock()
 
 		switch mode {
 		case "legacy":
@@ -468,6 +463,7 @@ func (m *managerImpl) pruneEmptyTailShards(ctx context.Context, site string, v4,
 		if e.sm == nil {
 			continue
 		}
+	pruneLoop:
 		for {
 			unifiID, shardIdx, ok := e.sm.PrunableTail()
 			if !ok {
@@ -481,13 +477,13 @@ func (m *managerImpl) pruneEmptyTailShards(ctx context.Context, site string, v4,
 				if err := m.legacyMgr.DeleteRuleForShard(ctx, site, e.ipv6, shardIdx); err != nil {
 					m.log.Error().Err(err).Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
 						Msg("failed to delete rule for pruned shard; aborting group delete to avoid orphans")
-					break // stop pruning on error to avoid orphaning the group
+					break pruneLoop // stop pruning on error to avoid orphaning the group
 				}
 			case "zone":
 				if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, e.ipv6, shardIdx); err != nil {
 					m.log.Error().Err(err).Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
 						Msg("failed to delete policies for pruned shard; aborting group delete to avoid orphans")
-					break // stop pruning on error to avoid orphaning the group
+					break pruneLoop // stop pruning on error to avoid orphaning the group
 				}
 			}
 

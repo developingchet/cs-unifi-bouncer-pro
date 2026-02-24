@@ -593,16 +593,21 @@ func TestCreateShard_SendsNonEmptyItems(t *testing.T) {
 		t.Errorf("CreateTrafficMatchingList calls after EnsureShards: got %d, want 0", got)
 	}
 
-	// Add an IP to trigger shard creation
+	// Add an IP to trigger shard creation (in Pending state)
 	if _, newIdx, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Add: %v", err)
 	} else if newIdx != 0 {
 		t.Errorf("Add: newIdx = %d, want 0", newIdx)
 	}
 
-	// Verify that CreateTrafficMatchingList was called during Add
+	// FlushDirty triggers the Pending→Active transition, which creates the TML
+	if err := sm.FlushDirty(context.Background()); err != nil {
+		t.Fatalf("FlushDirty: %v", err)
+	}
+
+	// Verify that CreateTrafficMatchingList was called during FlushDirty
 	if got := ctrl.Calls("CreateTrafficMatchingList"); got != 1 {
-		t.Errorf("CreateTrafficMatchingList calls after Add: got %d, want 1", got)
+		t.Errorf("CreateTrafficMatchingList calls after FlushDirty: got %d, want 1", got)
 	}
 
 	// Verify the TML was created with a valid ID
