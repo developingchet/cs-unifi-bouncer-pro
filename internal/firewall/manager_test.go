@@ -194,8 +194,11 @@ func TestApplyBan_Basic(t *testing.T) {
 	if err := mgr.ApplyBan(context.Background(), testSite, "10.0.0.1", false); err != nil {
 		t.Fatalf("ApplyBan: %v", err)
 	}
+	// With lazy creation, the group is created during SyncDirty (Pending→Active).
+	if err := mgr.SyncDirty(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("SyncDirty: %v", err)
+	}
 
-	// Verify the group was created during EnsureInfrastructure.
 	if got := ctrl.Calls("CreateFirewallGroup"); got < 1 {
 		t.Errorf("CreateFirewallGroup calls: got %d, want >= 1", got)
 	}
@@ -289,6 +292,10 @@ func TestReconcile_RemovesExtra(t *testing.T) {
 	if _, _, err := v4.Add(context.Background(), "10.0.0.99"); err != nil {
 		t.Fatalf("direct shard Add: %v", err)
 	}
+	// Flush to create the shard Active in UniFi so Reconcile's sync can update it.
+	if err := v4.FlushDirty(context.Background()); err != nil {
+		t.Fatalf("FlushDirty: %v", err)
+	}
 
 	// Store has no bans, so 10.0.0.99 is extra.
 	result, err := mgr.Reconcile(context.Background(), []string{testSite})
@@ -337,16 +344,22 @@ func TestApplyBan_OverflowProvisionRule(t *testing.T) {
 		t.Fatalf("EnsureInfrastructure: %v", err)
 	}
 
-	// First IP fills shard 0 (rule already created by EnsureInfrastructure)
+	// First IP creates Pending shard 0; flush to make it Active and fire rule creation.
 	if err := mgr.ApplyBan(context.Background(), testSite, "10.0.0.1", false); err != nil {
 		t.Fatalf("ApplyBan (first IP): %v", err)
+	}
+	if err := mgr.SyncDirty(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("SyncDirty (after first ban): %v", err)
 	}
 
 	rulesAfterFirst := ctrl.Calls("CreateFirewallRule")
 
-	// Second IP overflows into shard 1 → new rule must be created
+	// Second IP overflows into shard 1; flush to make it Active → new rule must be created.
 	if err := mgr.ApplyBan(context.Background(), testSite, "10.0.0.2", false); err != nil {
 		t.Fatalf("ApplyBan (overflow IP): %v", err)
+	}
+	if err := mgr.SyncDirty(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("SyncDirty (after overflow ban): %v", err)
 	}
 
 	if got := ctrl.Calls("CreateFirewallRule"); got <= rulesAfterFirst {

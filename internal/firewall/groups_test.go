@@ -158,6 +158,9 @@ func TestAdd_Basic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
+	if err := sm.FlushDirty(context.Background()); err != nil {
+		t.Fatalf("FlushDirty: %v", err)
+	}
 
 	if len(sm.GroupIDs()) != 1 {
 		t.Errorf("GroupIDs len: got %d, want 1", len(sm.GroupIDs()))
@@ -194,8 +197,8 @@ func TestAdd_Idempotent(t *testing.T) {
 }
 
 // TestAdd_NewShardOnOverflow verifies that adding capacity+1 IPs causes a
-// second shard to be created. EnsureShards creates the first shard (1 call),
-// and the overflow IP triggers a second create (total 2 calls).
+// second shard to be created. With lazy creation, both shards are created
+// during FlushDirty (total 2 CreateFirewallGroup calls).
 func TestAdd_NewShardOnOverflow(t *testing.T) {
 	const capacity = 3
 	ctrl := testutil.NewMockController()
@@ -212,6 +215,9 @@ func TestAdd_NewShardOnOverflow(t *testing.T) {
 		if _, _, err := sm.Add(context.Background(), ip); err != nil {
 			t.Fatalf("Add(%s): %v", ip, err)
 		}
+	}
+	if err := sm.FlushDirty(context.Background()); err != nil {
+		t.Fatalf("FlushDirty: %v", err)
 	}
 
 	if got := ctrl.Calls("CreateFirewallGroup"); got != 2 {
@@ -379,6 +385,9 @@ func TestGroupIDs(t *testing.T) {
 			t.Fatalf("Add(%s): %v", ip, err)
 		}
 	}
+	if err := sm.FlushDirty(context.Background()); err != nil {
+		t.Fatalf("FlushDirty: %v", err)
+	}
 
 	ids := sm.GroupIDs()
 	if len(ids) != 2 {
@@ -514,12 +523,16 @@ func TestPrunableTail(t *testing.T) {
 		if err := sm.EnsureShards(context.Background()); err != nil {
 			t.Fatalf("EnsureShards: %v", err)
 		}
-		// Add two IPs to overflow into shard 1, then remove the overflow IP
+		// Add two IPs to overflow into shard 1, flush to make both Active,
+		// then remove the overflow IP leaving shard 1 empty and prunable.
 		if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 			t.Fatalf("Add shard0: %v", err)
 		}
 		if _, _, err := sm.Add(context.Background(), "10.0.0.2"); err != nil {
 			t.Fatalf("Add shard1 overflow: %v", err)
+		}
+		if err := sm.FlushDirty(context.Background()); err != nil {
+			t.Fatalf("FlushDirty: %v", err)
 		}
 		if _, err := sm.Remove(context.Background(), "10.0.0.2"); err != nil {
 			t.Fatalf("Remove: %v", err)
@@ -545,12 +558,15 @@ func TestRemoveTail(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	// Create two shards via overflow, then empty shard 1
+	// Create two shards via overflow, flush to make both Active, then empty shard 1.
 	if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Add shard0: %v", err)
 	}
 	if _, _, err := sm.Add(context.Background(), "10.0.0.2"); err != nil {
 		t.Fatalf("Add shard1: %v", err)
+	}
+	if err := sm.FlushDirty(context.Background()); err != nil {
+		t.Fatalf("FlushDirty: %v", err)
 	}
 	if _, err := sm.Remove(context.Background(), "10.0.0.2"); err != nil {
 		t.Fatalf("Remove shard1 IP: %v", err)
@@ -631,27 +647,32 @@ func TestSyncShard_SendsPlaceholderWhenEmpty(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	// Add an IP to create a shard
+	// Add an IP and flush to transition the shard to Active.
 	if _, newIdx, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Add: %v", err)
 	} else if newIdx != 0 {
 		t.Errorf("Add: newIdx = %d, want 0", newIdx)
 	}
+	if err := sm.FlushDirty(context.Background()); err != nil {
+		t.Fatalf("FlushDirty (create Active shard): %v", err)
+	}
 
-	// Mark the shard as dirty with empty IPs (simulating all bans expired)
-	// Replace marks dirty internally, so just call Replace with empty slice
+	// Mark the shard as dirty with empty IPs (simulating all bans expired).
+	// Replace marks dirty internally, so just call Replace with empty slice.
 	sm.mu.Lock()
 	sm.families["v4"].Shards[0].IPs.Replace([]string{}) // empty set marks dirty
 	sm.mu.Unlock()
 
+	beforeFlush := ctrl.Calls("UpdateTrafficMatchingList")
+
 	// syncShard is unexported, so we drive it through the public FlushDirty API
-	// which will sync all dirty shards
+	// which will sync all dirty shards.
 	if err := sm.FlushDirty(context.Background()); err != nil {
 		t.Fatalf("FlushDirty: %v", err)
 	}
 
-	// Verify UpdateTrafficMatchingList was called (it should send placeholder)
-	if got := ctrl.Calls("UpdateTrafficMatchingList"); got != 1 {
+	// Verify UpdateTrafficMatchingList was called exactly once more (sending placeholder).
+	if got := ctrl.Calls("UpdateTrafficMatchingList") - beforeFlush; got != 1 {
 		t.Errorf("UpdateTrafficMatchingList calls: got %d, want 1", got)
 	}
 }
@@ -692,9 +713,10 @@ func TestEnsureShards_FiltersPlaceholder(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	// Verify that the placeholder was filtered out
-	shard := sm.families["v4"].Shards[0]
-	if shard.IPs.Len() != 0 {
-		t.Errorf("IPSet len after loading: got %d, want 0 (placeholder should be filtered)", shard.IPs.Len())
+	// A TML whose only member is the RFC 5737 placeholder is treated as an orphan:
+	// the placeholder is stripped and, with zero real members, the shard is not
+	// loaded into the active shard slice (it will be cleaned up separately).
+	if got := len(sm.families["v4"].Shards); got != 0 {
+		t.Errorf("Shards len: got %d, want 0 (placeholder-only TML should not be loaded as a shard)", got)
 	}
 }
