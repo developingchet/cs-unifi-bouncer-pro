@@ -347,14 +347,6 @@ func (c *unifiClient) DeleteZonePolicy(ctx context.Context, site string, id stri
 	return deleteZonePolicyV1(ctx, c, siteID, id)
 }
 
-func (c *unifiClient) ReorderZonePolicies(ctx context.Context, site string, req ZonePolicyReorderRequest) error {
-	siteID, err := getSiteID(ctx, c, site)
-	if err != nil {
-		return err
-	}
-	return reorderZonePolicies(ctx, c, siteID, req)
-}
-
 // ---- Traffic Matching Lists (integration v1) --------------------------------
 
 func (c *unifiClient) ListTrafficMatchingLists(ctx context.Context, site string) ([]TrafficMatchingList, error) {

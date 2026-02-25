@@ -607,7 +607,6 @@ func buildFWManager(ctx context.Context, cfg *config.Config,
 			Description:   cfg.ObjectDescription,
 			LogDrops:      cfg.FirewallLogDrops,
 			APIWriteDelay: cfg.FirewallAPIShardDelay,
-			PolicyReorder: cfg.ZonePolicyReorder,
 		},
 	}, ctrl, store, namer, log), nil
 }

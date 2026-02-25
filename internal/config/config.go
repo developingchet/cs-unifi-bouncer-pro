@@ -58,8 +58,7 @@ type Config struct {
 	LegacyRulesetV6        string `koanf:"legacy_ruleset_v6"`
 
 	// Zone-Based Firewall Mode
-	ZonePairs         []string `koanf:"zone_pairs"`
-	ZonePolicyReorder bool     `koanf:"zone_policy_reorder"`
+	ZonePairs []string `koanf:"zone_pairs"`
 
 	// Cloudflare Whitelist
 	CloudflareWhitelistEnabled  bool          `koanf:"cloudflare_whitelist_enabled"`
@@ -198,8 +197,7 @@ func defaults() map[string]interface{} {
 		"legacy_rule_index_start_v6":  27000,
 		"legacy_ruleset_v4":           "WAN_IN",
 		"legacy_ruleset_v6":           "WANv6_IN",
-		"zone_pairs":         "External->Internal",
-		"zone_policy_reorder": true,
+		"zone_pairs":                   "External->Internal",
 		"cloudflare_whitelist_enabled": false,
 		"cloudflare_refresh_interval":  "168h",
 		"cloudflare_ipv4_url":          "https://www.cloudflare.com/ips-v4",

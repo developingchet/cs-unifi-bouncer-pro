@@ -687,29 +687,3 @@ func modelToV1Policy(p ZonePolicy) apiV1Policy {
 	}
 }
 
-// --- Policy Reorder (integration v1) ----------------------------------------
-
-func reorderZonePolicies(ctx context.Context, c *unifiClient, siteID string, req ZonePolicyReorderRequest) error {
-	base := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies/ordering",
-		c.cfg.BaseURL, siteID)
-	u, err := url.Parse(base)
-	if err != nil {
-		return err
-	}
-	q := u.Query()
-	q.Set("sourceFirewallZoneId", req.SourceZoneID)
-	q.Set("destinationFirewallZoneId", req.DestinationZoneID)
-	u.RawQuery = q.Encode()
-
-	afterIDs := req.AfterSystemDefinedIDs
-	if afterIDs == nil {
-		afterIDs = []string{}
-	}
-	payload := map[string]interface{}{
-		"orderedFirewallPolicyIds": map[string]interface{}{
-			"beforeSystemDefined": req.BeforeSystemDefinedIDs,
-			"afterSystemDefined":  afterIDs,
-		},
-	}
-	return doPUT(ctx, c, u.String(), "reorder-policies", payload)
-}

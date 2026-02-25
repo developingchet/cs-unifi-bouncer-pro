@@ -550,10 +550,6 @@ func (pc *PanicController) DeleteTrafficMatchingList(ctx context.Context, site s
 	panic("DryRun gate failed: DeleteTrafficMatchingList called")
 }
 
-func (pc *PanicController) ReorderZonePolicies(ctx context.Context, site string, req controller.ZonePolicyReorderRequest) error {
-	panic("DryRun gate failed: ReorderZonePolicies called")
-}
-
 func (pc *PanicController) HasFeature(ctx context.Context, site string, feature string) (bool, error) {
 	return false, nil
 }

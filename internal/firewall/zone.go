@@ -18,7 +18,6 @@ type ZoneConfig struct {
 	Description string
 	LogDrops    bool
 	APIWriteDelay time.Duration
-	PolicyReorder bool // reorder bouncer policies to run before system-defined ones
 }
 
 // ZoneManager manages zone-based firewall policies.
@@ -168,12 +167,6 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 		}
 	}
 
-	if zm.cfg.PolicyReorder {
-		if err := zm.reorderPolicies(ctx, site, zoneMap, existingPolicies); err != nil {
-			zm.log.Warn().Err(err).Str("site", site).Msg("policy reorder failed (non-fatal)")
-		}
-	}
-
 	return nil
 }
 
@@ -268,57 +261,6 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 			Str("src", pair.Src).Str("dst", pair.Dst).Msg("created zone policy")
 	}
 
-	return nil
-}
-
-// reorderPolicies places bouncer policies before system-defined ones for each zone pair.
-func (zm *ZoneManager) reorderPolicies(ctx context.Context, site string, zoneMap map[string]string, policies []controller.ZonePolicy) error {
-	// Build a prefix to identify our bouncer policies (check all namer-derived names).
-	// We group by zone pair and collect matching policy IDs in order.
-	for _, pair := range zm.cfg.ZonePairs {
-		srcZoneID := zoneMap[pair.Src]
-		dstZoneID := zoneMap[pair.Dst]
-		if srcZoneID == "" || dstZoneID == "" {
-			continue
-		}
-
-		var ourIDs []string
-		var otherIDs []string
-		for _, p := range policies {
-			if p.SrcZone != srcZoneID || p.DstZone != dstZoneID {
-				continue
-			}
-			// Skip system-defined (predefined) policies — they must not appear in
-			// the ordering request at all; only user-defined ones are listed.
-			if p.Predefined {
-				continue
-			}
-			// Check whether this policy is ours (stored in bbolt with mode="zone").
-			rec, _ := zm.store.GetPolicy(p.Name)
-			if rec != nil && rec.UnifiID == p.ID && rec.Mode == "zone" {
-				ourIDs = append(ourIDs, p.ID)
-			} else {
-				otherIDs = append(otherIDs, p.ID)
-			}
-		}
-
-		if len(ourIDs) == 0 {
-			continue
-		}
-
-		if err := zm.ctrl.ReorderZonePolicies(ctx, site, controller.ZonePolicyReorderRequest{
-			SourceZoneID:           srcZoneID,
-			DestinationZoneID:      dstZoneID,
-			BeforeSystemDefinedIDs: ourIDs,
-			AfterSystemDefinedIDs:  otherIDs,
-		}); err != nil {
-			return fmt.Errorf("reorder policies for %s->%s: %w", pair.Src, pair.Dst, err)
-		}
-
-		zm.log.Debug().Str("site", site).
-			Str("src", pair.Src).Str("dst", pair.Dst).
-			Int("count", len(ourIDs)).Msg("reordered zone policies")
-	}
 	return nil
 }
 

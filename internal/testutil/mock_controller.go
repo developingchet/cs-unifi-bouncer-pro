@@ -423,9 +423,3 @@ func (m *MockController) DeleteTrafficMatchingList(ctx context.Context, site str
 	return nil
 }
 
-func (m *MockController) ReorderZonePolicies(ctx context.Context, site string, req controller.ZonePolicyReorderRequest) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.calls["ReorderZonePolicies"]++
-	return m.popError("ReorderZonePolicies")
-}
