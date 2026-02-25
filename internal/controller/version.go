@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 )
 
 // featureFlags maps known feature names to API detection logic.
@@ -166,12 +168,29 @@ func getZoneID(ctx context.Context, c *unifiClient, site, zoneName string) (stri
 	if resolved != "" {
 		return resolved, nil
 	}
+
+	// Build list of available zone names for the error message.
+	available := make([]string, 0, len(zones))
+	for _, z := range zones {
+		available = append(available, z.Name)
+	}
+	sort.Strings(available)
+
+	// Case-insensitive "did you mean?" suggestion.
+	suggestion := ""
+	for _, name := range available {
+		if strings.EqualFold(name, zoneName) {
+			suggestion = fmt.Sprintf(" Did you mean %q (check capitalisation)?", name)
+			break
+		}
+	}
+
 	return "", fmt.Errorf(
-		"zone %q not found on this controller (checked %d zones). "+
-			"Zone names are case-sensitive. "+
-			"Use ZONE_PAIRS=<src>-><dst> with exact zone names as shown in the UniFi UI, "+
+		"zone %q not found on this controller.%s "+
+			"Available zones: [%s]. "+
+			"Zone names are case-sensitive — use exact names as shown in the UniFi UI, "+
 			"or provide zone UUIDs directly (e.g. ZONE_PAIRS=<src-uuid>-><dst-uuid>).",
-		zoneName, len(zones),
+		zoneName, suggestion, strings.Join(available, ", "),
 	)
 }
 
