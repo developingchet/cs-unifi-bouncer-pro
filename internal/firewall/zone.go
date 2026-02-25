@@ -151,9 +151,9 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	if err != nil {
 		return err
 	}
-	existingByID := make(map[string]bool, len(existingPolicies))
+	existingByID := make(map[string]controller.ZonePolicy, len(existingPolicies))
 	for _, p := range existingPolicies {
-		existingByID[p.ID] = true
+		existingByID[p.ID] = p
 	}
 
 	for _, pair := range zm.cfg.ZonePairs {
@@ -177,7 +177,7 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	return nil
 }
 
-func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, pair config.ZonePair, zoneMap map[string]string, existingByID map[string]bool, ipv6 bool, sm *ShardManager) error {
+func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, pair config.ZonePair, zoneMap map[string]string, existingByID map[string]controller.ZonePolicy, ipv6 bool, sm *ShardManager) error {
 	family := Family(ipv6)
 	ipVersion := "IPV4"
 	if ipv6 {
@@ -207,30 +207,19 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 		}
 
 		// Check if policy exists in API and needs update (reconcile mode)
-		if existing != nil && existing.UnifiID != "" && existingByID[existing.UnifiID] {
-			// Fetch the actual policy from API to check if it needs updating
-			policies, err := zm.ctrl.ListZonePolicies(ctx, site)
-			if err != nil {
-				return fmt.Errorf("list policies for reconcile: %w", err)
-			}
-			var apiPolicy *controller.ZonePolicy
-			for i := range policies {
-				if policies[i].ID == existing.UnifiID {
-					apiPolicy = &policies[i]
-					break
+		if existing != nil && existing.UnifiID != "" {
+			if apiPolicy, found := existingByID[existing.UnifiID]; found {
+				if needsUpdateZonePolicy(&apiPolicy, groupID) {
+					zm.log.Info().Str("policy", policyName).Msg("zone policy needs update, applying reconcile")
+					if err := zm.updateZonePolicy(ctx, site, apiPolicy, groupID); err != nil {
+						return fmt.Errorf("update zone policy %s: %w", policyName, err)
+					}
+				} else {
+					zm.log.Debug().Str("policy", policyName).Msg("zone policy already exists")
 				}
-			}
-			if apiPolicy != nil && needsUpdateZonePolicy(apiPolicy, groupID) {
-				zm.log.Info().Str("policy", policyName).Msg("zone policy needs update, applying reconcile")
-				// Update the policy in place
-				if err := zm.updateZonePolicy(ctx, site, *apiPolicy, groupID); err != nil {
-					return fmt.Errorf("update zone policy %s: %w", policyName, err)
-				}
-				existingByID[apiPolicy.ID] = true // mark as processed
 				continue
 			}
-			zm.log.Debug().Str("policy", policyName).Msg("zone policy already exists")
-			continue
+			// Not found in API — fall through to create
 		}
 
 		// Apply delay between consecutive creates (not before the first one)
@@ -265,7 +254,7 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 		if err != nil {
 			return fmt.Errorf("create zone policy %s: %w", policyName, err)
 		}
-		existingByID[created.ID] = true
+		existingByID[created.ID] = created
 
 		if err := zm.store.SetPolicy(policyName, storage.PolicyRecord{
 			UnifiID: created.ID,

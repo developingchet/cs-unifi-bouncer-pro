@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"runtime"
@@ -206,10 +207,13 @@ func (r *Reporter) push(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		r.log.Warn().
 			Int("status", resp.StatusCode).
 			Str("url", url).
+			Str("response", strings.TrimSpace(string(bodyBytes))).
 			Msg("lapi usage-metrics returned non-2xx")
+		return nil
 	}
 	return nil
 }
