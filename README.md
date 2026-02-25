@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/d77fbd94-860c-46fb-ae66-aa46fd01e1f0"  width="590" alt="CrowdSec Unifi Bouncer Logo" style="max-width: 100%; height: auto;">
+</p>
+
 # cs-unifi-bouncer-pro
 [![Build](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml/badge.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/developingchet/cs-unifi-bouncer-pro)](https://goreportcard.com/report/github.com/developingchet/cs-unifi-bouncer-pro)
