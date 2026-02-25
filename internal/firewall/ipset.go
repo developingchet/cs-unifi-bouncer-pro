@@ -5,9 +5,10 @@ import "sync"
 // IPSet is a goroutine-safe set of IP/CIDR strings for a single shard.
 // It tracks whether the set has changed since the last successful sync.
 type IPSet struct {
-	mu      sync.RWMutex
-	members map[string]struct{}
-	dirty   bool
+	mu          sync.RWMutex
+	members     map[string]struct{}
+	dirty       bool
+	lastFlushed map[string]struct{} // snapshot of members at the last successful PUT
 }
 
 // NewIPSet creates an empty IPSet.
@@ -122,5 +123,36 @@ func (s *IPSet) CommitClean() {
 func (s *IPSet) MarkClean() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.dirty = false
+}
+
+// HasChangedFromFlushed returns true if the current member set differs from the
+// last successfully flushed snapshot. Returns true when no flush has occurred yet.
+func (s *IPSet) HasChangedFromFlushed() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.lastFlushed == nil {
+		return true
+	}
+	if len(s.members) != len(s.lastFlushed) {
+		return true
+	}
+	for ip := range s.members {
+		if _, ok := s.lastFlushed[ip]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// CommitFlushed snapshots the current member set as the last-flushed state.
+// Call after a successful API write to enable diff-based skip optimisation.
+func (s *IPSet) CommitFlushed() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastFlushed = make(map[string]struct{}, len(s.members))
+	for ip := range s.members {
+		s.lastFlushed[ip] = struct{}{}
+	}
 	s.dirty = false
 }
