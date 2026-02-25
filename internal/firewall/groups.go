@@ -56,6 +56,10 @@ type Shard struct {
 	Family string     // "v4" or "v6"
 	IPs    *IPSet     // in-memory authoritative IP set
 	State  ShardState // current lifecycle state
+
+	// onDrainedFired is set to true after onDrained has been called once for
+	// this shard. Prevents duplicate policy/rule deletion attempts on retry ticks.
+	onDrainedFired bool
 }
 
 // orphanedGroup represents a placeholder-only UniFi group found during EnsureShards
@@ -1306,7 +1310,7 @@ func (sm *ShardManager) Rebalance(ctx context.Context) int {
 // Should be called after syncAllFamilies so target shards are flushed before donors are deleted.
 func (sm *ShardManager) drainDraining(ctx context.Context) {
 	sm.mu.RLock()
-	family := sm.families[sm.family]
+	family := sm.familyStateLocked(sm.family)
 	var draining []*Shard
 	for _, s := range family.Shards {
 		if s.State == ShardStateDraining {
@@ -1324,8 +1328,11 @@ func (sm *ShardManager) drainDraining(ctx context.Context) {
 // On API error the shard remains Draining and will be retried on the next tick.
 func (sm *ShardManager) drainShard(ctx context.Context, shard *Shard) {
 	// 1. Delete policies/rules first — UniFi rejects group deletion while referenced.
-	if sm.onDrained != nil {
+	// Gate on onDrainedFired so that if DeleteShardObject fails and this shard is
+	// retried on the next tick, we do not attempt a duplicate policy/rule deletion.
+	if sm.onDrained != nil && !shard.onDrainedFired {
 		sm.onDrained(ctx, shard.Index, shard.ID)
+		shard.onDrainedFired = true
 	}
 
 	// 2. Pace API calls with the configured shard delay.
