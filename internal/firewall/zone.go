@@ -92,15 +92,20 @@ func (zm *ZoneManager) Bootstrap(ctx context.Context, sites []string) error {
 }
 
 // Reload updates the zone pair configuration and repopulates the zone ID cache
-// for all given sites. Safe to call concurrently with read operations.
+// for all given sites. All zone IDs are resolved into a staging map first; the
+// live cache is updated only if every zone resolves successfully (validate-then-commit).
+// Safe to call concurrently with read operations.
 func (zm *ZoneManager) Reload(ctx context.Context, sites []string, pairs []config.ZonePair) error {
-	zm.mu.Lock()
-	zm.cfg.ZonePairs = pairs
-	zm.mu.Unlock()
-
+	// Stage all resolutions before acquiring the write lock.
+	staged := make(map[string]map[string]string, len(sites))
 	var firstErr error
+
 	for _, site := range sites {
+		// 1A: Evict stale cache entries so GetZoneID hits the API.
+		zm.ctrl.InvalidateZoneCache(site)
+
 		siteZones := make(map[string]string)
+		allOK := true
 		for _, pair := range pairs {
 			for _, name := range []string{pair.Src, pair.Dst} {
 				if _, ok := siteZones[name]; ok {
@@ -109,22 +114,39 @@ func (zm *ZoneManager) Reload(ctx context.Context, sites []string, pairs []confi
 				id, err := zm.ctrl.GetZoneID(ctx, site, name)
 				if err != nil {
 					zm.log.Warn().Err(err).Str("site", site).Str("zone", name).
-						Msg("reload: failed to resolve zone ID")
+						Msg("reload: failed to resolve zone ID; aborting update for this site")
 					if firstErr == nil {
 						firstErr = fmt.Errorf("reload zone %q for site %q: %w", name, site, err)
 					}
-					continue
+					allOK = false
+					break
 				}
 				siteZones[name] = id
 			}
+			if !allOK {
+				break
+			}
 		}
+
+		// 1B: Only commit if all zones resolved successfully.
+		if allOK {
+			staged[site] = siteZones
+		}
+	}
+
+	// Commit validated sites atomically.
+	if len(staged) > 0 {
 		zm.mu.Lock()
 		if zm.zoneCache == nil {
 			zm.zoneCache = make(map[string]map[string]string)
 		}
-		zm.zoneCache[site] = siteZones
+		for site, siteZones := range staged {
+			zm.zoneCache[site] = siteZones
+		}
+		zm.cfg.ZonePairs = pairs
 		zm.mu.Unlock()
 	}
+
 	return firstErr
 }
 

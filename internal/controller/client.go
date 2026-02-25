@@ -259,6 +259,20 @@ func (c *unifiClient) Close() error {
 	return nil
 }
 
+// InvalidateZoneCache evicts all cached zone IDs, site IDs, and feature flags for site.
+// Call before re-resolving zone names so the next GetZoneID/GetSiteID/HasFeature fetch fresh data.
+func (c *unifiClient) InvalidateZoneCache(site string) {
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	delete(c.zoneIDCache, site)
+	delete(c.featureCache, site)
+	// siteIDCache is keyed by internalReference, display name, and UUID — all of which may
+	// map to this site. We can't cheaply identify which keys belong to one site, so we
+	// clear the whole siteIDCache. It is small (one entry per site) and will be repopulated on
+	// the next call to GetSiteID.
+	c.siteIDCache = make(map[string]string)
+}
+
 // ---- Firewall Groups -------------------------------------------------------
 
 func (c *unifiClient) ListFirewallGroups(ctx context.Context, site string) ([]FirewallGroup, error) {

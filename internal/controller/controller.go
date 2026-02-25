@@ -98,6 +98,10 @@ type Controller interface {
 	GetZoneID(ctx context.Context, site, zoneName string) (string, error)
 	DiscoverZones(ctx context.Context, site string) ([]Zone, error)
 
+	// InvalidateZoneCache evicts all cached zone IDs, site IDs, and feature flags
+	// for the given site. Call before re-resolving zone names to ensure fresh data.
+	InvalidateZoneCache(site string)
+
 	// Feature Detection
 	HasFeature(ctx context.Context, site string, feature string) (bool, error)
 

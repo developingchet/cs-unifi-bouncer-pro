@@ -330,6 +330,12 @@ func (m *MockController) HasFeature(ctx context.Context, site string, feature st
 	return false, nil
 }
 
+func (m *MockController) InvalidateZoneCache(site string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls["InvalidateZoneCache"]++
+}
+
 func (m *MockController) Ping(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

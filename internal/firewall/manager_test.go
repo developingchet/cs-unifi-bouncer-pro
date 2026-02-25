@@ -561,3 +561,5 @@ func (pc *PanicController) Ping(ctx context.Context) error {
 func (pc *PanicController) Close() error {
 	return nil
 }
+
+func (pc *PanicController) InvalidateZoneCache(site string) {}
