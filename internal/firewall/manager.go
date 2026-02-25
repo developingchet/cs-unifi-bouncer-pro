@@ -444,6 +444,10 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 				Msg("firewall sync complete")
 		}
 	}
+
+	// Update active_bans gauge from bbolt after every sync tick.
+	m.UpdateActiveBansMetric()
+	metrics.LastSyncTimestamp.Set(float64(time.Now().Unix()))
 	return nil
 }
 

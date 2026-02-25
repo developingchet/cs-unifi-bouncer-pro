@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sync"
 )
 
 // featureFlags maps known feature names to API detection logic.
@@ -22,20 +21,17 @@ const (
 	pathSelf       = "/api/self"
 )
 
-// featureCacheMu protects the per-client feature cache.
-var featureCacheMu sync.RWMutex
-
 // hasFeature detects whether the controller supports a named feature.
 // Results are cached per (site, feature) to avoid repeated API calls.
 func hasFeature(ctx context.Context, c *unifiClient, site, feature string) (bool, error) {
-	featureCacheMu.RLock()
+	c.cacheMu.RLock()
 	if siteCache, ok := c.featureCache[site]; ok {
 		if val, cached := siteCache[feature]; cached {
-			featureCacheMu.RUnlock()
+			c.cacheMu.RUnlock()
 			return val, nil
 		}
 	}
-	featureCacheMu.RUnlock()
+	c.cacheMu.RUnlock()
 
 	var result bool
 	var err error
@@ -51,12 +47,12 @@ func hasFeature(ctx context.Context, c *unifiClient, site, feature string) (bool
 		return false, err
 	}
 
-	featureCacheMu.Lock()
+	c.cacheMu.Lock()
 	if c.featureCache[site] == nil {
 		c.featureCache[site] = make(map[string]bool)
 	}
 	c.featureCache[site][feature] = result
-	featureCacheMu.Unlock()
+	c.cacheMu.Unlock()
 
 	return result, nil
 }

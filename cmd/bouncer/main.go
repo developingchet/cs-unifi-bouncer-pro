@@ -354,13 +354,16 @@ func reconcileCmd() *cobra.Command {
 				log.Warn().Msg(w)
 			}
 
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+
 			store, err := storage.NewBboltStore(cfg.DataDir)
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
-			ctrl, err := controller.NewClient(context.Background(), controller.ClientConfig{
+			ctrl, err := controller.NewClient(ctx, controller.ClientConfig{
 				BaseURL:      cfg.UnifiURL,
 				Username:     cfg.UnifiUsername,
 				Password:     cfg.UnifiPassword,
@@ -415,7 +418,6 @@ func reconcileCmd() *cobra.Command {
 				},
 			}, ctrl, store, namer, log)
 
-			ctx := context.Background()
 			if err := fwMgr.EnsureInfrastructure(ctx, cfg.UnifiSites); err != nil {
 				return err
 			}

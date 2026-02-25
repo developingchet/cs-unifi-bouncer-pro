@@ -115,4 +115,12 @@ var (
 		Name:      "dirty_shards",
 		Help:      "Number of shards pending sync at last tick.",
 	})
+
+	// LastSyncTimestamp records the Unix timestamp of the last completed SyncDirty call.
+	// Use this to alert when no sync has occurred for an extended period (e.g. > 5 minutes).
+	LastSyncTimestamp = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "last_sync_timestamp_seconds",
+		Help:      "Unix timestamp of the last completed firewall sync (SyncDirty).",
+	})
 )
