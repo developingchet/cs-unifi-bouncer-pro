@@ -408,32 +408,6 @@ For the vulnerability disclosure policy, see [SECURITY.md](SECURITY.md).
 
 ---
 
-## Differences from Teifun2/cs-unifi-bouncer
-
-| Feature | Teifun2 | cs-unifi-bouncer-pro |
-|---------|---------|---------------------|
-| State persistence | None | ACID bbolt (3 buckets) |
-| Decision handling | Single-threaded | Inline synchronous handler per batch |
-| Ban auto-expiry | No | Yes (TTL from CrowdSec + `BAN_TTL`) |
-| Multi-site | No | Yes |
-| Firewall mode | Legacy only | Auto / legacy / zone |
-| Object naming | Hardcoded | Go templates |
-| Prometheus metrics | None | 15 `crowdsec_unifi_*` metrics |
-| Log redaction | None | `RedactWriter` |
-| Dry-run mode | No | Yes |
-| Startup reconcile | No | Yes |
-| Error handling | `log.Fatal` | Typed errors + exponential backoff retry |
-| Session recovery | None | Mutex-guarded re-auth (thundering-herd guard) |
-| IPv6 | Limited | Full dual-stack with separate shard managers |
-| CrowdSec usage-metrics | No | Yes (LAPI `/v1/usage-metrics`, 30m default) |
-| Seccomp profile | None | 78-syscall allowlist |
-| Image signing | None | Cosign keyless OIDC + CycloneDX SBOM |
-| Batch sync | No | Yes (configurable interval, bin-packing) |
-| Shard management | No | Yes (automatic, up to 10,000 IPs per shard) |
-| Traffic Matching Lists | No | Yes (integration v1 API) |
-
----
-
 ## Documentation
 
 | Document | Description |
