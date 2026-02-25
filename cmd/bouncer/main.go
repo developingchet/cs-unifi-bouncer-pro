@@ -52,6 +52,8 @@ func main() {
 		reconcileCmd(),
 		statusCmd(),
 		drainCmd(),
+		validateCmd(),
+		diagnoseCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -626,6 +628,185 @@ func resolveCapacities(cfg *config.Config) (v4Cap, v6Cap int) {
 		v6Cap = v4Cap
 	}
 	return v4Cap, v6Cap
+}
+
+// validateCmd loads and validates config without making any API calls.
+func validateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "validate",
+		Short: "Validate configuration and exit (no API calls)",
+		Long: `Load configuration from environment variables, run all validation rules,
+and print a human-readable summary. Exits 0 on success, 1 on error.
+No API calls are made — safe to run in CI without network access.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "configuration invalid: %v\n", err)
+				os.Exit(1)
+			}
+
+			pairs, _ := cfg.ParseZonePairs()
+			pairStr := fmt.Sprintf("%d pair(s)", len(pairs))
+			if len(pairs) > 0 {
+				parts := make([]string, 0, len(pairs))
+				for _, p := range pairs {
+					parts = append(parts, p.Src+"->"+p.Dst)
+				}
+				pairStr = strings.Join(parts, ", ")
+			}
+
+			v4Cap, _ := resolveCapacities(cfg)
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "FIELD\tVALUE")
+			fmt.Fprintf(w, "firewall_mode\t%s\n", cfg.FirewallMode)
+			fmt.Fprintf(w, "zone_pairs\t%s\n", pairStr)
+			fmt.Fprintf(w, "sites\t%s\n", strings.Join(cfg.UnifiSites, ", "))
+			fmt.Fprintf(w, "ban_ttl\t%s\n", cfg.BanTTL)
+			fmt.Fprintf(w, "shard_capacity\t%d\n", v4Cap)
+			fmt.Fprintf(w, "lapi_url\t%s\n", cfg.CrowdSecLAPIURL)
+			fmt.Fprintf(w, "unifi_url\t%s\n", cfg.UnifiURL)
+			if cfg.MetricsEnabled {
+				fmt.Fprintf(w, "metrics_addr\t%s\n", cfg.MetricsAddr)
+			} else {
+				fmt.Fprintf(w, "metrics_addr\t(disabled)\n")
+			}
+			fmt.Fprintf(w, "health_addr\t%s\n", cfg.HealthAddr)
+			_ = w.Flush()
+
+			for _, warn := range cfg.DeprecationWarnings {
+				fmt.Fprintf(os.Stderr, "WARNING: %s\n", warn)
+			}
+			if w2 := cfg.InsecureLAPIURLWarning(); w2 != "" {
+				fmt.Fprintf(os.Stderr, "WARNING: %s\n", w2)
+			}
+
+			fmt.Println("\nconfiguration valid ✓")
+			return nil
+		},
+	}
+}
+
+// diagCheck is a single row in the diagnose output table.
+type diagCheck struct {
+	name   string
+	status string // "PASS", "FAIL", or "" for detail-only rows
+	detail string
+}
+
+// diagnoseCmd runs a structured connectivity probe against LAPI and UniFi.
+func diagnoseCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "diagnose",
+		Short: "Run connectivity checks against LAPI and UniFi controller",
+		Long: `Runs three-phase diagnostics:
+  1. Load and validate configuration
+  2. Probe CrowdSec LAPI reachability
+  3. Probe UniFi controller reachability, and if zone mode: discover and list zones
+
+Exits 0 when all checks pass, 1 if any check fails.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var checks []diagCheck
+			allPass := true
+
+			// --- Phase 1: config ---
+			cfg, err := config.Load()
+			if err != nil {
+				checks = append(checks, diagCheck{"config_valid", "FAIL", err.Error()})
+				printDiagChecks(checks)
+				os.Exit(1)
+			}
+			checks = append(checks, diagCheck{
+				"config_valid", "PASS",
+				fmt.Sprintf("mode=%s sites=%v", cfg.FirewallMode, cfg.UnifiSites),
+			})
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			// --- Phase 2: LAPI reachability ---
+			lapiURL := cfg.CrowdSecLAPIURL + "/v1/decisions?limit=1"
+			lapiClient := &http.Client{Timeout: 10 * time.Second}
+			lapiResp, lapiErr := lapiClient.Get(lapiURL) //nolint:noctx
+			if lapiErr != nil {
+				checks = append(checks, diagCheck{"lapi_reachable", "FAIL", lapiErr.Error()})
+				allPass = false
+			} else {
+				_ = lapiResp.Body.Close()
+				checks = append(checks, diagCheck{
+					"lapi_reachable", "PASS",
+					fmt.Sprintf("%s → %d %s", cfg.CrowdSecLAPIURL, lapiResp.StatusCode, http.StatusText(lapiResp.StatusCode)),
+				})
+			}
+
+			// --- Phase 3: UniFi reachability ---
+			diagLog := zerolog.Nop()
+			ctrl, ctrlErr := controller.NewClient(ctx, controller.ClientConfig{
+				BaseURL:      cfg.UnifiURL,
+				Username:     cfg.UnifiUsername,
+				Password:     cfg.UnifiPassword,
+				APIKey:       cfg.UnifiAPIKey,
+				VerifyTLS:    cfg.UnifiVerifyTLS,
+				CACertPath:   cfg.UnifiCACert,
+				Timeout:      cfg.UnifiHTTPTimeout,
+				ReauthMinGap: cfg.SessionReauthMinGap,
+				EnableIPv6:   cfg.EnableIPv6,
+			}, diagLog)
+			if ctrlErr != nil {
+				checks = append(checks, diagCheck{"unifi_reachable", "FAIL", ctrlErr.Error()})
+				allPass = false
+				printDiagChecks(checks)
+				if !allPass {
+					os.Exit(1)
+				}
+				return nil
+			}
+			defer ctrl.Close()
+
+			if pingErr := ctrl.Ping(ctx); pingErr != nil {
+				checks = append(checks, diagCheck{"unifi_reachable", "FAIL", pingErr.Error()})
+				allPass = false
+			} else {
+				checks = append(checks, diagCheck{"unifi_reachable", "PASS", cfg.UnifiURL + " ping ok"})
+			}
+
+			// --- Zone discovery (zone or auto mode) ---
+			if cfg.FirewallMode != "legacy" {
+				for _, site := range cfg.UnifiSites {
+					zones, zoneErr := ctrl.DiscoverZones(ctx, site)
+					if zoneErr != nil {
+						checks = append(checks, diagCheck{
+							"zone_discovery[" + site + "]", "FAIL", zoneErr.Error(),
+						})
+						allPass = false
+						continue
+					}
+					checks = append(checks, diagCheck{
+						"zone_discovery[" + site + "]", "PASS",
+						fmt.Sprintf("%d zones found", len(zones)),
+					})
+					for _, z := range zones {
+						checks = append(checks, diagCheck{"  " + z.Name, "", "id=" + z.ID})
+					}
+				}
+			}
+
+			printDiagChecks(checks)
+			if !allPass {
+				os.Exit(1)
+			}
+			return nil
+		},
+	}
+}
+
+func printDiagChecks(checks []diagCheck) {
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "CHECK\tSTATUS\tDETAIL")
+	for _, c := range checks {
+		fmt.Fprintf(w, "%s\t%s\t%s\n", c.name, c.status, c.detail)
+	}
+	_ = w.Flush()
 }
 
 // buildLogger constructs a zerolog.Logger based on config.
