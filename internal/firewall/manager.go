@@ -175,6 +175,11 @@ type managerImpl struct {
 
 	// cb is the circuit breaker that opens after consecutive sync failures.
 	cb *circuitBreaker
+
+	// syncMu prevents concurrent SyncDirty executions (e.g. startup batch
+	// overlapping the first ticker fire). TryLock is used so a slow flush
+	// does not block the ticker goroutine — the tick is simply skipped.
+	syncMu sync.Mutex
 }
 
 // NewManager constructs a Manager.
@@ -577,6 +582,13 @@ func (m *managerImpl) attachShardCallbacks(mgr *ShardManager) {
 // If the controller previously signalled rate-limiting, SyncDirty skips all flushes
 // until the Retry-After window has elapsed.
 func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
+	// Prevent concurrent flushes: startup batch vs ticker overlap.
+	if !m.syncMu.TryLock() {
+		m.log.Warn().Msg("SyncDirty: skipping tick — previous sync still running")
+		return nil
+	}
+	defer m.syncMu.Unlock()
+
 	// Check rate-limit window before doing any work.
 	if limited, until := m.isRateLimited(); limited {
 		m.log.Info().Time("retry_after", until).Msg("SyncDirty skipped: rate-limited by controller")

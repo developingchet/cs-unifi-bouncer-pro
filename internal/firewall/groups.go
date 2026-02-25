@@ -1327,6 +1327,12 @@ func (sm *ShardManager) drainDraining(ctx context.Context) {
 // drainShard deletes a single Draining shard from UniFi and removes it from memory.
 // On API error the shard remains Draining and will be retried on the next tick.
 func (sm *ShardManager) drainShard(ctx context.Context, shard *Shard) {
+	sm.log.Debug().
+		Str("shard", shard.Name).
+		Str("shard_id", shard.ID).
+		Bool("onDrainedFired", shard.onDrainedFired).
+		Msg("drainShard: attempt")
+
 	// 1. Delete policies/rules first — UniFi rejects group deletion while referenced.
 	// Gate on onDrainedFired so that if DeleteShardObject fails and this shard is
 	// retried on the next tick, we do not attempt a duplicate policy/rule deletion.
