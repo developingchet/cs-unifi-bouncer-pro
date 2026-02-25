@@ -529,10 +529,12 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 				Msg("[DRY-RUN] reconcile diff computed; no changes written to UniFi")
 		}
 	} else {
+		m.syncMu.Lock()
 		v4Mgr.syncAllFamilies(ctx)
 		if v6Mgr != nil {
 			v6Mgr.syncAllFamilies(ctx)
 		}
+		m.syncMu.Unlock()
 		m.pruneEmptyTailShards(ctx, site, v4Mgr, v6Mgr)
 	}
 
@@ -582,13 +584,6 @@ func (m *managerImpl) attachShardCallbacks(mgr *ShardManager) {
 // If the controller previously signalled rate-limiting, SyncDirty skips all flushes
 // until the Retry-After window has elapsed.
 func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
-	// Prevent concurrent flushes: startup batch vs ticker overlap.
-	if !m.syncMu.TryLock() {
-		m.log.Warn().Msg("SyncDirty: skipping tick — previous sync still running")
-		return nil
-	}
-	defer m.syncMu.Unlock()
-
 	// Check rate-limit window before doing any work.
 	if limited, until := m.isRateLimited(); limited {
 		m.log.Info().Time("retry_after", until).Msg("SyncDirty skipped: rate-limited by controller")
@@ -645,12 +640,19 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 			}
 		}
 
+		// Guard against concurrent flush (e.g. reconcile running at startup).
+		// TryLock: skip this site's flush rather than blocking the ticker goroutine.
+		if !m.syncMu.TryLock() {
+			m.log.Warn().Str("site", site).Msg("SyncDirty: skipping site flush — reconcile in progress")
+			continue
+		}
 		if v4 != nil {
 			v4.syncAllFamilies(ctx)
 		}
 		if v6 != nil {
 			v6.syncAllFamilies(ctx)
 		}
+		m.syncMu.Unlock()
 
 		// Drain shards consolidated by the rebalance pass — must run after
 		// syncAllFamilies so target shards are flushed before donors are deleted.
