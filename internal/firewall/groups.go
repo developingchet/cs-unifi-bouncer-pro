@@ -1017,6 +1017,8 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 
 	sort.Strings(ips)
 
+	realIPCount := len(ips) // save before placeholder substitution
+
 	// UniFi API rejects empty items arrays on both create and update (HTTP 400).
 	// Substitute the RFC 5737/3849 placeholder when no real bans exist.
 	if len(ips) == 0 {
@@ -1092,6 +1094,13 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 	metrics.ShardSyncTotal.WithLabelValues(shard.Family, shardLabel, sm.site, "ok").Inc()
 	metrics.ShardSyncDuration.WithLabelValues(shard.Family, shardLabel, sm.site).Observe(time.Since(start).Seconds())
 	sm.log.Debug().Str("shard", shard.Name).Int("count", len(ips)).Msg("shard synced")
+	if realIPCount > 0 {
+		sm.log.Info().
+			Str("shard", shard.Name).
+			Int("ip_count", realIPCount).
+			Str("site", sm.site).
+			Msg("shard flushed to UniFi")
+	}
 }
 
 func tmlTypeForFamily(family string) string {

@@ -458,7 +458,7 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 				Str("site", site).
 				Int("v4_total", v4Total).
 				Int("v6_total", v6Total).
-				Int("dirty_shards", siteDirty[site]).
+				Int("dirty_shards_flushed", siteDirty[site]).
 				Msg("firewall sync complete")
 		}
 	}
