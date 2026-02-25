@@ -125,6 +125,8 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `FIREWALL_RECONCILE_INTERVAL` | `0s` | Periodic reconcile interval; `0s` = disabled |
 | `SYNC_INTERVAL` | `30s` | How often dirty shards are flushed to UniFi after a decision block. Also the retry interval for failed flushes. Minimum: `5s` |
 | `SHARD_LIMIT` | `10000` | Max IPs per shard before creating a new one |
+| `CIRCUIT_BREAKER_THRESHOLD` | `5` | Number of consecutive sync failures before the circuit breaker opens and suspends syncs |
+| `CIRCUIT_BREAKER_RESET_INTERVAL` | `60s` | How long to wait in the open state before allowing a probe request (half-open) |
 
 ### Legacy firewall mode
 
@@ -156,6 +158,8 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 |----------|---------|-------------|
 | `SYNC_INTERVAL` | `30s` | How often dirty shards are retried after a failed flush. Minimum: `5s` |
 | `SHARD_LIMIT` | `10000` | Maximum IPs per shard. When a shard is full, a new shard is created automatically |
+| `CIRCUIT_BREAKER_THRESHOLD` | `5` | Consecutive sync failures before the circuit breaker opens |
+| `CIRCUIT_BREAKER_RESET_INTERVAL` | `60s` | Cooldown before the breaker allows a probe request |
 
 **Bin-packing**: IPs are distributed across shards such that each shard is filled to capacity before a new shard is created. This minimizes the number of firewall objects created.
 
@@ -295,7 +299,7 @@ For persistent controller errors, a three-state circuit breaker tracks consecuti
 - **Open** (tripped) — syncs are suspended; `crowdsec_unifi_circuit_breaker_open` is set to `1`
 - **Half-open** (probing) — one probe request is allowed after the cooldown period; a success closes the breaker, a failure reopens it
 
-The breaker opens after **5 consecutive failures** and resets to half-open after a **60-second cooldown**. These thresholds are not currently configurable via environment variables. When the breaker closes after recovery, the event is logged and the metric returns to `0`.
+The breaker opens after **5 consecutive failures** and resets to half-open after a **60-second cooldown**. Configurable via `CIRCUIT_BREAKER_THRESHOLD` (default: 5) and `CIRCUIT_BREAKER_RESET_INTERVAL` (default: 60s). When the breaker closes after recovery, the event is logged and the metric returns to `0`.
 
 ### No-op TML diff
 

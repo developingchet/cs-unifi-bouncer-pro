@@ -61,6 +61,10 @@ type Config struct {
 	// Zone-Based Firewall Mode
 	ZonePairs []string `koanf:"zone_pairs"`
 
+	// Circuit Breaker
+	CircuitBreakerThreshold    int           `koanf:"circuit_breaker_threshold"`
+	CircuitBreakerResetInterval time.Duration `koanf:"circuit_breaker_reset_interval"`
+
 	// Cloudflare Whitelist
 	CloudflareWhitelistEnabled  bool          `koanf:"cloudflare_whitelist_enabled"`
 	CloudflareRefreshInterval   time.Duration `koanf:"cloudflare_refresh_interval"`
@@ -198,7 +202,9 @@ func defaults() map[string]interface{} {
 		"legacy_rule_index_start_v6":  27000,
 		"legacy_ruleset_v4":           "WAN_IN",
 		"legacy_ruleset_v6":           "WANv6_IN",
-		"zone_pairs":                   "External->Internal",
+		"zone_pairs":                    "External->Internal",
+		"circuit_breaker_threshold":     5,
+		"circuit_breaker_reset_interval": "60s",
 		"cloudflare_whitelist_enabled": false,
 		"cloudflare_refresh_interval":  "168h",
 		"cloudflare_ipv4_url":          "https://www.cloudflare.com/ips-v4",

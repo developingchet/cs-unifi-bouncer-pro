@@ -590,13 +590,15 @@ func buildFWManager(ctx context.Context, cfg *config.Config,
 	}
 
 	return firewall.NewManager(firewall.ManagerConfig{
-		FirewallMode:     cfg.FirewallMode,
-		EnableIPv6:       cfg.FirewallEnableIPv6,
-		GroupCapacityV4:  v4Cap,
-		GroupCapacityV6:  v6Cap,
-		DryRun:           cfg.DryRun,
-		APIShardDelay:    cfg.FirewallAPIShardDelay,
-		FlushConcurrency: cfg.FirewallFlushConcurrency,
+		FirewallMode:                cfg.FirewallMode,
+		EnableIPv6:                  cfg.FirewallEnableIPv6,
+		GroupCapacityV4:             v4Cap,
+		GroupCapacityV6:             v6Cap,
+		DryRun:                      cfg.DryRun,
+		APIShardDelay:               cfg.FirewallAPIShardDelay,
+		FlushConcurrency:            cfg.FirewallFlushConcurrency,
+		CircuitBreakerThreshold:     cfg.CircuitBreakerThreshold,
+		CircuitBreakerResetInterval: cfg.CircuitBreakerResetInterval,
 		LegacyCfg: firewall.LegacyConfig{
 			RuleIndexStartV4: cfg.LegacyRuleIndexStartV4,
 			RuleIndexStartV6: cfg.LegacyRuleIndexStartV6,
