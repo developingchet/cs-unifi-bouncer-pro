@@ -391,6 +391,9 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 // Errors are logged per-shard and those shards remain dirty for retry on the next call.
 // Updates the DirtyShards gauge with the pre-sync dirty count before flushing.
 func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
+	// First pass: snapshot dirty-shard counts per site so the Prometheus gauge
+	// reflects pre-sync state and we know whether to emit a per-site Info log.
+	siteDirty := make(map[string]int, len(sites))
 	var totalDirty int
 	for _, site := range sites {
 		m.mu.RLock()
@@ -398,15 +401,19 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 		v6 := m.v6Mgrs[site]
 		m.mu.RUnlock()
 
+		n := 0
 		if v4 != nil {
-			totalDirty += v4.countDirty()
+			n += v4.countDirty()
 		}
 		if v6 != nil {
-			totalDirty += v6.countDirty()
+			n += v6.countDirty()
 		}
+		siteDirty[site] = n
+		totalDirty += n
 	}
 	metrics.DirtyShards.Set(float64(totalDirty))
 
+	// Second pass: flush and emit a per-site Info summary when work was done.
 	for _, site := range sites {
 		m.mu.RLock()
 		v4 := m.v4Mgrs[site]
@@ -418,6 +425,23 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 		}
 		if v6 != nil {
 			v6.syncAllFamilies(ctx)
+		}
+
+		if siteDirty[site] > 0 {
+			v4Total := 0
+			v6Total := 0
+			if v4 != nil {
+				v4Total = len(v4.AllMembers())
+			}
+			if v6 != nil {
+				v6Total = len(v6.AllMembers())
+			}
+			m.log.Info().
+				Str("site", site).
+				Int("v4_total", v4Total).
+				Int("v6_total", v6Total).
+				Int("dirty_shards", siteDirty[site]).
+				Msg("firewall sync complete")
 		}
 	}
 	return nil

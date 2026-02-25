@@ -106,7 +106,7 @@ func makeJobHandler(
 			recorder.RecordDeletion()
 		}
 
-		log.Info().Str("action", job.Action).Str("ip", job.IP).Bool("ipv6", job.IPv6).
+		log.Debug().Str("action", job.Action).Str("ip", job.IP).Bool("ipv6", job.IPv6).
 			Strs("sites", cfg.UnifiSites).Msg("job applied")
 		return nil
 	}
