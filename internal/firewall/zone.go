@@ -283,15 +283,22 @@ func (zm *ZoneManager) reorderPolicies(ctx context.Context, site string, zoneMap
 		}
 
 		var ourIDs []string
+		var otherIDs []string
 		for _, p := range policies {
 			if p.SrcZone != srcZoneID || p.DstZone != dstZoneID {
 				continue
 			}
-			// Check whether this policy name matches our naming convention by looking
-			// it up in bbolt (any policy we stored is ours).
+			// Skip system-defined (predefined) policies — they must not appear in
+			// the ordering request at all; only user-defined ones are listed.
+			if p.Predefined {
+				continue
+			}
+			// Check whether this policy is ours (stored in bbolt with mode="zone").
 			rec, _ := zm.store.GetPolicy(p.Name)
 			if rec != nil && rec.UnifiID == p.ID && rec.Mode == "zone" {
 				ourIDs = append(ourIDs, p.ID)
+			} else {
+				otherIDs = append(otherIDs, p.ID)
 			}
 		}
 
@@ -303,6 +310,7 @@ func (zm *ZoneManager) reorderPolicies(ctx context.Context, site string, zoneMap
 			SourceZoneID:           srcZoneID,
 			DestinationZoneID:      dstZoneID,
 			BeforeSystemDefinedIDs: ourIDs,
+			AfterSystemDefinedIDs:  otherIDs,
 		}); err != nil {
 			return fmt.Errorf("reorder policies for %s->%s: %w", pair.Src, pair.Dst, err)
 		}

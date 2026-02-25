@@ -701,10 +701,14 @@ func reorderZonePolicies(ctx context.Context, c *unifiClient, siteID string, req
 	q.Set("destinationFirewallZoneId", req.DestinationZoneID)
 	u.RawQuery = q.Encode()
 
+	afterIDs := req.AfterSystemDefinedIDs
+	if afterIDs == nil {
+		afterIDs = []string{}
+	}
 	payload := map[string]interface{}{
 		"orderedFirewallPolicyIds": map[string]interface{}{
 			"beforeSystemDefined": req.BeforeSystemDefinedIDs,
-			"afterSystemDefined":  []string{},
+			"afterSystemDefined":  afterIDs,
 		},
 	}
 	return doPUT(ctx, c, u.String(), "reorder-policies", payload)

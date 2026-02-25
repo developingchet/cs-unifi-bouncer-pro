@@ -69,10 +69,14 @@ type TrafficMatchingListItem struct {
 
 // ZonePolicyReorderRequest orders user-defined policies within a zone pair.
 // Zone IDs must be integration v1 UUIDs.
+// BeforeSystemDefinedIDs and AfterSystemDefinedIDs together must list ALL
+// user-defined (non-predefined) policy IDs for the zone pair, or the API
+// returns 400 "not-all-firewall-policies-specified".
 type ZonePolicyReorderRequest struct {
-	SourceZoneID           string
-	DestinationZoneID      string
-	BeforeSystemDefinedIDs []string
+	SourceZoneID            string
+	DestinationZoneID       string
+	BeforeSystemDefinedIDs  []string
+	AfterSystemDefinedIDs   []string
 }
 
 // Controller is the UniFi API seam. All methods accept context for deadline control.
