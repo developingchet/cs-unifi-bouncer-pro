@@ -2,6 +2,7 @@ package firewall
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -98,6 +99,18 @@ type ShardManager struct {
 	// Called with (ctx, shardIdx, groupID).
 	onActivated func(ctx context.Context, shardIdx int, groupID string)
 
+	// onRateLimit is called when a shard sync returns ErrRateLimit.
+	// The manager uses this to back off future flushes.
+	onRateLimit func(retryAfter time.Duration)
+
+	// onSyncError is called when a shard PUT fails (non-rate-limit errors).
+	// The manager uses this to trip the circuit breaker.
+	onSyncError func()
+
+	// onSyncSuccess is called after a successful shard PUT.
+	// The manager uses this to reset the circuit breaker.
+	onSyncSuccess func()
+
 	// orphanedGroups is populated by EnsureShards with placeholder-only groups found in UniFi.
 	// These groups should be deleted (policies/rules first, then the group).
 	// Guarded by mu.
@@ -153,6 +166,18 @@ func NewShardManager(site string, ipv6 bool, capacity int, namer *Namer,
 // Called during syncShard() with (ctx, shardIdx, groupID).
 func (sm *ShardManager) SetActivationCallback(fn func(ctx context.Context, shardIdx int, groupID string)) {
 	sm.onActivated = fn
+}
+
+// SetRateLimitCallback sets the function to be called when a shard sync returns ErrRateLimit.
+func (sm *ShardManager) SetRateLimitCallback(fn func(retryAfter time.Duration)) {
+	sm.onRateLimit = fn
+}
+
+// SetSyncCallbacks sets callbacks for shard sync success and non-rate-limit errors.
+// Used by the manager to drive the circuit breaker.
+func (sm *ShardManager) SetSyncCallbacks(onSuccess func(), onError func()) {
+	sm.onSyncSuccess = onSuccess
+	sm.onSyncError = onError
 }
 
 // TakeOrphanedGroups returns and clears the list of placeholder-only groups found during EnsureShards.
@@ -903,7 +928,11 @@ func (sm *ShardManager) updateMetricsLocked() {
 	familyName := Family(sm.ipv6)
 	for i, s := range family.Shards {
 		name, _ := sm.namer.GroupName(NameData{Family: familyName, Index: i, Site: sm.site})
-		metrics.FirewallGroupSize.WithLabelValues(familyName, name, sm.site).Set(float64(s.IPs.Len()))
+		count := float64(s.IPs.Len())
+		metrics.FirewallGroupSize.WithLabelValues(familyName, name, sm.site).Set(count)
+		if sm.shardLimit > 0 {
+			metrics.ShardOccupancy.WithLabelValues(familyName, name, sm.site).Set(count / float64(sm.shardLimit))
+		}
 	}
 }
 
@@ -993,6 +1022,16 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 		return
 	}
 
+	// Skip the PUT if content is unchanged from last successful flush.
+	// This avoids sending large JSON payloads when the janitor marks a shard dirty
+	// but no IPs actually changed (e.g., TTL-only expiry with no removal).
+	// Only applicable to Active shards — Pending shards must always be flushed.
+	if shard.State == ShardStateActive && !shard.IPs.HasChangedFromFlushed() {
+		shard.IPs.CommitFlushed() // clear dirty flag
+		sm.log.Debug().Str("shard", shard.Name).Msg("shard skipped: no change from last flush")
+		return
+	}
+
 	// Pending→Active transition: POST to create the group first
 	wasCreating := false
 	if shard.State == ShardStatePending {
@@ -1059,12 +1098,26 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 	if putErr != nil {
 		metrics.ShardSyncTotal.WithLabelValues(shard.Family, shardLabel, sm.site, "error").Inc()
 		metrics.ShardSyncDuration.WithLabelValues(shard.Family, shardLabel, sm.site).Observe(time.Since(start).Seconds())
+
+		// Propagate rate-limit signal to manager before logging so the manager can
+		// suppress further flushes during the Retry-After window.
+		var rl *controller.ErrRateLimit
+		if errors.As(putErr, &rl) && sm.onRateLimit != nil {
+			sm.onRateLimit(rl.RetryAfter)
+			sm.log.Warn().Dur("retry_after", rl.RetryAfter).Str("shard", shard.Name).
+				Msg("rate limited by controller; backing off")
+			return
+		}
+
 		sm.log.Error().Err(putErr).Str("shard", shard.Name).Str("shard_id", shard.ID).Int("ip_count", len(ips)).
 			Msg("shard sync failed, will retry next tick")
+		if sm.onSyncError != nil {
+			sm.onSyncError()
+		}
 		return
 	}
 
-	shard.IPs.CommitClean()
+	shard.IPs.CommitFlushed()
 	if err := sm.store.SetGroup(shard.Name, storage.GroupRecord{
 		UnifiID: shard.ID,
 		Site:    sm.site,
@@ -1091,6 +1144,9 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 		pendingCB()
 	}
 
+	if sm.onSyncSuccess != nil {
+		sm.onSyncSuccess()
+	}
 	metrics.ShardSyncTotal.WithLabelValues(shard.Family, shardLabel, sm.site, "ok").Inc()
 	metrics.ShardSyncDuration.WithLabelValues(shard.Family, shardLabel, sm.site).Observe(time.Since(start).Seconds())
 	sm.log.Debug().Str("shard", shard.Name).Int("count", len(ips)).Msg("shard synced")
