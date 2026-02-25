@@ -49,7 +49,7 @@ The Docker image is hardened by default:
 
 - All outbound connections to the UniFi controller and CrowdSec LAPI enforce TLS 1.2 minimum
 - Self-signed certificate support via `UNIFI_CA_CERT` (avoid disabling verification in production)
-- HTTP timeouts configured via `UNIFI_HTTP_TIMEOUT` (default 15 s) and `SESSION_REAUTH_TIMEOUT`
+- HTTP timeouts configured via `UNIFI_HTTP_TIMEOUT` (default 120 s) and `SESSION_REAUTH_TIMEOUT`
 
 ## Connectivity Timeout Root Cause (resolved)
 

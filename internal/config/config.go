@@ -177,7 +177,7 @@ func (c *Config) sanitise() {
 func defaults() map[string]interface{} {
 	return map[string]interface{}{
 		"unifi_verify_tls":            false,
-		"unifi_http_timeout":          "15s",
+		"unifi_http_timeout":          "120s",
 		"unifi_sites":                 "default",
 		"firewall_mode":               "auto",
 		"firewall_block_action":       "drop",

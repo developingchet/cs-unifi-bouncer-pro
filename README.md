@@ -79,7 +79,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `UNIFI_SITES` | `default` | Comma-separated list of site names to manage |
 | `UNIFI_VERIFY_TLS` | `false` | Verify the controller's TLS certificate |
 | `UNIFI_CA_CERT` | — | Path to a custom CA certificate file |
-| `UNIFI_HTTP_TIMEOUT` | `15s` | Per-request HTTP timeout |
+| `UNIFI_HTTP_TIMEOUT` | `120s` | Per-request HTTP timeout |
 | `UNIFI_API_DEBUG` | `false` | Log raw HTTP request/response bodies |
 | `ENABLE_IPV6` | `false` | Enable IPv6 TCP dialing to the UniFi controller. Leave `false` unless your controller is reachable over IPv6. This is separate from `FIREWALL_ENABLE_IPV6` which controls IPv6 firewall rule creation. |
 
