@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/rs/zerolog"
 )
@@ -20,6 +21,23 @@ func newJanitorTestStore(t *testing.T) storage.Store {
 	return s
 }
 
+// nopFWManager satisfies firewall.Manager with no-op implementations for janitor tests.
+type nopFWManager struct{}
+
+func (nopFWManager) ApplyBan(_ context.Context, _, _ string, _ bool) error          { return nil }
+func (nopFWManager) ApplyUnban(_ context.Context, _, _ string, _ bool) error        { return nil }
+func (nopFWManager) Reconcile(_ context.Context, _ []string) (*firewall.ReconcileResult, error) {
+	return &firewall.ReconcileResult{}, nil
+}
+func (nopFWManager) EnsureInfrastructure(_ context.Context, _ []string) error { return nil }
+func (nopFWManager) SyncDirty(_ context.Context, _ []string) error             { return nil }
+func (nopFWManager) Drain(_ context.Context, _ []string) error                 { return nil }
+func (nopFWManager) ZoneManager() *firewall.ZoneManager                        { return nil }
+
+func newTestJanitor(store storage.Store, interval time.Duration) *Janitor {
+	return NewJanitor(store, nopFWManager{}, []string{"default"}, interval, zerolog.Nop())
+}
+
 func TestJanitor_PrunesExpiredBans(t *testing.T) {
 	store := newJanitorTestStore(t)
 
@@ -33,8 +51,8 @@ func TestJanitor_PrunesExpiredBans(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	j := NewJanitor(store, 100*time.Millisecond, zerolog.Nop())
-	j.tick()
+	j := newTestJanitor(store, 100*time.Millisecond)
+	j.tick(context.Background())
 
 	// Expired ban should be gone
 	exists, _ := store.BanExists("1.2.3.4")
@@ -56,8 +74,8 @@ func TestJanitor_KeepsFreshBans(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	j := NewJanitor(store, 100*time.Millisecond, zerolog.Nop())
-	j.tick()
+	j := newTestJanitor(store, 100*time.Millisecond)
+	j.tick(context.Background())
 
 	exists, _ := store.BanExists("9.9.9.9")
 	if !exists {
@@ -68,10 +86,10 @@ func TestJanitor_KeepsFreshBans(t *testing.T) {
 func TestJanitor_UpdatesDBSizeMetric(t *testing.T) {
 	store := newJanitorTestStore(t)
 
-	j := NewJanitor(store, 100*time.Millisecond, zerolog.Nop())
+	j := newTestJanitor(store, 100*time.Millisecond)
 	// tick() should not panic even if Prometheus metrics aren't registered
 	// (they register on first use). Just verify no error/panic.
-	j.tick()
+	j.tick(context.Background())
 }
 
 func TestJanitor_TickImmediatelyOnStart(t *testing.T) {
@@ -83,7 +101,7 @@ func TestJanitor_TickImmediatelyOnStart(t *testing.T) {
 	}
 
 	// Use a long ticker interval so the timer doesn't fire during the test
-	j := NewJanitor(store, 10*time.Minute, zerolog.Nop())
+	j := newTestJanitor(store, 10*time.Minute)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 

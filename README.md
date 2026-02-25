@@ -319,12 +319,69 @@ Available at `:8081` (configurable via `HEALTH_ADDR`):
 
 ## CLI Commands
 
+| Command | Description |
+|---------|-------------|
+| `run` | Start the daemon (default) |
+| `healthcheck` | Exit 0 if healthy; exit 1 otherwise. Used by Docker `HEALTHCHECK`. |
+| `reconcile` | Connect to UniFi and CrowdSec, run a one-shot full reconcile, then exit |
+| `status` | Read-only bbolt inspection — prints ban counts, group/policy counts, DB size. Zero API calls; safe to run while the daemon is running |
+| `drain` | Remove all managed firewall objects (policies, rules, shard groups) from UniFi and clean up bbolt. Requires `--force` or `--dry-run`. |
+| `version` | Print version, commit hash, and build date |
+
 ```bash
 cs-unifi-bouncer-pro run          # Start the daemon
 cs-unifi-bouncer-pro healthcheck  # Exit 0 if healthy (used by Docker HEALTHCHECK)
 cs-unifi-bouncer-pro reconcile    # One-shot full reconcile then exit
+cs-unifi-bouncer-pro status       # Inspect bbolt state without API calls
+cs-unifi-bouncer-pro drain --dry-run   # Preview what drain would remove
+cs-unifi-bouncer-pro drain --force     # Actually remove all managed objects
 cs-unifi-bouncer-pro version      # Print version and build information
 ```
+
+### `status` subcommand
+
+Opens the bbolt database in read-only mode and prints a summary table:
+
+```
+FIELD              VALUE
+bans_active        1234
+bans_expired       7
+groups             3
+policies           6
+db_size_bytes      131072
+last_group_update  2026-02-24T12:00:00Z
+```
+
+The `--data-dir` flag overrides the data directory (default: `DATA_DIR` env or `/data`).
+
+### `drain` subcommand
+
+Removes all firewall objects managed by the bouncer for each configured site:
+1. Zone policies / legacy rules (referencing objects first)
+2. Traffic Matching List / Firewall Group shard objects
+3. Corresponding bbolt group and policy records
+
+Requires either `--force` (execute) or `--dry-run` (log only, no changes).
+
+---
+
+## SIGHUP Hot-Reload
+
+Sending `SIGHUP` to the running daemon triggers a live reload of the zone-pair configuration without restarting:
+
+```bash
+# Get the PID
+docker exec cs-unifi-bouncer-pro cat /proc/1/status | grep ^Pid
+# Or use kill in the container
+docker exec cs-unifi-bouncer-pro kill -HUP 1
+```
+
+On receipt, the daemon:
+1. Re-reads the configuration from environment
+2. Re-resolves zone names → UUIDs for each configured site
+3. Updates the in-memory zone cache
+
+Only zone pair changes (`ZONE_PAIRS`) are applied via SIGHUP. All other config changes require a restart. In legacy mode, SIGHUP is a no-op (logged as a warning).
 
 ---
 

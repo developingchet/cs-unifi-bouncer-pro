@@ -92,6 +92,43 @@ func (zm *ZoneManager) Bootstrap(ctx context.Context, sites []string) error {
 	return nil
 }
 
+// Reload updates the zone pair configuration and repopulates the zone ID cache
+// for all given sites. Safe to call concurrently with read operations.
+func (zm *ZoneManager) Reload(ctx context.Context, sites []string, pairs []config.ZonePair) error {
+	zm.mu.Lock()
+	zm.cfg.ZonePairs = pairs
+	zm.mu.Unlock()
+
+	var firstErr error
+	for _, site := range sites {
+		siteZones := make(map[string]string)
+		for _, pair := range pairs {
+			for _, name := range []string{pair.Src, pair.Dst} {
+				if _, ok := siteZones[name]; ok {
+					continue
+				}
+				id, err := zm.ctrl.GetZoneID(ctx, site, name)
+				if err != nil {
+					zm.log.Warn().Err(err).Str("site", site).Str("zone", name).
+						Msg("reload: failed to resolve zone ID")
+					if firstErr == nil {
+						firstErr = fmt.Errorf("reload zone %q for site %q: %w", name, site, err)
+					}
+					continue
+				}
+				siteZones[name] = id
+			}
+		}
+		zm.mu.Lock()
+		if zm.zoneCache == nil {
+			zm.zoneCache = make(map[string]map[string]string)
+		}
+		zm.zoneCache[site] = siteZones
+		zm.mu.Unlock()
+	}
+	return firstErr
+}
+
 // EnsurePolicies idempotently creates zone policies for each shard and zone pair.
 func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards, v6Shards *ShardManager) error {
 	zm.mu.RLock()

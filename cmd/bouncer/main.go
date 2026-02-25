@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/bouncer"
@@ -49,6 +50,8 @@ func main() {
 		healthcheckCmd(),
 		versionCmd(),
 		reconcileCmd(),
+		statusCmd(),
+		drainCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -110,23 +113,6 @@ func runDaemon() error {
 	}
 	defer ctrl.Close()
 
-	namer, err := firewall.NewNamer(
-		cfg.GroupNameTemplate,
-		cfg.RuleNameTemplate,
-		cfg.PolicyNameTemplate,
-		cfg.ObjectDescription,
-	)
-	if err != nil {
-		return fmt.Errorf("build namer: %w", err)
-	}
-
-	v4Cap, v6Cap := resolveCapacities(cfg)
-
-	zonePairs, err := cfg.ParseZonePairs()
-	if err != nil {
-		return fmt.Errorf("parse zone pairs: %w", err)
-	}
-
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -158,38 +144,49 @@ func runDaemon() error {
 		}
 	}
 
-	fwMgr := firewall.NewManager(firewall.ManagerConfig{
-		FirewallMode:     cfg.FirewallMode,
-		EnableIPv6:       cfg.FirewallEnableIPv6,
-		GroupCapacityV4:  v4Cap,
-		GroupCapacityV6:  v6Cap,
-		DryRun:           cfg.DryRun,
-		APIShardDelay:    cfg.FirewallAPIShardDelay,
-		FlushConcurrency: cfg.FirewallFlushConcurrency,
-		LegacyCfg: firewall.LegacyConfig{
-			RuleIndexStartV4: cfg.LegacyRuleIndexStartV4,
-			RuleIndexStartV6: cfg.LegacyRuleIndexStartV6,
-			RulesetV4:        cfg.LegacyRulesetV4,
-			RulesetV6:        cfg.LegacyRulesetV6,
-			BlockAction:      cfg.FirewallBlockAction,
-			LogDrops:         cfg.FirewallLogDrops,
-			Description:      cfg.ObjectDescription,
-			APIWriteDelay:    cfg.FirewallAPIShardDelay,
-		},
-		ZoneCfg: firewall.ZoneConfig{
-			ZonePairs:     zonePairs,
-			Description:   cfg.ObjectDescription,
-			LogDrops:      cfg.FirewallLogDrops,
-			APIWriteDelay: cfg.FirewallAPIShardDelay,
-			PolicyReorder: cfg.ZonePolicyReorder,
-		},
-	}, ctrl, store, namer, log)
+	fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log)
+	if err != nil {
+		return err
+	}
 
 	// Bootstrap infrastructure
 	log.Info().Strs("sites", cfg.UnifiSites).Msg("ensuring firewall infrastructure")
 	if err := fwMgr.EnsureInfrastructure(ctx, cfg.UnifiSites); err != nil {
 		return fmt.Errorf("ensure infrastructure: %w", err)
 	}
+
+	// SIGHUP hot-reload: reload config and update zone pairs without restart.
+	sighup := make(chan os.Signal, 1)
+	signal.Notify(sighup, syscall.SIGHUP)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sighup:
+				newCfg, err := config.Load()
+				if err != nil {
+					log.Warn().Err(err).Msg("SIGHUP: reload config failed")
+					continue
+				}
+				newPairs, err := newCfg.ParseZonePairs()
+				if err != nil {
+					log.Warn().Err(err).Msg("SIGHUP: parse zone pairs failed")
+					continue
+				}
+				zm := fwMgr.ZoneManager()
+				if zm == nil {
+					log.Warn().Msg("SIGHUP: ZoneManager not available (legacy mode?), skipping reload")
+					continue
+				}
+				if err := zm.Reload(ctx, newCfg.UnifiSites, newPairs); err != nil {
+					log.Warn().Err(err).Msg("SIGHUP: zone reload completed with errors")
+				} else {
+					log.Info().Msg("SIGHUP: zone pairs reloaded successfully")
+				}
+			}
+		}
+	}()
 
 	// Start Cloudflare whitelist sync if enabled
 	var cfManager *whitelist.Manager
@@ -241,7 +238,7 @@ func runDaemon() error {
 	}
 
 	// Start janitor
-	janitor := bouncer.NewJanitor(store, cfg.JanitorInterval, log)
+	janitor := bouncer.NewJanitor(store, fwMgr, cfg.UnifiSites, cfg.JanitorInterval, log)
 	go func() {
 		if err := janitor.Run(ctx); err != nil {
 			log.Warn().Err(err).Msg("janitor exited")
@@ -380,43 +377,10 @@ func reconcileCmd() *cobra.Command {
 			}
 			defer ctrl.Close()
 
-			namer, err := firewall.NewNamer(cfg.GroupNameTemplate, cfg.RuleNameTemplate, cfg.PolicyNameTemplate, cfg.ObjectDescription)
+			fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log)
 			if err != nil {
 				return err
 			}
-
-			zonePairs, err := cfg.ParseZonePairs()
-			if err != nil {
-				return err
-			}
-
-			rcV4Cap, rcV6Cap := resolveCapacities(cfg)
-			fwMgr := firewall.NewManager(firewall.ManagerConfig{
-				FirewallMode:     cfg.FirewallMode,
-				EnableIPv6:       cfg.FirewallEnableIPv6,
-				GroupCapacityV4:  rcV4Cap,
-				GroupCapacityV6:  rcV6Cap,
-						DryRun:           cfg.DryRun,
-				APIShardDelay:    cfg.FirewallAPIShardDelay,
-				FlushConcurrency: cfg.FirewallFlushConcurrency,
-				LegacyCfg: firewall.LegacyConfig{
-					RuleIndexStartV4: cfg.LegacyRuleIndexStartV4,
-					RuleIndexStartV6: cfg.LegacyRuleIndexStartV6,
-					RulesetV4:        cfg.LegacyRulesetV4,
-					RulesetV6:        cfg.LegacyRulesetV6,
-					BlockAction:      cfg.FirewallBlockAction,
-					LogDrops:         cfg.FirewallLogDrops,
-					Description:      cfg.ObjectDescription,
-					APIWriteDelay:    cfg.FirewallAPIShardDelay,
-				},
-				ZoneCfg: firewall.ZoneConfig{
-					ZonePairs:     zonePairs,
-					Description:   cfg.ObjectDescription,
-					LogDrops:      cfg.FirewallLogDrops,
-					APIWriteDelay: cfg.FirewallAPIShardDelay,
-					PolicyReorder: cfg.ZonePolicyReorder,
-				},
-			}, ctrl, store, namer, log)
 
 			if err := fwMgr.EnsureInfrastructure(ctx, cfg.UnifiSites); err != nil {
 				return err
@@ -434,6 +398,218 @@ func reconcileCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// statusCmd prints a read-only summary of the bbolt database state.
+// It opens the database in read-only mode and prints ban counts, group info,
+// and policy info. Zero API calls are made; safe to run while daemon is running.
+func statusCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Print a read-only summary of bbolt state (no API calls)",
+		Long: `Print ban counts, shard groups, and firewall policies stored in bbolt.
+Opens the database in read-only mode — safe to run while the daemon is running.`,
+	}
+
+	defaultDataDir := os.Getenv("DATA_DIR")
+	if defaultDataDir == "" {
+		defaultDataDir = "/data"
+	}
+	var dataDir string
+	cmd.Flags().StringVar(&dataDir, "data-dir", defaultDataDir,
+		"Path to the data directory containing bouncer.db (env: DATA_DIR)")
+
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		store, err := storage.NewBboltStoreReadOnly(dataDir)
+		if err != nil {
+			return fmt.Errorf("open store (read-only): %w", err)
+		}
+		defer store.Close()
+
+		banList, err := store.BanList()
+		if err != nil {
+			return fmt.Errorf("list bans: %w", err)
+		}
+		groups, err := store.ListGroups()
+		if err != nil {
+			return fmt.Errorf("list groups: %w", err)
+		}
+		policies, err := store.ListPolicies()
+		if err != nil {
+			return fmt.Errorf("list policies: %w", err)
+		}
+		sizeBytes, err := store.SizeBytes()
+		if err != nil {
+			return fmt.Errorf("db size: %w", err)
+		}
+
+		now := time.Now()
+		var activeBans, expiredBans int
+		for _, entry := range banList {
+			if !entry.ExpiresAt.IsZero() && entry.ExpiresAt.Before(now) {
+				expiredBans++
+			} else {
+				activeBans++
+			}
+		}
+
+		var maxUpdatedAt time.Time
+		for _, rec := range groups {
+			if rec.UpdatedAt.After(maxUpdatedAt) {
+				maxUpdatedAt = rec.UpdatedAt
+			}
+		}
+
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "FIELD\tVALUE")
+		fmt.Fprintf(w, "bans_active\t%d\n", activeBans)
+		fmt.Fprintf(w, "bans_expired\t%d\n", expiredBans)
+		fmt.Fprintf(w, "groups\t%d\n", len(groups))
+		fmt.Fprintf(w, "policies\t%d\n", len(policies))
+		fmt.Fprintf(w, "db_size_bytes\t%d\n", sizeBytes)
+		if !maxUpdatedAt.IsZero() {
+			fmt.Fprintf(w, "last_group_update\t%s\n", maxUpdatedAt.UTC().Format(time.RFC3339))
+		} else {
+			fmt.Fprintf(w, "last_group_update\t-\n")
+		}
+		return w.Flush()
+	}
+
+	return cmd
+}
+
+// drainCmd removes all managed firewall objects from UniFi and cleans up bbolt.
+func drainCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "drain",
+		Short: "Remove all managed firewall objects from UniFi and clean up bbolt",
+		Long: `Deletes all managed firewall policies/rules and shard groups for every
+configured site, then removes corresponding entries from bbolt.
+
+Requires either --force or --dry-run for safety.`,
+	}
+
+	var dryRun bool
+	var force bool
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Log what would be removed without making changes")
+	cmd.Flags().BoolVar(&force, "force", false, "Actually remove objects (required unless --dry-run)")
+
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		if !dryRun && !force {
+			return fmt.Errorf("drain requires --force (or use --dry-run to preview)")
+		}
+
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		if dryRun {
+			cfg.DryRun = true
+		}
+
+		log := buildLogger(cfg)
+		for _, w := range cfg.DeprecationWarnings {
+			log.Warn().Msg(w)
+		}
+
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+
+		store, err := storage.NewBboltStore(cfg.DataDir)
+		if err != nil {
+			return fmt.Errorf("open storage: %w", err)
+		}
+		defer store.Close()
+
+		ctrl, err := controller.NewClient(ctx, controller.ClientConfig{
+			BaseURL:      cfg.UnifiURL,
+			Username:     cfg.UnifiUsername,
+			Password:     cfg.UnifiPassword,
+			APIKey:       cfg.UnifiAPIKey,
+			VerifyTLS:    cfg.UnifiVerifyTLS,
+			CACertPath:   cfg.UnifiCACert,
+			Timeout:      cfg.UnifiHTTPTimeout,
+			Debug:        cfg.UnifiAPIDebug,
+			ReauthMinGap: cfg.SessionReauthMinGap,
+			EnableIPv6:   cfg.EnableIPv6,
+		}, log)
+		if err != nil {
+			return fmt.Errorf("init UniFi client: %w", err)
+		}
+		defer ctrl.Close()
+
+		fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log)
+		if err != nil {
+			return err
+		}
+
+		// EnsureInfrastructure is needed so shard managers are populated before Drain.
+		if !dryRun {
+			log.Info().Strs("sites", cfg.UnifiSites).Msg("loading firewall infrastructure state")
+			if err := fwMgr.EnsureInfrastructure(ctx, cfg.UnifiSites); err != nil {
+				return fmt.Errorf("ensure infrastructure: %w", err)
+			}
+		}
+
+		if err := fwMgr.Drain(ctx, cfg.UnifiSites); err != nil {
+			return fmt.Errorf("drain: %w", err)
+		}
+
+		fmt.Printf("drain complete (dry_run=%v)\n", dryRun)
+		return nil
+	}
+
+	return cmd
+}
+
+// buildFWManager constructs a firewall.Manager from config, controller, store, and logger.
+// It does NOT call EnsureInfrastructure — callers do that themselves when needed.
+func buildFWManager(ctx context.Context, cfg *config.Config,
+	ctrl controller.Controller, store storage.Store, log zerolog.Logger,
+) (firewall.Manager, error) {
+	namer, err := firewall.NewNamer(
+		cfg.GroupNameTemplate,
+		cfg.RuleNameTemplate,
+		cfg.PolicyNameTemplate,
+		cfg.ObjectDescription,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build namer: %w", err)
+	}
+
+	v4Cap, v6Cap := resolveCapacities(cfg)
+
+	zonePairs, err := cfg.ParseZonePairs()
+	if err != nil {
+		return nil, fmt.Errorf("parse zone pairs: %w", err)
+	}
+
+	return firewall.NewManager(firewall.ManagerConfig{
+		FirewallMode:     cfg.FirewallMode,
+		EnableIPv6:       cfg.FirewallEnableIPv6,
+		GroupCapacityV4:  v4Cap,
+		GroupCapacityV6:  v6Cap,
+		DryRun:           cfg.DryRun,
+		APIShardDelay:    cfg.FirewallAPIShardDelay,
+		FlushConcurrency: cfg.FirewallFlushConcurrency,
+		LegacyCfg: firewall.LegacyConfig{
+			RuleIndexStartV4: cfg.LegacyRuleIndexStartV4,
+			RuleIndexStartV6: cfg.LegacyRuleIndexStartV6,
+			RulesetV4:        cfg.LegacyRulesetV4,
+			RulesetV6:        cfg.LegacyRulesetV6,
+			BlockAction:      cfg.FirewallBlockAction,
+			LogDrops:         cfg.FirewallLogDrops,
+			Description:      cfg.ObjectDescription,
+			APIWriteDelay:    cfg.FirewallAPIShardDelay,
+		},
+		ZoneCfg: firewall.ZoneConfig{
+			ZonePairs:     zonePairs,
+			Description:   cfg.ObjectDescription,
+			LogDrops:      cfg.FirewallLogDrops,
+			APIWriteDelay: cfg.FirewallAPIShardDelay,
+			PolicyReorder: cfg.ZonePolicyReorder,
+		},
+	}, ctrl, store, namer, log), nil
 }
 
 // resolveCapacities determines effective v4/v6 group capacities from config,

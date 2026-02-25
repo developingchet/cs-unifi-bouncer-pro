@@ -49,6 +49,14 @@ func (m *mockFirewallManager) SyncDirty(_ context.Context, sites []string) error
 	return nil
 }
 
+func (m *mockFirewallManager) Drain(_ context.Context, sites []string) error {
+	return nil
+}
+
+func (m *mockFirewallManager) ZoneManager() *firewall.ZoneManager {
+	return nil
+}
+
 // testCfg returns a minimal config suitable for handler tests.
 func testCfg(sites ...string) *config.Config {
 	if len(sites) == 0 {

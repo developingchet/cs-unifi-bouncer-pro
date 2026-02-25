@@ -22,11 +22,29 @@ type ReconcileResult struct {
 
 // Manager is the firewall management interface.
 type Manager interface {
+	// Reconcile performs a full diff between bbolt state and UniFi API state,
+	// adding missing IPs and removing extra ones.
 	Reconcile(ctx context.Context, sites []string) (*ReconcileResult, error)
+
+	// ApplyBan adds an IP to the appropriate shard for all given sites.
 	ApplyBan(ctx context.Context, site, ip string, ipv6 bool) error
+
+	// ApplyUnban removes an IP from its shard for all given sites.
 	ApplyUnban(ctx context.Context, site, ip string, ipv6 bool) error
+
+	// EnsureInfrastructure bootstraps all firewall groups, rules, and policies
+	// for every configured site. Must be called before ApplyBan/ApplyUnban.
 	EnsureInfrastructure(ctx context.Context, sites []string) error
+
+	// SyncDirty flushes all dirty shards to the UniFi API.
 	SyncDirty(ctx context.Context, sites []string) error
+
+	// Drain removes all managed firewall objects (policies/rules, shard groups)
+	// for the given sites and cleans up bbolt state. In dry-run mode it only logs.
+	Drain(ctx context.Context, sites []string) error
+
+	// ZoneManager returns the underlying ZoneManager, or nil in legacy mode.
+	ZoneManager() *ZoneManager
 }
 
 // ManagerConfig holds all firewall manager configuration.
@@ -449,6 +467,105 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 	m.UpdateActiveBansMetric()
 	metrics.LastSyncTimestamp.Set(float64(time.Now().Unix()))
 	return nil
+}
+
+// Drain removes all managed firewall objects for the given sites and cleans up bbolt.
+// Order per site: policies/rules first, then TML groups, then bbolt cleanup.
+func (m *managerImpl) Drain(ctx context.Context, sites []string) error {
+	drainedPolicies := 0
+	drainedShards := 0
+
+	for _, site := range sites {
+		mode := m.cachedMode(site)
+
+		// 1. Delete policies/rules
+		if m.cfg.DryRun {
+			m.log.Info().Str("site", site).Str("mode", mode).
+				Msg("[DRY-RUN] would delete firewall policies/rules")
+		} else {
+			switch mode {
+			case "zone":
+				if err := m.zoneMgr.DeletePolicies(ctx, site); err != nil {
+					m.log.Warn().Err(err).Str("site", site).Msg("drain: delete zone policies error")
+				}
+			case "legacy":
+				if err := m.legacyMgr.DeleteRules(ctx, site); err != nil {
+					m.log.Warn().Err(err).Str("site", site).Msg("drain: delete legacy rules error")
+				}
+			}
+		}
+
+		// 2. Delete shard group objects
+		m.mu.RLock()
+		v4 := m.v4Mgrs[site]
+		v6 := m.v6Mgrs[site]
+		m.mu.RUnlock()
+
+		for _, sm := range []*ShardManager{v4, v6} {
+			if sm == nil {
+				continue
+			}
+			for _, groupID := range sm.GroupIDs() {
+				if groupID == "" {
+					continue
+				}
+				if m.cfg.DryRun {
+					m.log.Info().Str("site", site).Str("group_id", groupID).
+						Msg("[DRY-RUN] would delete shard group")
+				} else {
+					if err := sm.DeleteShardObject(ctx, groupID); err != nil {
+						m.log.Warn().Err(err).Str("site", site).Str("group_id", groupID).
+							Msg("drain: delete shard group error")
+					}
+				}
+				drainedShards++
+			}
+		}
+
+		// 3. Clean up bbolt group and policy records for this site
+		if !m.cfg.DryRun {
+			groups, err := m.store.ListGroups()
+			if err != nil {
+				m.log.Warn().Err(err).Str("site", site).Msg("drain: list groups error")
+			} else {
+				for name, rec := range groups {
+					if rec.Site != site {
+						continue
+					}
+					if err := m.store.DeleteGroup(name); err != nil {
+						m.log.Warn().Err(err).Str("group", name).Msg("drain: delete group from bbolt error")
+					}
+				}
+			}
+
+			policies, err := m.store.ListPolicies()
+			if err != nil {
+				m.log.Warn().Err(err).Str("site", site).Msg("drain: list policies error")
+			} else {
+				for name, rec := range policies {
+					if rec.Site != site {
+						continue
+					}
+					drainedPolicies++
+					if err := m.store.DeletePolicy(name); err != nil {
+						m.log.Warn().Err(err).Str("policy", name).Msg("drain: delete policy from bbolt error")
+					}
+				}
+			}
+		}
+	}
+
+	m.log.Info().
+		Int("policies", drainedPolicies).
+		Int("shards", drainedShards).
+		Bool("dry_run", m.cfg.DryRun).
+		Msg("drain complete")
+	return nil
+}
+
+// ZoneManager returns the underlying ZoneManager, or nil in legacy mode.
+func (m *managerImpl) ZoneManager() *ZoneManager {
+	return m.zoneMgr
 }
 
 // ensureNewShardInfrastructure provisions the firewall rule/policy for a newly created shard.

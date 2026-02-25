@@ -44,6 +44,21 @@ func NewBboltStore(dataDir string) (Store, error) {
 	return &bboltStore{db: db}, nil
 }
 
+// NewBboltStoreReadOnly opens an existing bbolt database in read-only mode.
+// It does not create the file or buckets. Suitable for the status subcommand
+// while the daemon may be running concurrently.
+func NewBboltStoreReadOnly(dataDir string) (Store, error) {
+	path := filepath.Join(dataDir, "bouncer.db")
+	db, err := bolt.Open(path, 0o600, &bolt.Options{
+		ReadOnly: true,
+		Timeout:  3 * time.Second,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open bbolt (read-only) at %s: %w", path, err)
+	}
+	return &bboltStore{db: db}, nil
+}
+
 // ---- Ban operations --------------------------------------------------------
 
 func (s *bboltStore) BanExists(ip string) (bool, error) {
