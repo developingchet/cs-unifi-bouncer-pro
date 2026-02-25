@@ -10,6 +10,7 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
@@ -28,8 +29,9 @@ type SyncJob struct {
 	IP              string
 	IPv6            bool
 	ExpiresAt       time.Time
-	Origin          string // CrowdSec decision origin (e.g. "CAPI", "crowdsec")
-	RemediationType string // CrowdSec remediation type (e.g. "ban")
+	Origin          string    // CrowdSec decision origin (e.g. "CAPI", "crowdsec")
+	RemediationType string    // CrowdSec remediation type (e.g. "ban")
+	ReceivedAt      time.Time // when this decision passed the filter pipeline; zero = unknown
 }
 
 // JobHandler processes a single SyncJob.
@@ -60,7 +62,26 @@ func makeJobHandler(
 			return nil
 		}
 
-		// Step 2: Apply to all sites
+		// In dry run, skip bbolt state mutations and recorder calls to keep state consistent.
+		if cfg.DryRun {
+			log.Info().Str("action", job.Action).Str("ip", job.IP).Bool("ipv6", job.IPv6).
+				Strs("sites", cfg.UnifiSites).Msg("[DRY-RUN] would persist job to bbolt")
+			return nil
+		}
+
+		// Step 2: Persist ban to bbolt BEFORE applying to UniFi.
+		// This order ensures that a crash between the two leaves the IP recorded in bbolt,
+		// so FIREWALL_RECONCILE_ON_START can restore it to UniFi on next startup.
+		// For the delete path the order is reversed: remove from UniFi first so a crash
+		// after the API call but before bbolt cleanup leaves the IP in bbolt (and reconcile
+		// will add it back), which is the safe side.
+		if job.Action == "ban" {
+			if err := store.BanRecord(job.IP, job.ExpiresAt, job.IPv6); err != nil {
+				log.Warn().Err(err).Str("ip", job.IP).Msg("failed to record ban in bbolt")
+			}
+		}
+
+		// Step 3: Apply to all sites
 		sites := cfg.UnifiSites
 		for _, site := range sites {
 			var applyErr error
@@ -84,19 +105,12 @@ func makeJobHandler(
 			}
 		}
 
-		// Step 3: Persist to bbolt and record LAPI metrics.
-		// In dry run, ApplyBan/ApplyUnban already returned without writing to UniFi.
-		// Skip bbolt state mutations and recorder calls to keep state consistent.
-		if cfg.DryRun {
-			log.Info().Str("action", job.Action).Str("ip", job.IP).Bool("ipv6", job.IPv6).
-				Strs("sites", cfg.UnifiSites).Msg("[DRY-RUN] would persist job to bbolt")
-			return nil
-		}
-
+		// Step 4: Finalize bbolt state and record LAPI metrics.
 		switch job.Action {
 		case "ban":
-			if err := store.BanRecord(job.IP, job.ExpiresAt, job.IPv6); err != nil {
-				log.Warn().Err(err).Str("ip", job.IP).Msg("failed to record ban in bbolt")
+			// Observe decision-to-block latency for successfully applied bans.
+			if !job.ReceivedAt.IsZero() {
+				metrics.DecisionLatency.Observe(time.Since(job.ReceivedAt).Seconds())
 			}
 			recorder.RecordBan(job.Origin, job.RemediationType)
 		case "delete":
