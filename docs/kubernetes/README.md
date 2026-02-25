@@ -37,7 +37,12 @@
    kubectl apply -f docs/kubernetes/deployment.yaml
    ```
 
-5. **Verify** the pod is running:
+5. **Apply the NetworkPolicy** (recommended — restricts ingress/egress to known ports):
+   ```bash
+   kubectl apply -f docs/kubernetes/networkpolicy.yaml
+   ```
+
+6. **Verify** the pod is running:
    ```bash
    kubectl -n crowdsec get pods -l app=cs-unifi-bouncer-pro
    kubectl -n crowdsec logs -l app=cs-unifi-bouncer-pro -f

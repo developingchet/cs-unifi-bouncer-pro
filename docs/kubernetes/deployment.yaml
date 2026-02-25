@@ -26,7 +26,9 @@ spec:
     spec:
       containers:
         - name: cs-unifi-bouncer-pro
-          image: ghcr.io/developingchet/cs-unifi-bouncer-pro:latest
+          # Pin to a specific release tag. Using 'latest' is not recommended in production
+          # as it makes rollbacks and auditing difficult.
+          image: ghcr.io/developingchet/cs-unifi-bouncer-pro:v0.1.0
           args: ["run"]
           env:
             - name: DATA_DIR

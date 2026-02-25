@@ -57,18 +57,20 @@ func (cb *circuitBreaker) allow() bool {
 			return true
 		}
 		return false
-	case circuitHalfOpen:
+	default: // circuitHalfOpen — allow the probe request through
 		return true
 	}
-	return true
 }
 
 // recordSuccess resets the breaker to closed state.
-func (cb *circuitBreaker) recordSuccess() {
+// Returns true if the breaker was previously open or half-open (i.e. just recovered).
+func (cb *circuitBreaker) recordSuccess() bool {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
+	wasOpen := cb.state != circuitClosed
 	cb.state = circuitClosed
 	cb.failures = 0
+	return wasOpen
 }
 
 // recordFailure increments the failure counter and opens the breaker when the threshold is crossed.
@@ -85,12 +87,6 @@ func (cb *circuitBreaker) recordFailure() bool {
 	return false
 }
 
-// isOpen returns true when the breaker is in the Open state (not half-open).
-func (cb *circuitBreaker) isOpen() bool {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-	return cb.state == circuitOpen
-}
 
 // ReconcileResult summarizes a full reconcile operation.
 type ReconcileResult struct {
@@ -282,26 +278,7 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 					Msg("failed to provision infrastructure for newly activated v4 shard")
 			}
 		})
-		v4Mgr.SetRateLimitCallback(func(retryAfter time.Duration) {
-			m.setRateLimitUntil(time.Now().Add(retryAfter))
-		})
-		v4Mgr.SetSyncCallbacks(
-			func() { // onSyncSuccess
-				if m.cb.isOpen() {
-					m.cb.recordSuccess()
-					m.log.Info().Msg("circuit breaker closed: controller reachable again")
-					metrics.CircuitBreakerState.Set(0)
-				} else {
-					m.cb.recordSuccess()
-				}
-			},
-			func() { // onSyncError
-				if tripped := m.cb.recordFailure(); tripped {
-					m.log.Error().Msg("circuit breaker opened: too many consecutive sync failures")
-					metrics.CircuitBreakerState.Set(1)
-				}
-			},
-		)
+		m.attachShardCallbacks(v4Mgr)
 		if m.cfg.EnableIPv6 && v6Mgr != nil {
 			v6Mgr.SetActivationCallback(func(ctx context.Context, shardIdx int, groupID string) {
 				if err := m.ensureNewShardInfrastructure(ctx, site, true, shardIdx, v6Mgr); err != nil {
@@ -309,26 +286,7 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 						Msg("failed to provision infrastructure for newly activated v6 shard")
 				}
 			})
-			v6Mgr.SetRateLimitCallback(func(retryAfter time.Duration) {
-				m.setRateLimitUntil(time.Now().Add(retryAfter))
-			})
-			v6Mgr.SetSyncCallbacks(
-				func() {
-					if m.cb.isOpen() {
-						m.cb.recordSuccess()
-						m.log.Info().Msg("circuit breaker closed: controller reachable again")
-						metrics.CircuitBreakerState.Set(0)
-					} else {
-						m.cb.recordSuccess()
-					}
-				},
-				func() {
-					if tripped := m.cb.recordFailure(); tripped {
-						m.log.Error().Msg("circuit breaker opened: too many consecutive sync failures")
-						metrics.CircuitBreakerState.Set(1)
-					}
-				},
-			)
+			m.attachShardCallbacks(v6Mgr)
 		}
 
 		m.mu.RUnlock()
@@ -552,6 +510,28 @@ func (m *managerImpl) isRateLimited() (bool, time.Time) {
 	return time.Now().Before(t), t
 }
 
+// attachShardCallbacks wires rate-limit and circuit-breaker callbacks onto mgr.
+// Called for both v4 and v6 ShardManagers to avoid duplicating the callback logic.
+func (m *managerImpl) attachShardCallbacks(mgr *ShardManager) {
+	mgr.SetRateLimitCallback(func(retryAfter time.Duration) {
+		m.setRateLimitUntil(time.Now().Add(retryAfter))
+	})
+	mgr.SetSyncCallbacks(
+		func() { // onSyncSuccess
+			if m.cb.recordSuccess() {
+				m.log.Info().Msg("circuit breaker closed: controller reachable again")
+				metrics.CircuitBreakerState.Set(0)
+			}
+		},
+		func() { // onSyncError
+			if tripped := m.cb.recordFailure(); tripped {
+				m.log.Error().Msg("circuit breaker opened: too many consecutive sync failures")
+				metrics.CircuitBreakerState.Set(1)
+			}
+		},
+	)
+}
+
 // SyncDirty flushes all dirty shards to the UniFi API for the given sites.
 // Errors are logged per-shard and those shards remain dirty for retry on the next call.
 // Updates the DirtyShards gauge with the pre-sync dirty count before flushing.
@@ -567,7 +547,6 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 	// Check circuit breaker.
 	if !m.cb.allow() {
 		m.log.Info().Msg("SyncDirty skipped: circuit breaker open")
-		metrics.CircuitBreakerState.Set(1)
 		return nil
 	}
 

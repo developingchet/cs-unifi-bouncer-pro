@@ -727,16 +727,30 @@ Exits 0 when all checks pass, 1 if any check fails.`,
 			// --- Phase 2: LAPI reachability ---
 			lapiURL := cfg.CrowdSecLAPIURL + "/v1/decisions?limit=1"
 			lapiClient := &http.Client{Timeout: 10 * time.Second}
-			lapiResp, lapiErr := lapiClient.Get(lapiURL) //nolint:noctx
-			if lapiErr != nil {
-				checks = append(checks, diagCheck{"lapi_reachable", "FAIL", lapiErr.Error()})
+			lapiReq, lapiReqErr := http.NewRequestWithContext(ctx, http.MethodGet, lapiURL, nil)
+			if lapiReqErr != nil {
+				checks = append(checks, diagCheck{"lapi_reachable", "FAIL", lapiReqErr.Error()})
 				allPass = false
 			} else {
-				_ = lapiResp.Body.Close()
-				checks = append(checks, diagCheck{
-					"lapi_reachable", "PASS",
-					fmt.Sprintf("%s → %d %s", cfg.CrowdSecLAPIURL, lapiResp.StatusCode, http.StatusText(lapiResp.StatusCode)),
-				})
+				lapiReq.Header.Set("X-Api-Key", cfg.CrowdSecLAPIKey)
+				lapiResp, lapiErr := lapiClient.Do(lapiReq)
+				if lapiErr != nil {
+					checks = append(checks, diagCheck{"lapi_reachable", "FAIL", lapiErr.Error()})
+					allPass = false
+				} else {
+					_ = lapiResp.Body.Close()
+					detail := fmt.Sprintf("%s → %d %s", cfg.CrowdSecLAPIURL, lapiResp.StatusCode, http.StatusText(lapiResp.StatusCode))
+					switch {
+					case lapiResp.StatusCode == http.StatusUnauthorized:
+						checks = append(checks, diagCheck{"lapi_reachable", "FAIL",
+							detail + " — authentication failed; check CROWDSEC_LAPI_KEY"})
+						allPass = false
+					case lapiResp.StatusCode >= 200 && lapiResp.StatusCode < 300:
+						checks = append(checks, diagCheck{"lapi_reachable", "PASS", detail})
+					default:
+						checks = append(checks, diagCheck{"lapi_reachable", "WARN", detail})
+					}
+				}
 			}
 
 			// --- Phase 3: UniFi reachability ---

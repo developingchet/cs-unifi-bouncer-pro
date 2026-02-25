@@ -1027,7 +1027,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 	// but no IPs actually changed (e.g., TTL-only expiry with no removal).
 	// Only applicable to Active shards — Pending shards must always be flushed.
 	if shard.State == ShardStateActive && !shard.IPs.HasChangedFromFlushed() {
-		shard.IPs.CommitFlushed() // clear dirty flag
+		shard.IPs.MarkClean() // clear dirty flag; lastFlushed snapshot remains valid
 		sm.log.Debug().Str("shard", shard.Name).Msg("shard skipped: no change from last flush")
 		return
 	}

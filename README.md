@@ -339,8 +339,8 @@ Available at `:9090/metrics` (configurable via `METRICS_ADDR`):
 | `crowdsec_unifi_dirty_shards` | Gauge | Shards pending sync at the last SyncDirty call |
 | `crowdsec_unifi_last_sync_timestamp_seconds` | Gauge | Unix timestamp of the last completed `SyncDirty` call. Use to alert when no sync has occurred for an extended period (e.g. > 5 min) |
 | `crowdsec_unifi_shard_occupancy_ratio` | Gauge | Fraction of shard capacity in use (`ip_count / shard_limit`), labelled by family, shard, site. `1.0` = shard full; alert at `> 0.9` |
-| `crowdsec_unifi_decision_latency_seconds` | Histogram | Time from a CrowdSec decision passing the filter pipeline to a successful UniFi API write. Buckets: 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0 s |
-| `crowdsec_unifi_circuit_breaker_open` | Gauge | `1` when the firewall sync circuit breaker is open (controller unreachable); `0` when closed |
+| `crowdsec_unifi_decision_latency_seconds` | Histogram | Time from a CrowdSec decision passing the filter pipeline to a successful UniFi API write. Buckets: 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0 s. Alert: p95 > 10 s indicates a controller sync bottleneck |
+| `crowdsec_unifi_circuit_breaker_open` | Gauge | `1` when the firewall sync circuit breaker is open (controller unreachable); `0` when closed. Alert: value == 1 for > 60 s requires immediate attention |
 
 ### CrowdSec usage metrics
 
@@ -464,10 +464,14 @@ Exits 0 when all checks pass, 1 if any fail. The zone list output is useful for 
 Sending `SIGHUP` to the running daemon triggers a live reload of the zone-pair configuration without restarting:
 
 ```bash
-# Get the PID
-docker exec cs-unifi-bouncer-pro cat /proc/1/status | grep ^Pid
-# Or use kill in the container
+# Docker
 docker exec cs-unifi-bouncer-pro kill -HUP 1
+
+# systemd — ExecReload=/bin/kill -HUP $MAINPID maps to the SIGHUP handler
+systemctl reload cs-unifi-bouncer-pro
+
+# Kubernetes
+kubectl -n crowdsec exec -it deploy/cs-unifi-bouncer-pro -- kill -HUP 1
 ```
 
 On receipt, the daemon performs a **validate-then-commit** reload:
@@ -557,6 +561,7 @@ Manifests are provided under `docs/kubernetes/`. Full instructions are in [docs/
 | `docs/kubernetes/deployment.yaml` | `Deployment` (1 replica, Recreate strategy) with liveness/readiness probes, resource limits, securityContext, and PVC mount |
 | `docs/kubernetes/pvc.yaml` | `PersistentVolumeClaim` for `/data` (bbolt) |
 | `docs/kubernetes/secret.example.yaml` | `Secret` template — copy, fill in values, do **not** commit |
+| `docs/kubernetes/networkpolicy.yaml` | `NetworkPolicy` — restricts ingress/egress to metrics (9090), health (8081), UniFi (443), LAPI (8080), and DNS (53) |
 
 **Quick deploy:**
 
@@ -567,6 +572,7 @@ cp docs/kubernetes/secret.example.yaml my-secret.yaml
 kubectl apply -f my-secret.yaml
 kubectl apply -f docs/kubernetes/pvc.yaml
 kubectl apply -f docs/kubernetes/deployment.yaml
+kubectl apply -f docs/kubernetes/networkpolicy.yaml
 kubectl -n crowdsec get pods -l app=cs-unifi-bouncer-pro
 ```
 

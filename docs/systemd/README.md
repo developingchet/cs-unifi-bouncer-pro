@@ -11,7 +11,7 @@
 2. **Create the configuration directory** and environment file:
    ```bash
    sudo mkdir -p /etc/cs-unifi-bouncer-pro
-   sudo cp docs/bouncer.env.example /etc/cs-unifi-bouncer-pro/bouncer.env
+   sudo cp .env.example /etc/cs-unifi-bouncer-pro/bouncer.env
    sudo chmod 600 /etc/cs-unifi-bouncer-pro/bouncer.env
    # Edit the file and fill in UNIFI_URL, credentials, CROWDSEC_LAPI_KEY, etc.
    sudo nano /etc/cs-unifi-bouncer-pro/bouncer.env
