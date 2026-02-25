@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cs-unifi-bouncer-pro
+  namespace: crowdsec
+  labels:
+    app: cs-unifi-bouncer-pro
+spec:
+  # IMPORTANT: Must be exactly 1. bbolt does not support concurrent writers.
+  # Use Recreate strategy so the old pod is fully terminated before the new one
+  # starts, preventing two instances from opening the same database file.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: cs-unifi-bouncer-pro
+  template:
+    metadata:
+      labels:
+        app: cs-unifi-bouncer-pro
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: cs-unifi-bouncer-pro
+          image: ghcr.io/developingchet/cs-unifi-bouncer-pro:latest
+          args: ["run"]
+          env:
+            - name: DATA_DIR
+              value: /data
+          envFrom:
+            - secretRef:
+                name: cs-unifi-bouncer-pro
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: cs-unifi-bouncer-pro-data
+      securityContext:
+        fsGroup: 65534

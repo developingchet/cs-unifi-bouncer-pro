@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cs-unifi-bouncer-pro-data
+  namespace: crowdsec
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # Set storageClassName to match your cluster's storage class if the default
+  # is not suitable (e.g., "local-path", "standard", "gp2").
+  # storageClassName: standard
