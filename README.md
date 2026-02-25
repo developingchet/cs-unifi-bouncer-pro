@@ -23,7 +23,7 @@ Automatically translates CrowdSec ban decisions into UniFi firewall rules — bl
 - **Shard management** — Automatic creation of multiple Firewall Groups / Traffic Matching Lists when IP count exceeds capacity (10,000 per shard)
 - **ACID persistence** — bbolt-backed ban tracking with TTL-aware auto-expiry; bans survive container restarts and are never double-applied
 - **Template-based naming** — Go templates for all managed object names; prevents conflicts in multi-instance deployments
-- **Prometheus metrics** — 15 `crowdsec_unifi_*` metrics covering decisions, jobs, API calls, active bans, and more
+- **Prometheus metrics** — 19 `crowdsec_unifi_*` metrics covering decisions, jobs, API calls, active bans, shard occupancy, decision latency, and circuit breaker state
 - **CrowdSec usage-metrics** — Pushes decision telemetry to LAPI `/v1/usage-metrics` on a configurable interval (default 30 min); spec-compliant with CrowdSec remediation component requirements
 - **RedactWriter** — Automatically masks passwords, API keys, and Bearer tokens from all log output
 - **Dry-run mode** — Process decisions and log intended actions without modifying the UniFi controller
@@ -140,7 +140,6 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ZONE_PAIRS` | `External->Internal` | Comma-separated `src->dst` zone pairs. Zone names are auto-resolved to UUIDs at startup; standard UUIDs and MongoDB ObjectIDs are accepted directly. `External`/`Internal` are the default UniFi 8.x names — check Settings → Firewall → Zones if you renamed them. |
-| `ZONE_CONNECTION_STATES` | `new,invalid` | Connection states the policies match (normalized to uppercase before API calls) |
 
 ### Object naming
 
@@ -252,9 +251,10 @@ processStream() goroutine
     ▼
 Job handler (inline, synchronous per decision batch)
     │
-    ├── 1. Idempotency check  (bbolt bans bucket)
-    ├── 2. Firewall manager   (ApplyBan / ApplyUnban → marks shards dirty)
-    └── 3. Persist to bbolt  (BanRecord / BanDelete — skipped in DRY_RUN)
+    ├── 1. Idempotency check       (bbolt bans bucket)
+    ├── 2. bbolt write (ban path)  (BanRecord persisted BEFORE UniFi write — crash-safe)
+    ├── 3. Firewall manager        (ApplyBan / ApplyUnban → marks shards dirty)
+    └── 4. bbolt cleanup (delete)  (BanDelete after UniFi confirms removal — skipped in DRY_RUN)
     │
     ▼
 SyncDirty() — flush all dirty shards to UniFi
@@ -274,6 +274,43 @@ UniFi controller (HTTPS REST API)
 ```
 
 For a detailed explanation of each component, see [docs/DESIGN.md](docs/DESIGN.md).
+
+---
+
+## Reliability
+
+### Crash-safe write ordering (bbolt-first)
+
+Ban decisions are persisted to bbolt **before** being applied to the UniFi controller. This bbolt-first ordering ensures that if the process crashes between the two writes, the IP is recorded in bbolt but not yet reflected in UniFi. On the next startup, `FIREWALL_RECONCILE_ON_START` detects the discrepancy and re-applies the missing bans automatically.
+
+The delete path uses the reverse order: the IP is removed from UniFi first, then from bbolt. A crash after the UniFi call but before bbolt cleanup leaves the IP in bbolt, and reconcile adds it back — the safe outcome is always erring on the side of the ban remaining in effect.
+
+### Circuit breaker and rate-limit backoff
+
+If the UniFi controller returns a `429 Too Many Requests` response, the bouncer honours the `Retry-After` header and suspends all `SyncDirty` attempts until the window expires.
+
+For persistent controller errors, a three-state circuit breaker tracks consecutive sync failures:
+
+- **Closed** (normal) — syncs proceed as usual
+- **Open** (tripped) — syncs are suspended; `crowdsec_unifi_circuit_breaker_open` is set to `1`
+- **Half-open** (probing) — one probe request is allowed after the cooldown period; a success closes the breaker, a failure reopens it
+
+The breaker opens after **5 consecutive failures** and resets to half-open after a **60-second cooldown**. These thresholds are not currently configurable via environment variables. When the breaker closes after recovery, the event is logged and the metric returns to `0`.
+
+### No-op TML diff
+
+Before issuing a `PUT` to the UniFi controller for a shard, the bouncer compares the current IP set against the last successfully written state. If the content is identical, the `PUT` is skipped. This eliminates unnecessary API calls during idle intervals when no new bans or unbans have arrived since the previous flush.
+
+### Actionable zone resolution errors (did-you-mean)
+
+If `ZONE_PAIRS` references a zone name that does not match any discovered zone, the error message includes a case-insensitive did-you-mean suggestion:
+
+```
+zone "internal" not found for site "default" (available: External, Internal, IoT);
+ Did you mean "Internal" (check capitalisation)?
+```
+
+This applies both at startup (hard failure) and during SIGHUP reload (logged as a warning, existing config preserved).
 
 ---
 
@@ -300,6 +337,10 @@ Available at `:9090/metrics` (configurable via `METRICS_ADDR`):
 | `crowdsec_unifi_shard_sync_total` | Counter | Shard sync attempts by family, shard, and result |
 | `crowdsec_unifi_shard_sync_duration_seconds` | Histogram | Shard sync duration by family and shard |
 | `crowdsec_unifi_dirty_shards` | Gauge | Shards pending sync at the last SyncDirty call |
+| `crowdsec_unifi_last_sync_timestamp_seconds` | Gauge | Unix timestamp of the last completed `SyncDirty` call. Use to alert when no sync has occurred for an extended period (e.g. > 5 min) |
+| `crowdsec_unifi_shard_occupancy_ratio` | Gauge | Fraction of shard capacity in use (`ip_count / shard_limit`), labelled by family, shard, site. `1.0` = shard full; alert at `> 0.9` |
+| `crowdsec_unifi_decision_latency_seconds` | Histogram | Time from a CrowdSec decision passing the filter pipeline to a successful UniFi API write. Buckets: 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0 s |
+| `crowdsec_unifi_circuit_breaker_open` | Gauge | `1` when the firewall sync circuit breaker is open (controller unreachable); `0` when closed |
 
 ### CrowdSec usage metrics
 
@@ -333,6 +374,8 @@ Available at `:8081` (configurable via `HEALTH_ADDR`):
 | `reconcile` | Connect to UniFi and CrowdSec, run a one-shot full reconcile, then exit |
 | `status` | Read-only bbolt inspection — prints ban counts, group/policy counts, DB size. Zero API calls; safe to run while the daemon is running |
 | `drain` | Remove all managed firewall objects (policies, rules, shard groups) from UniFi and clean up bbolt. Requires `--force` or `--dry-run`. |
+| `validate` | Load and validate configuration from environment variables — no API calls. Exits 0 on success, 1 on error. Prints a summary table of resolved config values. Safe to run in CI. |
+| `diagnose` | Three-phase connectivity check: (1) config validation, (2) CrowdSec LAPI probe, (3) UniFi controller ping and zone discovery. Exits 0 when all checks pass. |
 | `version` | Print version, commit hash, and build date |
 
 ```bash
@@ -342,6 +385,8 @@ cs-unifi-bouncer-pro reconcile    # One-shot full reconcile then exit
 cs-unifi-bouncer-pro status       # Inspect bbolt state without API calls
 cs-unifi-bouncer-pro drain --dry-run   # Preview what drain would remove
 cs-unifi-bouncer-pro drain --force     # Actually remove all managed objects
+cs-unifi-bouncer-pro validate     # Validate configuration (no API calls; CI-safe)
+cs-unifi-bouncer-pro diagnose     # Run connectivity checks and zone discovery
 cs-unifi-bouncer-pro version      # Print version and build information
 ```
 
@@ -370,6 +415,48 @@ Removes all firewall objects managed by the bouncer for each configured site:
 
 Requires either `--force` (execute) or `--dry-run` (log only, no changes).
 
+### `validate` subcommand
+
+Loads configuration from environment variables, runs all validation rules, and prints a summary table. No API calls are made — suitable for CI pipelines and pre-flight checks.
+
+```
+FIELD           VALUE
+firewall_mode   zone
+zone_pairs      External->Internal
+sites           default
+ban_ttl         168h0m0s
+shard_capacity  10000
+lapi_url        http://crowdsec:8080
+unifi_url       https://192.168.1.1
+metrics_addr    :9090
+health_addr     :8081
+
+configuration valid ✓
+```
+
+Exits 0 on success, 1 if any validation rule fails. Deprecation warnings and insecure LAPI URL warnings are printed to stderr.
+
+### `diagnose` subcommand
+
+Runs three-phase diagnostics and prints a tabular result:
+
+1. **Config** — loads and validates configuration; fails fast if invalid
+2. **LAPI** — probes `CROWDSEC_LAPI_URL/v1/decisions?limit=1` for reachability
+3. **UniFi** — pings the controller; in zone or auto mode, lists discovered zones per configured site
+
+```
+CHECK                    STATUS  DETAIL
+config_valid             PASS    mode=zone sites=[default]
+lapi_reachable           PASS    http://crowdsec:8080 → 200 OK
+unifi_reachable          PASS    https://192.168.1.1 ping ok
+zone_discovery[default]  PASS    3 zones found
+  External                       id=67a8cc9efe6c6350dfa4dcc7
+  Internal                       id=67a8cc9efe6c6350dfa4dcc8
+  IoT                            id=67a8cc9efe6c6350dfa4dcc9
+```
+
+Exits 0 when all checks pass, 1 if any fail. The zone list output is useful for copying UUIDs directly into `ZONE_PAIRS` when zone name resolution is unavailable (e.g. UniFi Network 10.x).
+
 ---
 
 ## SIGHUP Hot-Reload
@@ -383,10 +470,13 @@ docker exec cs-unifi-bouncer-pro cat /proc/1/status | grep ^Pid
 docker exec cs-unifi-bouncer-pro kill -HUP 1
 ```
 
-On receipt, the daemon:
-1. Re-reads the configuration from environment
-2. Re-resolves zone names → UUIDs for each configured site
-3. Updates the in-memory zone cache
+On receipt, the daemon performs a **validate-then-commit** reload:
+
+1. Re-reads the configuration from environment variables
+2. Invalidates the stale zone ID cache so the next resolution hits the API
+3. Resolves all new zone names → UUIDs into a **staging map** against the live controller
+4. If every zone resolves successfully, atomically commits the new pairs and updated cache
+5. If any resolution fails (zone name not found, controller unreachable), the **existing configuration stays active** and an error is logged — no partial updates are applied
 
 Only zone pair changes (`ZONE_PAIRS`) are applied via SIGHUP. All other config changes require a restart. In legacy mode, SIGHUP is a no-op (logged as a warning).
 
@@ -405,6 +495,82 @@ Only zone pair changes (`ZONE_PAIRS`) are applied via SIGHUP. All other config c
 - Trivy CVE scanning blocks releases on HIGH/CRITICAL unfixed vulnerabilities
 
 For the vulnerability disclosure policy, see [SECURITY.md](SECURITY.md).
+
+---
+
+## Deployment
+
+### systemd
+
+A ready-to-use unit file with security hardening is provided at `docs/systemd/cs-unifi-bouncer-pro.service`. Full installation instructions are in [docs/systemd/README.md](docs/systemd/README.md).
+
+**Quick install:**
+
+```bash
+sudo cp cs-unifi-bouncer-pro /usr/local/bin/
+sudo mkdir -p /etc/cs-unifi-bouncer-pro
+sudo cp .env.example /etc/cs-unifi-bouncer-pro/bouncer.env
+sudo chmod 600 /etc/cs-unifi-bouncer-pro/bouncer.env
+# Fill in UNIFI_URL, credentials, CROWDSEC_LAPI_KEY
+sudo cp docs/systemd/cs-unifi-bouncer-pro.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now cs-unifi-bouncer-pro
+```
+
+The unit file enables a comprehensive set of systemd hardening directives:
+
+| Directive | Effect |
+|-----------|--------|
+| `DynamicUser=yes` | Transient UID/GID allocated at start; no persistent user account required |
+| `CapabilityBoundingSet=` (empty) | All Linux capabilities dropped |
+| `NoNewPrivileges=yes` | Prevents privilege escalation via setuid/setgid |
+| `PrivateTmp=yes` | Private `/tmp` namespace |
+| `PrivateDevices=yes` | No access to raw device nodes |
+| `ProtectSystem=strict` | OS filesystem mounted read-only |
+| `ProtectHome=yes` | Home directories inaccessible |
+| `ProtectKernelTunables=yes` | `/proc/sys` and similar paths read-only |
+| `ProtectKernelModules=yes` | Module loading disabled |
+| `ProtectControlGroups=yes` | cgroup filesystem read-only |
+| `RestrictAddressFamilies=AF_INET AF_INET6` | Only IPv4/IPv6 sockets permitted |
+| `RestrictNamespaces=yes` | Namespace creation blocked |
+| `LockPersonality=yes` | ABI personality locked |
+| `MemoryDenyWriteExecute=yes` | No writable+executable memory mappings |
+| `RestrictRealtime=yes` | Real-time scheduling blocked |
+| `SystemCallFilter=@system-service` | Syscall allowlist (service profile) |
+
+State is stored in `/var/lib/cs-unifi-bouncer-pro/` (created automatically by `StateDirectory=`). Send `SIGHUP` via `systemctl reload cs-unifi-bouncer-pro` to hot-reload zone pairs.
+
+### Kubernetes
+
+Manifests are provided under `docs/kubernetes/`. Full instructions are in [docs/kubernetes/README.md](docs/kubernetes/README.md).
+
+**Key constraints:**
+
+- **`replicas: 1` is mandatory.** bbolt does not support concurrent writers. Running two instances simultaneously will corrupt the database.
+- **`strategy: Recreate`** ensures the old pod terminates before the new one starts during rollouts. Do not change this to `RollingUpdate`.
+- A **`PersistentVolumeClaim`** with `ReadWriteOnce` access is required to persist the bbolt database across pod restarts. The manifest requests 1 Gi; adjust `storageClassName` if your cluster's default storage class is not suitable.
+
+**What the manifests include:**
+
+| File | Contents |
+|------|----------|
+| `docs/kubernetes/deployment.yaml` | `Deployment` (1 replica, Recreate strategy) with liveness/readiness probes, resource limits, securityContext, and PVC mount |
+| `docs/kubernetes/pvc.yaml` | `PersistentVolumeClaim` for `/data` (bbolt) |
+| `docs/kubernetes/secret.example.yaml` | `Secret` template — copy, fill in values, do **not** commit |
+
+**Quick deploy:**
+
+```bash
+kubectl create namespace crowdsec
+cp docs/kubernetes/secret.example.yaml my-secret.yaml
+# Edit my-secret.yaml — do NOT commit
+kubectl apply -f my-secret.yaml
+kubectl apply -f docs/kubernetes/pvc.yaml
+kubectl apply -f docs/kubernetes/deployment.yaml
+kubectl -n crowdsec get pods -l app=cs-unifi-bouncer-pro
+```
+
+The pod template includes `prometheus.io/scrape: "true"` annotations for automatic scraping. Health endpoints at port `8081` are wired to the `livenessProbe` (`/healthz`) and `readinessProbe` (`/readyz`).
 
 ---
 
