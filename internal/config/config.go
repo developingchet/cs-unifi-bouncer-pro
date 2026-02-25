@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"text/template"
@@ -394,6 +395,26 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// InsecureLAPIURLWarning returns a non-empty warning message when
+// CROWDSEC_LAPI_URL uses http:// with a non-loopback host, meaning the LAPI
+// key will be transmitted in plaintext over the network. Returns "" when the
+// URL is https://, or when the host is a loopback address or "localhost".
+func (c *Config) InsecureLAPIURLWarning() string {
+	u, err := url.Parse(c.CrowdSecLAPIURL)
+	if err != nil || u.Scheme != "http" {
+		return ""
+	}
+	host := u.Hostname() // strips port and brackets from IPv6 literals
+	if strings.EqualFold(host, "localhost") {
+		return ""
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return ""
+	}
+	return "CROWDSEC_LAPI_URL uses http:// with a non-loopback host — " +
+		"the LAPI key is transmitted in plaintext; use https:// in production"
 }
 
 // injectFileSecrets reads _FILE env vars and injects their file contents.

@@ -81,6 +81,9 @@ func runDaemon() error {
 	for _, w := range cfg.DeprecationWarnings {
 		log.Warn().Msg(w)
 	}
+	if w := cfg.InsecureLAPIURLWarning(); w != "" {
+		log.Warn().Str("url", cfg.CrowdSecLAPIURL).Msg(w)
+	}
 	log.Info().Str("version", Version).Msg("cs-unifi-bouncer-pro starting")
 	log.Info().
 		Str("bouncer_type", capabilities.BouncerType).

@@ -47,9 +47,19 @@ The Docker image is hardened by default:
 
 ### Network Security
 
-- All outbound connections to the UniFi controller and CrowdSec LAPI enforce TLS 1.2 minimum
+- Connections to the UniFi controller always use TLS (`UNIFI_URL` must be an `https://` address); TLS 1.2 minimum is enforced by the Go TLS stack
 - Self-signed certificate support via `UNIFI_CA_CERT` (avoid disabling verification in production)
 - HTTP timeouts configured via `UNIFI_HTTP_TIMEOUT` (default 120 s) and `SESSION_REAUTH_TIMEOUT`
+
+#### CrowdSec LAPI transport security
+
+`CROWDSEC_LAPI_URL` accepts both `http://` and `https://` schemes.
+
+- **`https://` is strongly recommended** for any deployment where the bouncer and CrowdSec LAPI are not colocated on the same host. With `https://`, the LAPI key is protected in transit and TLS 1.2 minimum is enforced by the Go TLS stack.
+- **`http://` is only safe** when the connection is confined to a loopback address (`127.0.0.1`, `::1`) or a Unix socket — i.e. the LAPI process is on the same host and the connection never crosses a network interface. On a shared container bridge network, `http://` sends the LAPI key in plaintext and exposes it to any process that can observe the network traffic.
+- The bouncer emits a **startup warning** when `CROWDSEC_LAPI_URL` uses `http://` with a non-loopback host.
+
+The default value (`http://crowdsec:8080`) is intentionally permissive for local Docker Compose setups where CrowdSec and the bouncer share a private, single-host bridge network. For any other deployment topology — remote LAPI, Kubernetes multi-node, or bare-metal — set `CROWDSEC_LAPI_URL=https://…` and ensure a valid certificate is in place.
 
 ## Connectivity Timeout Root Cause (resolved)
 
