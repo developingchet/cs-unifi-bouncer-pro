@@ -187,6 +187,7 @@ func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.Dec
 			ExpiresAt:       expiresAt(result.Duration),
 			Origin:          origin,
 			RemediationType: remType,
+			ReceivedAt:      time.Now(),
 		}); err != nil {
 			b.log.Error().Err(err).Str("ip", result.Value).Msg("failed to apply ban")
 		}

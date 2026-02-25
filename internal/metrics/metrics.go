@@ -123,4 +123,27 @@ var (
 		Name:      "last_sync_timestamp_seconds",
 		Help:      "Unix timestamp of the last completed firewall sync (SyncDirty).",
 	})
+
+	// ShardOccupancy tracks the fraction of shard capacity used (0.0–1.0).
+	// Alert when this exceeds 0.9 to anticipate shard overflow.
+	ShardOccupancy = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "shard_occupancy_ratio",
+		Help:      "Fraction of shard capacity used (ip_count / shard_limit). Alert at > 0.9.",
+	}, []string{"family", "shard", "site"})
+
+	// DecisionLatency measures time from a decision passing the filter to a successful UniFi write.
+	DecisionLatency = promauto.NewHistogram(prometheus.HistogramOpts{
+		Namespace: namespace,
+		Name:      "decision_latency_seconds",
+		Help:      "Time from decision received (post-filter) to successful UniFi API write.",
+		Buckets:   []float64{0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0},
+	})
+
+	// CircuitBreakerState tracks whether the circuit breaker is open (1) or closed (0).
+	CircuitBreakerState = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "circuit_breaker_open",
+		Help:      "1 when the firewall sync circuit breaker is open (controller unreachable), 0 when closed.",
+	})
 )
