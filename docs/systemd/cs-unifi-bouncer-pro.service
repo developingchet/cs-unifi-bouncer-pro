@@ -1,0 +1,44 @@
+[Unit]
+Description=CrowdSec UniFi Bouncer Pro
+Documentation=https://github.com/developingchet/cs-unifi-bouncer-pro
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cs-unifi-bouncer-pro run
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+# Load secrets and configuration from an environment file.
+# Copy docs/bouncer.env.example to /etc/cs-unifi-bouncer-pro/bouncer.env and fill in values.
+EnvironmentFile=/etc/cs-unifi-bouncer-pro/bouncer.env
+
+# Persistent state directory — bbolt database is stored here.
+# systemd creates /var/lib/cs-unifi-bouncer-pro/ automatically.
+StateDirectory=cs-unifi-bouncer-pro
+Environment=DATA_DIR=/var/lib/cs-unifi-bouncer-pro
+
+# Security hardening
+DynamicUser=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
