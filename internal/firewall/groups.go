@@ -111,6 +111,16 @@ type ShardManager struct {
 	// The manager uses this to reset the circuit breaker.
 	onSyncSuccess func()
 
+	// onDrained is called when a Draining shard is about to have its UniFi object
+	// deleted. The callback should delete the shard's policies/rules first so UniFi
+	// does not reject the group deletion due to remaining references.
+	// Called with (ctx, shardIdx, groupID).
+	onDrained func(ctx context.Context, shardIdx int, groupID string)
+
+	// mergeThreshold is the IP count at or below which a shard is eligible for
+	// consolidation into a larger shard. 0 = auto (shardLimit/2). -1 = disabled.
+	mergeThreshold int
+
 	// orphanedGroups is populated by EnsureShards with placeholder-only groups found in UniFi.
 	// These groups should be deleted (policies/rules first, then the group).
 	// Guarded by mu.
@@ -178,6 +188,18 @@ func (sm *ShardManager) SetRateLimitCallback(fn func(retryAfter time.Duration)) 
 func (sm *ShardManager) SetSyncCallbacks(onSuccess func(), onError func()) {
 	sm.onSyncSuccess = onSuccess
 	sm.onSyncError = onError
+}
+
+// SetDrainCallback sets the function called when a Draining shard is about to have
+// its UniFi object deleted. The callback must remove the shard's policies/rules first.
+func (sm *ShardManager) SetDrainCallback(fn func(ctx context.Context, shardIdx int, groupID string)) {
+	sm.onDrained = fn
+}
+
+// SetMergeThreshold configures the IP count at or below which a shard is eligible
+// for consolidation. 0 = auto (shardLimit/2). -1 = disable rebalancing.
+func (sm *ShardManager) SetMergeThreshold(n int) {
+	sm.mergeThreshold = n
 }
 
 // TakeOrphanedGroups returns and clears the list of placeholder-only groups found during EnsureShards.
@@ -394,6 +416,9 @@ func (sm *ShardManager) AddIP(ctx context.Context, ip, ipFamily string) error {
 	}
 
 	for _, shard := range family.Shards {
+		if shard.State == ShardStateDraining {
+			continue // draining shards cannot accept new IPs
+		}
 		if shard.IPs.Capacity(sm.shardLimit) > 0 {
 			shard.IPs.Add(ip)
 			family.ipOwner[ip] = shard.Index
@@ -426,6 +451,9 @@ func (sm *ShardManager) AddIP(ctx context.Context, ip, ipFamily string) error {
 	}
 
 	for _, s := range family.Shards {
+		if s.State == ShardStateDraining {
+			continue // draining shards cannot accept new IPs
+		}
 		if s.IPs.Capacity(sm.shardLimit) > 0 {
 			s.IPs.Add(ip)
 			family.ipOwner[ip] = s.Index
@@ -986,13 +1014,19 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 		return
 	}
 
-	// Skip Draining shards; they are handled by pruneEmptyTailShards.
-	if shard.State == ShardStateDraining {
+	// Snapshot State under the read lock to avoid races with concurrent AddIP/Rebalance
+	// that read or write shard.State under sm.mu.Lock().
+	sm.mu.RLock()
+	state := shard.State
+	sm.mu.RUnlock()
+
+	// Skip Draining shards; they are handled by drainDraining.
+	if state == ShardStateDraining {
 		return
 	}
 
 	// If the shard is Pending and has no IPs, don't create it in UniFi yet.
-	if shard.State == ShardStatePending && len(ips) == 0 {
+	if state == ShardStatePending && len(ips) == 0 {
 		return
 	}
 
@@ -1006,8 +1040,10 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 		shard.IPs.CommitClean()
 		// In dry-run, transition Pending to Active for consistency
 		var pendingCB func()
-		if shard.State == ShardStatePending {
+		if state == ShardStatePending {
+			sm.mu.Lock()
 			shard.State = ShardStateActive
+			sm.mu.Unlock()
 			if sm.onActivated != nil {
 				cb := sm.onActivated
 				idx := shard.Index
@@ -1026,7 +1062,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 	// This avoids sending large JSON payloads when the janitor marks a shard dirty
 	// but no IPs actually changed (e.g., TTL-only expiry with no removal).
 	// Only applicable to Active shards — Pending shards must always be flushed.
-	if shard.State == ShardStateActive && !shard.IPs.HasChangedFromFlushed() {
+	if state == ShardStateActive && !shard.IPs.HasChangedFromFlushed() {
 		shard.IPs.MarkClean() // clear dirty flag; lastFlushed snapshot remains valid
 		sm.log.Debug().Str("shard", shard.Name).Msg("shard skipped: no change from last flush")
 		return
@@ -1034,7 +1070,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 
 	// Pending→Active transition: POST to create the group first
 	wasCreating := false
-	if shard.State == ShardStatePending {
+	if state == ShardStatePending {
 		createdID, err := sm.doCreateUniFiGroup(ctx, shard.Name)
 		if err != nil {
 			sm.log.Error().Err(err).Str("shard", shard.Name).Msg("failed to create shard in UniFi")
@@ -1127,10 +1163,13 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 		sm.log.Warn().Err(err).Str("shard", shard.Name).Msg("failed to update bbolt group cache after sync")
 	}
 
-	// Pending→Active transition: mark as Active and fire activation callback
+	// Pending→Active transition: mark as Active and fire activation callback.
+	// Lock briefly to protect shard.State against concurrent readers (e.g. AddIP).
 	var pendingCB func()
 	if wasCreating {
+		sm.mu.Lock()
 		shard.State = ShardStateActive
+		sm.mu.Unlock()
 		if sm.onActivated != nil {
 			cb := sm.onActivated
 			idx := shard.Index
@@ -1164,4 +1203,180 @@ func tmlTypeForFamily(family string) string {
 		return "IPV6_ADDRESSES"
 	}
 	return "IPV4_ADDRESSES"
+}
+
+// Rebalance merges under-filled Active shards into larger ones to minimise
+// the number of live TMLs and firewall policies.
+// Returns the number of shards transitioned to Draining.
+// If ShardMergeThreshold is -1, rebalancing is disabled and 0 is returned.
+// Call before syncAllFamilies so moved IPs are flushed together with the target shard.
+func (sm *ShardManager) Rebalance(ctx context.Context) int {
+	threshold := sm.mergeThreshold
+	if threshold < 0 {
+		return 0 // rebalancing disabled
+	}
+	if threshold == 0 {
+		threshold = sm.shardLimit / 2
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	family := sm.familyStateLocked(sm.family)
+	merged := 0
+
+	for {
+		// Find the Active non-anchor shard with the lowest IP count at or below threshold.
+		donorIdx := -1
+		donorCount := threshold + 1
+
+		for i, s := range family.Shards {
+			if s.State != ShardStateActive {
+				continue
+			}
+			if s.Index == 0 {
+				continue // anchor shard never donates
+			}
+			count := s.IPs.Len()
+			if count > threshold {
+				continue
+			}
+			if count < donorCount {
+				donorCount = count
+				donorIdx = i
+			}
+		}
+
+		if donorIdx < 0 {
+			break // no eligible donor
+		}
+
+		donor := family.Shards[donorIdx]
+		donorIPs := donor.IPs.Members() // snapshot while holding sm.mu
+
+		// Find the first Active shard (other than donor) that has room for all donor IPs.
+		targetIdx := -1
+		for i, s := range family.Shards {
+			if i == donorIdx {
+				continue
+			}
+			if s.State != ShardStateActive {
+				continue
+			}
+			if s.IPs.Len()+len(donorIPs) <= sm.shardLimit {
+				targetIdx = i
+				break
+			}
+		}
+
+		if targetIdx < 0 {
+			break // donor can't fit anywhere
+		}
+
+		target := family.Shards[targetIdx]
+
+		// Move all IPs from donor into target and update ownership map.
+		for _, ip := range donorIPs {
+			target.IPs.Add(ip) // marks target dirty
+			family.ipOwner[ip] = target.Index
+		}
+
+		// Clear donor and mark as Draining (syncShard skips Draining shards).
+		donor.IPs.Replace(nil)
+		donor.State = ShardStateDraining
+
+		sm.log.Info().
+			Str("site", sm.site).
+			Int("donor_shard", donor.Index).
+			Str("donor_id", donor.ID).
+			Int("donor_ips", donorCount).
+			Int("target_shard", target.Index).
+			Str("target_id", target.ID).
+			Int("target_ips_after", target.IPs.Len()).
+			Msg("shard rebalance: merging donor into target")
+
+		merged++
+	}
+
+	return merged
+}
+
+// drainDraining processes all shards in Draining state, deleting their UniFi objects
+// and removing them from in-memory state.
+// Should be called after syncAllFamilies so target shards are flushed before donors are deleted.
+func (sm *ShardManager) drainDraining(ctx context.Context) {
+	sm.mu.RLock()
+	family := sm.families[sm.family]
+	var draining []*Shard
+	for _, s := range family.Shards {
+		if s.State == ShardStateDraining {
+			draining = append(draining, s)
+		}
+	}
+	sm.mu.RUnlock()
+
+	for _, shard := range draining {
+		sm.drainShard(ctx, shard)
+	}
+}
+
+// drainShard deletes a single Draining shard from UniFi and removes it from memory.
+// On API error the shard remains Draining and will be retried on the next tick.
+func (sm *ShardManager) drainShard(ctx context.Context, shard *Shard) {
+	// 1. Delete policies/rules first — UniFi rejects group deletion while referenced.
+	if sm.onDrained != nil {
+		sm.onDrained(ctx, shard.Index, shard.ID)
+	}
+
+	// 2. Pace API calls with the configured shard delay.
+	if sm.flushDelay > 0 {
+		select {
+		case <-time.After(sm.flushDelay):
+		case <-ctx.Done():
+			return
+		}
+	}
+
+	// 3. Delete the UniFi TML / firewall group object.
+	if shard.ID != "" {
+		if err := sm.DeleteShardObject(ctx, shard.ID); err != nil {
+			sm.log.Error().Err(err).
+				Str("shard", shard.Name).Str("shard_id", shard.ID).
+				Msg("drainShard: failed to delete UniFi object; will retry on next tick")
+			return // leave in Draining state for retry
+		}
+	}
+
+	// 4. Remove from bbolt.
+	if err := sm.store.DeleteGroup(shard.Name); err != nil {
+		sm.log.Warn().Err(err).Str("shard", shard.Name).
+			Msg("drainShard: failed to delete from bbolt")
+	}
+
+	// 5. Splice the shard out of the in-memory slice (verify state under lock).
+	sm.mu.Lock()
+	family := sm.familyStateLocked(sm.family)
+	for pos, s := range family.Shards {
+		if s.Index == shard.Index && s.State == ShardStateDraining {
+			family.Shards = append(family.Shards[:pos], family.Shards[pos+1:]...)
+			break
+		}
+	}
+	// Clean up any stale ipOwner entries (defensive; Rebalance updates these already).
+	for ip, ownerIdx := range family.ipOwner {
+		if ownerIdx == shard.Index {
+			delete(family.ipOwner, ip)
+		}
+	}
+	sm.mu.Unlock()
+
+	// 6. Increment rebalanced-shards metric.
+	metrics.ShardsRebalanced.WithLabelValues(sm.family, sm.site).Inc()
+
+	sm.log.Info().
+		Str("site", sm.site).
+		Str("shard", shard.Name).
+		Str("shard_id", shard.ID).
+		Int("shard_idx", shard.Index).
+		Msg("drainShard: drained shard removed from UniFi and memory")
 }

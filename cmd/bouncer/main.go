@@ -599,6 +599,7 @@ func buildFWManager(ctx context.Context, cfg *config.Config,
 		FlushConcurrency:            cfg.FirewallFlushConcurrency,
 		CircuitBreakerThreshold:     cfg.CircuitBreakerThreshold,
 		CircuitBreakerResetInterval: cfg.CircuitBreakerResetInterval,
+		ShardMergeThreshold:         cfg.ShardMergeThreshold,
 		LegacyCfg: firewall.LegacyConfig{
 			RuleIndexStartV4: cfg.LegacyRuleIndexStartV4,
 			RuleIndexStartV6: cfg.LegacyRuleIndexStartV6,

@@ -158,6 +158,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 |----------|---------|-------------|
 | `SYNC_INTERVAL` | `30s` | How often dirty shards are retried after a failed flush. Minimum: `5s` |
 | `SHARD_LIMIT` | `10000` | Maximum IPs per shard. When a shard is full, a new shard is created automatically |
+| `SHARD_MERGE_THRESHOLD` | `0` | IPs at or below this count make a shard eligible for consolidation. `0` = auto (50% of `SHARD_LIMIT`). `-1` = disable rebalancing |
 | `CIRCUIT_BREAKER_THRESHOLD` | `5` | Consecutive sync failures before the circuit breaker opens |
 | `CIRCUIT_BREAKER_RESET_INTERVAL` | `60s` | Cooldown before the breaker allows a probe request |
 

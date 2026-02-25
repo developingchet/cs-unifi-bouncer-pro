@@ -146,4 +146,11 @@ var (
 		Name:      "circuit_breaker_open",
 		Help:      "1 when the firewall sync circuit breaker is open (controller unreachable), 0 when closed.",
 	})
+
+	// ShardsRebalanced counts shards drained by the rebalance pass.
+	ShardsRebalanced = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "shards_rebalanced_total",
+		Help:      "Number of shards drained by the rebalance pass, by family and site.",
+	}, []string{"family", "site"})
 )

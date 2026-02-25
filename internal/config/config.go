@@ -43,8 +43,11 @@ type Config struct {
 	FirewallReconcileInterval time.Duration `koanf:"firewall_reconcile_interval"`
 
 	// Shard Management (integration v1)
-	SyncInterval time.Duration `koanf:"sync_interval"`
-	ShardLimit   int           `koanf:"shard_limit"`
+	SyncInterval        time.Duration `koanf:"sync_interval"`
+	ShardLimit          int           `koanf:"shard_limit"`
+	// ShardMergeThreshold is read from env var SHARD_MERGE_THRESHOLD.
+	// 0 = auto (50% of ShardLimit). -1 = disable shard rebalancing.
+	ShardMergeThreshold int           `koanf:"shard_merge_threshold"`
 
 	// Object Naming Templates
 	GroupNameTemplate  string `koanf:"group_name_template"`
@@ -194,6 +197,7 @@ func defaults() map[string]interface{} {
 		"firewall_reconcile_interval": "0s",
 		"sync_interval":               "30s",
 		"shard_limit":                 10000,
+		"shard_merge_threshold":       0,
 		"group_name_template":         "crowdsec-block-{{.Family}}-{{.Index}}",
 		"rule_name_template":          "crowdsec-drop-{{.Family}}-{{.Index}}",
 		"policy_name_template":        "crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}",
@@ -388,6 +392,9 @@ func (c *Config) Validate() error {
 	}
 	if c.ShardLimit < 1 || c.ShardLimit > 10000 {
 		return fmt.Errorf("SHARD_LIMIT must be between 1 and 10000 (got %d)", c.ShardLimit)
+	}
+	if c.ShardMergeThreshold < -1 {
+		return fmt.Errorf("SHARD_MERGE_THRESHOLD must be >= -1 (got %d); use -1 to disable rebalancing", c.ShardMergeThreshold)
 	}
 
 	// Validate Cloudflare whitelist config

@@ -138,6 +138,11 @@ type ManagerConfig struct {
 	// Circuit breaker settings. Zero values use defaults (5 failures, 60s reset).
 	CircuitBreakerThreshold     int
 	CircuitBreakerResetInterval time.Duration
+
+	// ShardMergeThreshold is the IP count at or below which a shard is eligible
+	// for consolidation into a larger shard (read from SHARD_MERGE_THRESHOLD).
+	// 0 = auto (50% of shard capacity). -1 = disable.
+	ShardMergeThreshold int
 }
 
 type managerImpl struct {
@@ -279,6 +284,23 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 			}
 		})
 		m.attachShardCallbacks(v4Mgr)
+		v4Mgr.SetMergeThreshold(m.cfg.ShardMergeThreshold)
+		onDrained := func(ctx context.Context, shardIdx int, groupID string) {
+			mode := m.cachedMode(site)
+			switch mode {
+			case "legacy":
+				if err := m.legacyMgr.DeleteRuleForShard(ctx, site, false, shardIdx); err != nil {
+					m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).
+						Msg("failed to delete rule for drained v4 shard")
+				}
+			case "zone":
+				if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, false, shardIdx); err != nil {
+					m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).
+						Msg("failed to delete policies for drained v4 shard")
+				}
+			}
+		}
+		v4Mgr.SetDrainCallback(onDrained)
 		if m.cfg.EnableIPv6 && v6Mgr != nil {
 			v6Mgr.SetActivationCallback(func(ctx context.Context, shardIdx int, groupID string) {
 				if err := m.ensureNewShardInfrastructure(ctx, site, true, shardIdx, v6Mgr); err != nil {
@@ -287,6 +309,23 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 				}
 			})
 			m.attachShardCallbacks(v6Mgr)
+			v6Mgr.SetMergeThreshold(m.cfg.ShardMergeThreshold)
+			onDrainedV6 := func(ctx context.Context, shardIdx int, groupID string) {
+				mode := m.cachedMode(site)
+				switch mode {
+				case "legacy":
+					if err := m.legacyMgr.DeleteRuleForShard(ctx, site, true, shardIdx); err != nil {
+						m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).
+							Msg("failed to delete rule for drained v6 shard")
+					}
+				case "zone":
+					if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, true, shardIdx); err != nil {
+						m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).
+							Msg("failed to delete policies for drained v6 shard")
+					}
+				}
+			}
+			v6Mgr.SetDrainCallback(onDrainedV6)
 		}
 
 		m.mu.RUnlock()
@@ -579,11 +618,35 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 		v6 := m.v6Mgrs[site]
 		m.mu.RUnlock()
 
+		// Rebalance: merge under-filled shards before flushing so moved IPs
+		// are flushed together with the target shard in the same tick.
+		if v4 != nil {
+			if n := v4.Rebalance(ctx); n > 0 {
+				m.log.Info().Str("site", site).Int("merged", n).Str("family", "v4").
+					Msg("shard rebalance complete")
+			}
+		}
+		if v6 != nil {
+			if n := v6.Rebalance(ctx); n > 0 {
+				m.log.Info().Str("site", site).Int("merged", n).Str("family", "v6").
+					Msg("shard rebalance complete")
+			}
+		}
+
 		if v4 != nil {
 			v4.syncAllFamilies(ctx)
 		}
 		if v6 != nil {
 			v6.syncAllFamilies(ctx)
+		}
+
+		// Drain shards consolidated by the rebalance pass — must run after
+		// syncAllFamilies so target shards are flushed before donors are deleted.
+		if v4 != nil {
+			v4.drainDraining(ctx)
+		}
+		if v6 != nil {
+			v6.drainDraining(ctx)
 		}
 
 		if siteDirty[site] > 0 {
