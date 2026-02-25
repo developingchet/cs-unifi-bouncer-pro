@@ -57,8 +57,8 @@ func (cb *circuitBreaker) allow() bool {
 			return true
 		}
 		return false
-	default: // circuitHalfOpen — allow the probe request through
-		return true
+	default: // circuitHalfOpen — probe already in progress, block concurrent callers
+		return false
 	}
 }
 

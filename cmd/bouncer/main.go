@@ -666,6 +666,8 @@ No API calls are made — safe to run in CI without network access.`,
 			fmt.Fprintf(w, "sites\t%s\n", strings.Join(cfg.UnifiSites, ", "))
 			fmt.Fprintf(w, "ban_ttl\t%s\n", cfg.BanTTL)
 			fmt.Fprintf(w, "shard_capacity\t%d\n", v4Cap)
+			fmt.Fprintf(w, "cb_threshold\t%d\n", cfg.CircuitBreakerThreshold)
+			fmt.Fprintf(w, "cb_reset_interval\t%s\n", cfg.CircuitBreakerResetInterval)
 			fmt.Fprintf(w, "lapi_url\t%s\n", cfg.CrowdSecLAPIURL)
 			fmt.Fprintf(w, "unifi_url\t%s\n", cfg.UnifiURL)
 			if cfg.MetricsEnabled {
