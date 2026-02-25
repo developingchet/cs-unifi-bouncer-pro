@@ -169,7 +169,6 @@ These settings apply only when `FIREWALL_MODE=zone` or when `auto` detects a zon
 |----------|---------|-------------|
 | `ZONE_PAIRS` | `External->Internal` | Comma-separated `src->dst` zone pairs. A policy is created for each pair and each shard. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. `External` and `Internal` are the default zone names in UniFi Network 8.x — check Settings → Firewall → Zones if you have renamed them. Standard UUIDs (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) and MongoDB ObjectIDs (24-char hex) are also accepted and passed through without a lookup. |
 | `ZONE_CONNECTION_STATES` | `new,invalid` | Connection states to match. Comma-separated. Values are normalized to uppercase before sending (for example `new,invalid` -> `NEW,INVALID`). |
-| `ZONE_POLICY_REORDER` | `true` | Move bouncer-managed policies to the front of each zone pair's policy list so they evaluate before any system-defined policies. Set to `false` to preserve existing policy order. |
 
 ```bash
 # Named zones (auto-resolved at startup)

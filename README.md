@@ -227,6 +227,14 @@ ZONE_PAIRS=External->Internal,External->IoT,External->DMZ
 ZONE_PAIRS=aaaaaaaa-0000-4000-8000-aaaaaaaaaaaa->bbbbbbbb-0000-4000-8000-bbbbbbbbbbbb
 ```
 
+### Policy Ordering
+
+UniFi zone firewall evaluates policies in ascending index order — lower index means the policy is evaluated first, and the first match wins. The bouncer creates all zone policies via the UniFi integration v1 API. Policies created through this API are classified as `SYSTEM_DEFINED` origin by UniFi and cannot be reordered via the ordering endpoint — the API returns `non-user-defined-policy-ordering-forbidden`.
+
+Correct evaluation order (allow before block) is therefore established entirely by creation sequence. Block shard policies are created lazily: a new zone policy is only provisioned when a shard becomes active with IPs to block, via an activation callback triggered on the first ban that fills the shard. The Cloudflare whitelist ALLOW policies are created during startup (by the whitelist sync step) before the bouncer loop begins processing CrowdSec decisions. On a fresh deployment, this means ALLOW policies are assigned lower indices and are therefore evaluated before any block shard policy.
+
+After a `drain` + redeploy, the startup sequence re-establishes the same ordering automatically: ALLOW policies are recreated by the whitelist sync, and block shard policies are recreated lazily as bans are re-applied. No manual ordering configuration is required or supported.
+
 ---
 
 ## Architecture
