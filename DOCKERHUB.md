@@ -6,7 +6,7 @@
 
 ## Summary
 
-cs-unifi-bouncer-pro is a production-grade [CrowdSec](https://crowdsec.net) bouncer for self-hosted [UniFi](https://ui.com) network controllers that automatically translates ban decisions into firewall rules, blocking malicious IPs at the network edge in real time. It auto-detects zone-based (UniFi Network ≥ 8.x) or legacy WAN_IN firewall modes, applies bans across multiple sites simultaneously, and manages multi-shard Traffic Matching Lists with bin-packing and automatic rebalance. Bans are persisted in a crash-safe bbolt database with bbolt-first write ordering, and a configurable three-state circuit breaker handles controller outages gracefully. Cloudflare IP whitelist sync, 19 Prometheus metrics with decision latency histograms, and `validate`/`diagnose` subcommands complete the production hardening. The image is distroless, under 20 MB, runs as nonroot (UID 65532), and is Cosign-signed with a CycloneDX SBOM attached to every release.
+cs-unifi-bouncer-pro is a production-grade [CrowdSec](https://crowdsec.net) bouncer for self-hosted [UniFi](https://ui.com) network controllers that automatically translates ban decisions into firewall rules, blocking malicious IPs at the network edge in real time. It auto-detects zone-based (UniFi Network ≥ 8.x) or legacy WAN_IN firewall modes, applies bans across multiple sites simultaneously, and manages multi-shard Traffic Matching Lists with bin-packing and automatic rebalance. Bans are persisted in a crash-safe bbolt database with bbolt-first write ordering, and a configurable three-state circuit breaker handles controller outages gracefully. Cloudflare IP whitelist sync, 20 Prometheus metrics with decision latency histograms, and `validate`/`diagnose` subcommands complete the production hardening. The image is distroless, under 20 MB, runs as nonroot (UID 65532), and is Cosign-signed with a CycloneDX SBOM attached to every release.
 
 ---
 
@@ -41,7 +41,7 @@ For full setup including CrowdSec registration, TLS, multi-site, and Docker Secr
 - **Shard rebalance** — collapses under-filled TMLs automatically after expiry (`SHARD_MERGE_THRESHOLD`)
 - **Circuit breaker** — configurable failure threshold and cooldown; suspends syncs when the controller is unhealthy
 - **Crash-safe bbolt persistence** — bbolt-first write ordering; startup reconcile corrects drift after a crash or restart
-- **19 Prometheus metrics** — decisions, API calls, active bans, shard occupancy, decision latency, circuit breaker state
+- **20 Prometheus metrics** — decisions, API calls, active bans, shard occupancy, decision latency, circuit breaker state
 - **Decision latency histogram** — end-to-end timing from CrowdSec filter pipeline to successful UniFi write
 - **CrowdSec usage-metrics** — decision telemetry pushed to LAPI `/v1/usage-metrics` (default: 30 min; configurable)
 - **Cloudflare whitelist sync** — ALLOW policies for Cloudflare IP ranges, auto-refreshed on a configurable schedule

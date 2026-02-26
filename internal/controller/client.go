@@ -49,6 +49,7 @@ type unifiClient struct {
 func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Controller, error) {
 	tlsCfg := &tls.Config{
 		InsecureSkipVerify: !cfg.VerifyTLS, //nolint:gosec // user-opted-in
+		MinVersion:         tls.VersionTLS12,
 	}
 	if cfg.CACertPath != "" {
 		pem, err := os.ReadFile(cfg.CACertPath)

@@ -77,7 +77,7 @@ func makeJobHandler(
 		// will add it back), which is the safe side.
 		if job.Action == "ban" {
 			if err := store.BanRecord(job.IP, job.ExpiresAt, job.IPv6); err != nil {
-				log.Warn().Err(err).Str("ip", job.IP).Msg("failed to record ban in bbolt")
+				return fmt.Errorf("record ban in bbolt: %w", err)
 			}
 		}
 

@@ -437,6 +437,25 @@ The reconcile command compares bbolt state with the current UniFi firewall state
 
 ---
 
+### Circuit breaker open — syncing stopped
+
+**Symptom:** `crowdsec_unifi_circuit_breaker_open` metric is 1. No bans
+are being pushed to UniFi. Logs show "SyncDirty skipped: circuit breaker open".
+
+**Cause:** The bouncer has seen `CIRCUIT_BREAKER_THRESHOLD` (default: 5)
+consecutive sync failures — typically due to the UniFi controller being
+unreachable or returning 5xx errors.
+
+**Resolution:**
+1. Check UniFi controller health and network connectivity from the bouncer container.
+2. The breaker resets automatically after `CIRCUIT_BREAKER_RESET_INTERVAL` (default: 60s)
+   if the next probe succeeds.
+3. To recover immediately: restart the bouncer container.
+4. To reduce sensitivity: increase `CIRCUIT_BREAKER_THRESHOLD` or
+   `CIRCUIT_BREAKER_RESET_INTERVAL` in your environment.
+
+---
+
 ## Network Connectivity
 
 ### Cannot reach UniFi controller

@@ -24,8 +24,6 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 - [Zone-Based Firewall Mode](#zone-based-firewall-mode)
 - [CrowdSec LAPI](#crowdsec-lapi)
 - [Decision Filtering](#decision-filtering)
-- [Worker Pool](#worker-pool)
-- [API Rate Gate](#api-rate-gate)
 - [Session Management](#session-management)
 - [Storage](#storage)
 - [Operational](#operational)
@@ -168,7 +166,6 @@ These settings apply only when `FIREWALL_MODE=zone` or when `auto` detects a zon
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ZONE_PAIRS` | `External->Internal` | Comma-separated `src->dst` zone pairs. A policy is created for each pair and each shard. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. `External` and `Internal` are the default zone names in UniFi Network 8.x — check Settings → Firewall → Zones if you have renamed them. Standard UUIDs (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) and MongoDB ObjectIDs (24-char hex) are also accepted and passed through without a lookup. |
-| `ZONE_CONNECTION_STATES` | `new,invalid` | Connection states to match. Comma-separated. Values are normalized to uppercase before sending (for example `new,invalid` -> `NEW,INVALID`). |
 
 ```bash
 # Named zones (auto-resolved at startup)
@@ -241,12 +238,11 @@ When the UniFi controller returns a 401 Unauthorized, only one goroutine perform
 | `DATA_DIR` | `/data` | Directory for the bbolt database file (`bouncer.db`). Mount as a named Docker volume for persistence. |
 | `BAN_TTL` | `168h` | Maximum age of a ban record in bbolt. Records older than this are pruned by the janitor even if CrowdSec has not sent a delete decision. Default is 7 days. |
 
-The database contains four bbolt buckets:
+The database contains three bbolt buckets:
 
 | Bucket | Contents |
 |--------|---------|
 | `bans` | IP → BanEntry (recorded at, expires at, IPv6 flag) |
-| `rate` | Sliding-window timestamps for the API rate gate |
 | `groups` | Firewall group shard cache (UniFi ID, members, dirty flag) |
 | `policies` | Zone policy / legacy rule cache |
 

@@ -23,7 +23,7 @@ Automatically translates CrowdSec ban decisions into UniFi firewall rules — bl
 - **Shard management** — Automatic creation of multiple Firewall Groups / Traffic Matching Lists when IP count exceeds capacity (10,000 per shard)
 - **ACID persistence** — bbolt-backed ban tracking with TTL-aware auto-expiry; bans survive container restarts and are never double-applied
 - **Template-based naming** — Go templates for all managed object names; prevents conflicts in multi-instance deployments
-- **Prometheus metrics** — 19 `crowdsec_unifi_*` metrics covering decisions, jobs, API calls, active bans, shard occupancy, decision latency, and circuit breaker state
+- **Prometheus metrics** — 20 `crowdsec_unifi_*` metrics covering decisions, jobs, API calls, active bans, shard occupancy, decision latency, and circuit breaker state
 - **CrowdSec usage-metrics** — Pushes decision telemetry to LAPI `/v1/usage-metrics` on a configurable interval (default 30 min); spec-compliant with CrowdSec remediation component requirements
 - **RedactWriter** — Automatically masks passwords, API keys, and Bearer tokens from all log output
 - **Dry-run mode** — Process decisions and log intended actions without modifying the UniFi controller
@@ -346,6 +346,7 @@ Available at `:9090/metrics` (configurable via `METRICS_ADDR`):
 | `crowdsec_unifi_shard_occupancy_ratio` | Gauge | Fraction of shard capacity in use (`ip_count / shard_limit`), labelled by family, shard, site. `1.0` = shard full; alert at `> 0.9` |
 | `crowdsec_unifi_decision_latency_seconds` | Histogram | Time from a CrowdSec decision passing the filter pipeline to a successful UniFi API write. Buckets: 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0 s. Alert: p95 > 10 s indicates a controller sync bottleneck |
 | `crowdsec_unifi_circuit_breaker_open` | Gauge | `1` when the firewall sync circuit breaker is open (controller unreachable); `0` when closed. Alert: value == 1 for > 60 s requires immediate attention |
+| `crowdsec_unifi_shards_rebalanced_total` | Counter | Total shards drained by the rebalance pass, labelled by family and site |
 
 ### CrowdSec usage metrics
 

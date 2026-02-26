@@ -146,8 +146,8 @@ private reporting channel, and response timelines.
 All actions in `.github/workflows/ci.yml` and `.github/workflows/release.yml`
 use pinned versions. The table below is copied verbatim from the workflow files.
 
-| Action | Pinned version used | Workflow |
-|--------|--------------------|---------|
+| Action | Version tag used | Workflow |
+|--------|-----------------|---------|
 | `actions/checkout` | `@v4` | ci.yml, release.yml |
 | `actions/download-artifact` | `@v4` | release.yml |
 | `actions/setup-go` | `@v5` | ci.yml, release.yml |
@@ -162,6 +162,10 @@ use pinned versions. The table below is copied verbatim from the workflow files.
 | `peter-evans/dockerhub-description` | `@v4` | release.yml |
 | `sigstore/cosign-installer` | `@v3` | release.yml |
 | `softprops/action-gh-release` | `@v2` | release.yml |
+
+> **Note:** Actions are currently pinned to version tags, not commit SHAs.
+> See [GitHub Actions security hardening](https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-third-party-actions)
+> for SHA-pinning guidance. SHA pinning is tracked as a planned hardening item.
 
 ---
 

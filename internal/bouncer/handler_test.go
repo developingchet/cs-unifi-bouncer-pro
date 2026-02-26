@@ -169,13 +169,14 @@ func TestJobHandler_UnauthorizedRetriable(t *testing.T) {
 	}
 }
 
-func TestJobHandler_StorageError_NonFatal(t *testing.T) {
+func TestJobHandler_StorageError_Fatal(t *testing.T) {
 	store := testutil.NewMockStore()
 	ctrl := testutil.NewMockController()
 	cfg := testCfg()
 	fwMgr := &mockFirewallManager{}
 
-	// Inject BanRecord error — should be non-fatal (warns, returns nil)
+	// Inject BanRecord error â bbolt-first ordering means a write failure must
+	// abort the job so the UniFi write is never attempted without a bbolt record.
 	store.SetError("BanRecord", errors.New("storage failure"))
 
 	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
@@ -184,8 +185,8 @@ func TestJobHandler_StorageError_NonFatal(t *testing.T) {
 		IP:        "2.2.2.2",
 		ExpiresAt: time.Now().Add(time.Hour),
 	}
-	if err := handler(context.Background(), job); err != nil {
-		t.Errorf("storage error should be non-fatal, got %v", err)
+	if err := handler(context.Background(), job); err == nil {
+		t.Error("expected error from bbolt write failure, got nil")
 	}
 }
 

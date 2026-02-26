@@ -28,7 +28,7 @@ spec:
         - name: cs-unifi-bouncer-pro
           # Pin to a specific release tag. Using 'latest' is not recommended in production
           # as it makes rollbacks and auditing difficult.
-          image: ghcr.io/developingchet/cs-unifi-bouncer-pro:v0.1.0
+          image: developingchet/cs-unifi-bouncer-pro:v1.0.0
           args: ["run"]
           env:
             - name: DATA_DIR
@@ -71,7 +71,7 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             runAsNonRoot: true
-            runAsUser: 65534
+            runAsUser: 65532
             capabilities:
               drop: ["ALL"]
       volumes:
@@ -79,4 +79,4 @@ spec:
           persistentVolumeClaim:
             claimName: cs-unifi-bouncer-pro-data
       securityContext:
-        fsGroup: 65534
+        fsGroup: 65532

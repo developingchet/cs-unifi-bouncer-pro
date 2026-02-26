@@ -61,7 +61,10 @@ jobs:
         run: |
           BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           go build \
-            -ldflags="-s -w -X main.Version=${{ github.ref_name }}" \
+            -ldflags="-s -w \
+              -X main.Version=${{ github.ref_name }} \
+              -X main.Commit=${{ github.sha }} \
+              -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -trimpath \
             -o "${{ matrix.artifact }}" \
             ./cmd/bouncer
@@ -80,10 +83,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: Build image for scanning (linux/amd64 only)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5
         with:
           context: .
           platforms: linux/amd64
@@ -96,7 +99,7 @@ jobs:
             BUILD_DATE=${{ github.event.repository.updated_at }}
 
       - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2  # 0.28.0
         with:
           image-ref: local:scan
           exit-code: "1"
@@ -111,22 +114,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac  # v3
 
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
         with:
           images: developingchet/cs-unifi-bouncer-pro
           tags: |
@@ -137,7 +140,7 @@ jobs:
 
       - name: Build and push multi-arch image
         id: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64,linux/arm/v7
@@ -153,7 +156,7 @@ jobs:
 
       - name: Generate SBOM (CycloneDX)
         timeout-minutes: 10
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11  # v0
         with:
           image: developingchet/cs-unifi-bouncer-pro@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
@@ -179,7 +182,7 @@ jobs:
           if-no-files-found: error
 
       - name: Update Docker Hub description
-        uses: peter-evans/dockerhub-description@v4
+        uses: peter-evans/dockerhub-description@432a30c9e07499fd01da9f8a49f0faf9e0ca5b77  # v4
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
@@ -211,7 +214,7 @@ jobs:
         run: sha256sum * > checksums.txt
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b  # v2
         with:
           generate_release_notes: true
           body: |
