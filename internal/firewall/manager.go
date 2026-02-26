@@ -529,12 +529,14 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 				Msg("[DRY-RUN] reconcile diff computed; no changes written to UniFi")
 		}
 	} else {
-		m.syncMu.Lock()
-		v4Mgr.syncAllFamilies(ctx)
-		if v6Mgr != nil {
-			v6Mgr.syncAllFamilies(ctx)
-		}
-		m.syncMu.Unlock()
+		func() {
+			m.syncMu.Lock()
+			defer m.syncMu.Unlock()
+			v4Mgr.syncAllFamilies(ctx)
+			if v6Mgr != nil {
+				v6Mgr.syncAllFamilies(ctx)
+			}
+		}()
 		m.pruneEmptyTailShards(ctx, site, v4Mgr, v6Mgr)
 	}
 
@@ -646,13 +648,15 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 			m.log.Warn().Str("site", site).Msg("SyncDirty: skipping site flush — reconcile in progress")
 			continue
 		}
-		if v4 != nil {
-			v4.syncAllFamilies(ctx)
-		}
-		if v6 != nil {
-			v6.syncAllFamilies(ctx)
-		}
-		m.syncMu.Unlock()
+		func() {
+			defer m.syncMu.Unlock()
+			if v4 != nil {
+				v4.syncAllFamilies(ctx)
+			}
+			if v6 != nil {
+				v6.syncAllFamilies(ctx)
+			}
+		}()
 
 		// Drain shards consolidated by the rebalance pass — must run after
 		// syncAllFamilies so target shards are flushed before donors are deleted.
