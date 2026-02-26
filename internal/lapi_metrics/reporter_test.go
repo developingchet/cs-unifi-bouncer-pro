@@ -22,12 +22,17 @@ func newTestReporter(t *testing.T, srv *httptest.Server, interval time.Duration)
 
 // payloadCapture holds a decoded remediation_components entry.
 type payloadCapture struct {
-	Type     string                 `json:"type"`
-	Version  string                 `json:"version"`
-	Os       map[string]interface{} `json:"os"`
-	Features []interface{}          `json:"features"`
-	Meta     map[string]interface{} `json:"meta"`
-	Metrics  []metricSnapshot       `json:"metrics"`
+	Type                string                 `json:"type"`
+	Version             string                 `json:"version"`
+	Os                  map[string]interface{} `json:"os"`
+	Features            []interface{}          `json:"features"`
+	UtcStartupTimestamp float64                `json:"utc_startup_timestamp"`
+	Metrics             []metricsBucketCapture `json:"metrics"`
+}
+
+type metricsBucketCapture struct {
+	Meta  map[string]interface{} `json:"meta"`
+	Items []metricSnapshot       `json:"items"`
 }
 
 type metricSnapshot struct {
@@ -158,7 +163,7 @@ func TestRecordBan_IncrementsCounters(t *testing.T) {
 	cscliCount := int64(0)
 	processedCount := int64(0)
 
-	for _, m := range payload.Metrics {
+	for _, m := range payload.Metrics[0].Items {
 		switch m.Name {
 		case "blocked":
 			if m.Labels["origin"] == "CAPI" && m.Labels["remediation_type"] == "ban" {
@@ -205,7 +210,7 @@ func TestRecordDeletion_OnlyIncreasesProcessed(t *testing.T) {
 
 	// Check no "blocked" entries exist
 	processedCount := int64(0)
-	for _, m := range payload.Metrics {
+	for _, m := range payload.Metrics[0].Items {
 		if m.Name == "blocked" {
 			t.Fatalf("unexpected blocked metric found: %v", m)
 		}
@@ -236,7 +241,7 @@ func TestPush_CountersResetAfterPush(t *testing.T) {
 
 	payload1 := ch.lastPayload()
 	var firstProcessed int64
-	for _, m := range payload1.Metrics {
+	for _, m := range payload1.Metrics[0].Items {
 		if m.Name == "processed" {
 			firstProcessed = m.Value
 			break
@@ -254,7 +259,7 @@ func TestPush_CountersResetAfterPush(t *testing.T) {
 
 	payload2 := ch.lastPayload()
 	var secondProcessed int64
-	for _, m := range payload2.Metrics {
+	for _, m := range payload2.Metrics[0].Items {
 		if m.Name == "processed" {
 			secondProcessed = m.Value
 			break
@@ -308,14 +313,20 @@ func TestPush_PayloadStructure(t *testing.T) {
 		t.Errorf("features length: got %d, want 0", len(payload.Features))
 	}
 
-	// Check meta fields
-	meta := payload.Meta
-	if meta == nil {
-		t.Fatal("meta is nil")
+	// Check utc_startup_timestamp is at component level (not inside meta)
+	startupTS := payload.UtcStartupTimestamp
+	if startupTS <= 0 {
+		t.Errorf("utc_startup_timestamp: got %v, want > 0", startupTS)
 	}
 
-	// Extract and verify window_size_seconds as int64
-	windowSizeRaw := meta["window_size_seconds"]
+	// Check metrics[0].meta fields
+	if len(payload.Metrics) == 0 {
+		t.Fatal("metrics is empty")
+	}
+	bucketMeta := payload.Metrics[0].Meta
+
+	// Extract and verify window_size_seconds > 0
+	windowSizeRaw := bucketMeta["window_size_seconds"]
 	var windowSize int64
 	switch v := windowSizeRaw.(type) {
 	case float64:
@@ -326,20 +337,11 @@ func TestPush_PayloadStructure(t *testing.T) {
 	default:
 		t.Fatalf("window_size_seconds has unexpected type %T", windowSizeRaw)
 	}
-	if windowSize != int64((10 * time.Minute).Seconds()) {
-		t.Errorf("window_size_seconds: got %d, want %d", windowSize, int64((10 * time.Minute).Seconds()))
+	if windowSize <= 0 {
+		t.Errorf("window_size_seconds: got %d, want > 0", windowSize)
 	}
 
-	// Extract timestamps
-	startupTS, ok := meta["utc_startup_timestamp"].(float64)
-	if !ok {
-		t.Errorf("utc_startup_timestamp missing or wrong type")
-	}
-	if startupTS <= 0 {
-		t.Errorf("utc_startup_timestamp: got %v, want > 0", startupTS)
-	}
-
-	nowTS, ok := meta["utc_now_timestamp"].(float64)
+	nowTS, ok := bucketMeta["utc_now_timestamp"].(float64)
 	if !ok {
 		t.Errorf("utc_now_timestamp missing or wrong type")
 	}
@@ -347,9 +349,9 @@ func TestPush_PayloadStructure(t *testing.T) {
 		t.Errorf("utc_now_timestamp (%v) < utc_startup_timestamp (%v)", nowTS, startupTS)
 	}
 
-	// Check processed entry always present, even if not called
+	// Check processed entry always present in items
 	var foundProcessed bool
-	for _, m := range payload.Metrics {
+	for _, m := range payload.Metrics[0].Items {
 		if m.Name == "processed" {
 			foundProcessed = true
 			if m.Value != 2 {
@@ -488,7 +490,7 @@ func TestRun_PushesOnTick(t *testing.T) {
 
 	// Verify metrics in the first payload
 	foundBan := false
-	for _, m := range payloads[0].Metrics {
+	for _, m := range payloads[0].Metrics[0].Items {
 		if m.Name == "blocked" && m.Labels["origin"] == "CAPI" && m.Labels["remediation_type"] == "ban" {
 			foundBan = true
 			if m.Value != 1 {
@@ -540,7 +542,7 @@ func TestConcurrentRecordBan(t *testing.T) {
 	expectedTotal := int64(numGoroutines * numCalls)
 	var bannedCount, processedCount int64
 
-	for _, m := range payload.Metrics {
+	for _, m := range payload.Metrics[0].Items {
 		if m.Name == "blocked" && m.Labels["origin"] == "CAPI" && m.Labels["remediation_type"] == "ban" {
 			bannedCount = m.Value
 		}

@@ -154,18 +154,23 @@ func (r *Reporter) push(ctx context.Context) error {
 		Name    string `json:"name"`
 		Version string `json:"version"`
 	}
-	type windowMeta struct {
-		WindowSizeSeconds   int64 `json:"window_size_seconds"`
-		UtcStartupTimestamp int64 `json:"utc_startup_timestamp"`
-		UtcNowTimestamp     int64 `json:"utc_now_timestamp"`
+	type bucketMeta struct {
+		WindowSizeSeconds int64 `json:"window_size_seconds"`
+		UtcNowTimestamp   int64 `json:"utc_now_timestamp"`
+	}
+	// metricsBucket wraps a time window and its metric items.
+	// v1.7.6+: metrics is []metricsBucket, not []metricEntry.
+	type metricsBucket struct {
+		Meta  bucketMeta    `json:"meta"`
+		Items []metricEntry `json:"items"`
 	}
 	type component struct {
-		Type     string        `json:"type"`
-		Version  string        `json:"version"`
-		Os       osMeta        `json:"os"`
-		Features []string      `json:"features"`
-		Meta     windowMeta    `json:"meta"`
-		Metrics  []metricEntry `json:"metrics"`
+		Type                string          `json:"type"`
+		Version             string          `json:"version"`
+		Os                  osMeta          `json:"os"`
+		Features            []string        `json:"features"`
+		UtcStartupTimestamp int64           `json:"utc_startup_timestamp"`
+		Metrics             []metricsBucket `json:"metrics"`
 	}
 	type payload struct {
 		RemediationComponents []component `json:"remediation_components"`
@@ -174,16 +179,20 @@ func (r *Reporter) push(ctx context.Context) error {
 	body, err := json.Marshal(payload{
 		RemediationComponents: []component{
 			{
-				Type:     capabilities.BouncerType,
-				Version:  r.version,
-				Os:       osMeta{Name: osName, Version: osVersion},
-				Features: []string{},
-				Meta: windowMeta{
-					WindowSizeSeconds:   int64(r.interval.Seconds()),
-					UtcStartupTimestamp: r.startupTime.Unix(),
-					UtcNowTimestamp:     now.Unix(),
+				Type:                capabilities.BouncerType,
+				Version:             r.version,
+				Os:                  osMeta{Name: osName, Version: osVersion},
+				Features:            []string{},
+				UtcStartupTimestamp: r.startupTime.Unix(),
+				Metrics: []metricsBucket{
+					{
+						Meta: bucketMeta{
+							WindowSizeSeconds: int64(r.interval.Seconds()),
+							UtcNowTimestamp:   now.Unix(),
+						},
+						Items: metricItems,
+					},
 				},
-				Metrics: metricItems,
 			},
 		},
 	})
