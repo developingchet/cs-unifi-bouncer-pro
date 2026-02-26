@@ -1,125 +1,103 @@
 # cs-unifi-bouncer-pro
 
-A production-grade [CrowdSec](https://crowdsec.net) bouncer for [UniFi](https://ui.com) network controllers.
+[![Build](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml/badge.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml) [![Version](https://img.shields.io/badge/version-v1.0.0-blue)](https://github.com/developingchet/cs-unifi-bouncer-pro/releases/tag/v1.0.0) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/LICENSE) [![Docker Pulls](https://img.shields.io/docker/pulls/developingchet/cs-unifi-bouncer-pro)](https://hub.docker.com/r/developingchet/cs-unifi-bouncer-pro)
 
-Automatically translates CrowdSec ban decisions into UniFi firewall rules — blocking malicious IPs at the network edge across all configured sites, in real time.
+---
+
+## Summary
+
+cs-unifi-bouncer-pro is a production-grade [CrowdSec](https://crowdsec.net) bouncer for self-hosted [UniFi](https://ui.com) network controllers that automatically translates ban decisions into firewall rules, blocking malicious IPs at the network edge in real time. It auto-detects zone-based (UniFi Network ≥ 8.x) or legacy WAN_IN firewall modes, applies bans across multiple sites simultaneously, and manages multi-shard Traffic Matching Lists with bin-packing and automatic rebalance. Bans are persisted in a crash-safe bbolt database with bbolt-first write ordering, and a configurable three-state circuit breaker handles controller outages gracefully. Cloudflare IP whitelist sync, 19 Prometheus metrics with decision latency histograms, and `validate`/`diagnose` subcommands complete the production hardening. The image is distroless, under 20 MB, runs as nonroot (UID 65532), and is Cosign-signed with a CycloneDX SBOM attached to every release.
 
 ---
 
 ## Quick Start
 
-```bash
-# 1. Register the bouncer with CrowdSec
-docker exec crowdsec cscli bouncers add unifi-bouncer
-
-# 2. Clone and configure
-git clone https://github.com/developingchet/cs-unifi-bouncer-pro.git
-cd cs-unifi-bouncer-pro
-cp .env.example .env
-# Edit .env: set UNIFI_URL, UNIFI_API_KEY, CROWDSEC_LAPI_KEY
-
-# 3. Launch
-docker compose up -d
-
-# 4. Verify
-docker logs -f cs-unifi-bouncer-pro
+```yaml
+services:
+  bouncer:
+    image: developingchet/cs-unifi-bouncer-pro:latest
+    restart: unless-stopped
+    environment:
+      UNIFI_URL: https://192.168.1.1
+      UNIFI_API_KEY: your-api-key
+      CROWDSEC_LAPI_URL: http://crowdsec:8080
+      CROWDSEC_LAPI_KEY: your-bouncer-key
+      ZONE_PAIRS: External->Internal
+    volumes:
+      - bouncer-data:/data
+volumes:
+  bouncer-data:
 ```
 
----
-
-## Key Features
-
-| Feature | Description |
-|---------|-------------|
-| **Dual firewall modes** | Auto-detects zone-based (UniFi ≥ 8.x) or legacy WAN_IN rules |
-| **Multi-site** | Bans applied to all configured UniFi sites simultaneously |
-| **Worker pool** | 1–64 goroutines with exponential backoff retry |
-| **ACID persistence** | bbolt-backed ban tracking; survives container restarts |
-| **Template naming** | Go templates prevent naming conflicts in multi-instance deployments |
-| **Prometheus metrics** | 15 `crowdsec_unifi_*` metrics for full observability |
-| **Log redaction** | Passwords, API keys, and Bearer tokens never appear in logs |
-| **Dry-run mode** | Log all actions without modifying the UniFi controller |
-| **Startup reconcile** | Syncs UniFi firewall state with bbolt on every start |
+For full setup including CrowdSec registration, TLS, multi-site, and Docker Secrets support, see the [Setup Guide](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/SETUP.md).
 
 ---
 
-## Required Environment Variables
+## Features
 
-| Variable | Description |
-|----------|-------------|
-| `UNIFI_URL` | UniFi controller URL (e.g. `https://192.168.1.1`) |
-| `UNIFI_API_KEY` | UniFi API key **or** `UNIFI_USERNAME` + `UNIFI_PASSWORD` |
-| `CROWDSEC_LAPI_KEY` | Bouncer key from `cscli bouncers add` |
-
----
-
-## Firewall Modes
-
-### auto (recommended)
-Detects zone-based firewall support from the UniFi controller version. Uses zone policies on UniFi Network ≥ 8.x, legacy WAN_IN rules on older firmware.
-
-### legacy
-Creates `WAN_IN` / `WANv6_IN` drop rules referencing managed address-group shards. Compatible with all UniFi Network versions.
-
-### zone
-Creates zone firewall policies for each configured `ZONE_PAIRS` (e.g. `External->Internal,External->IoT`). Requires UniFi Network ≥ 8.x.
+- **Dual firewall modes** — auto-detects zone-based (UniFi ≥ 8.x) or legacy WAN_IN; no manual config required
+- **Multi-site** — bans applied to all configured UniFi sites simultaneously from a single instance
+- **Batch sync with bin-packing** — fills shards before creating new ones; dirty shards flushed immediately after each decision batch
+- **Shard rebalance** — collapses under-filled TMLs automatically after expiry (`SHARD_MERGE_THRESHOLD`)
+- **Circuit breaker** — configurable failure threshold and cooldown; suspends syncs when the controller is unhealthy
+- **Crash-safe bbolt persistence** — bbolt-first write ordering; startup reconcile corrects drift after a crash or restart
+- **19 Prometheus metrics** — decisions, API calls, active bans, shard occupancy, decision latency, circuit breaker state
+- **Decision latency histogram** — end-to-end timing from CrowdSec filter pipeline to successful UniFi write
+- **CrowdSec usage-metrics** — decision telemetry pushed to LAPI `/v1/usage-metrics` (default: 30 min; configurable)
+- **Cloudflare whitelist sync** — ALLOW policies for Cloudflare IP ranges, auto-refreshed on a configurable schedule
+- **Validate and diagnose subcommands** — CI-safe config validation; three-phase connectivity check with zone discovery
+- **Log redaction** — RedactWriter masks passwords, API keys, and Bearer tokens before they reach stdout
+- **Dry-run mode** — connects and reads live state; logs all intended changes without writing anything to UniFi
+- **Multi-arch distroless image** — amd64, arm64, armv7; under 20 MB; runs as nonroot (UID 65532)
+- **Cosign-signed + CycloneDX SBOM** — keyless OIDC image signing and SBOM attestation on every release
 
 ---
 
-## Security Properties
+## Required Configuration
 
-- Runs as UID 65532 (`nonroot`) in a distroless container
-- No shell, no package manager, no OS utilities in the image
-- `cap_drop: ALL` — all Linux capabilities dropped
-- Read-only root filesystem; only `/tmp` and the data volume are writable
-- Seccomp syscall allowlist (`security/seccomp-unifi.json`)
-- All credentials loaded from environment variables only — never written to disk
-- Docker images signed with Cosign (keyless OIDC) and accompanied by a CycloneDX SBOM
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `UNIFI_URL` | `https://192.168.1.1` | UniFi controller base URL |
+| `UNIFI_API_KEY` | `your-api-key` | API key (Settings → Control Plane → API Keys); or use `UNIFI_USERNAME` + `UNIFI_PASSWORD` |
+| `CROWDSEC_LAPI_URL` | `http://crowdsec:8080` | CrowdSec LAPI URL (default assumes a Docker service named `crowdsec`) |
+| `CROWDSEC_LAPI_KEY` | `your-bouncer-key` | Bouncer key from `cscli bouncers add unifi-bouncer` |
+| `ZONE_PAIRS` | `External->Internal` | Zone pair(s) for block policies; comma-separated `src->dst` |
 
----
-
-## Observability
-
-**Prometheus metrics** at `:9090/metrics`
-
-| Metric | Description |
-|--------|-------------|
-| `crowdsec_unifi_active_bans` | Currently banned IPs per site and address family |
-| `crowdsec_unifi_decisions_processed_total` | Total decisions received from CrowdSec |
-| `crowdsec_unifi_decisions_filtered_total` | Decisions dropped at each filter stage |
-| `crowdsec_unifi_jobs_processed_total` | Worker pool throughput |
-| `crowdsec_unifi_api_duration_seconds` | UniFi API call latency histogram |
-| `crowdsec_unifi_reconcile_duration_seconds` | Full reconcile duration |
-
-**Health endpoints** at `:8081`
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /healthz` | Liveness — always returns 200 if the process is running |
-| `GET /readyz` | Readiness — returns 200 only if the UniFi controller is reachable |
+Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) accept a `_FILE` suffix for Docker secrets and Kubernetes secret mounts. For the full variable reference see the [Configuration Reference](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/CONFIGURATION.md).
 
 ---
 
-## CLI Commands
+## Image Tags
+
+| Tag | When to use |
+|-----|-------------|
+| `latest` | stable, always points to the newest release |
+| `v1.0.0` | exact version, recommended for production |
+| `1.0` | minor-pinned |
+| `1` | major-pinned |
+
+---
+
+## Supply Chain
+
+This image is signed with [Cosign](https://docs.sigstore.dev/cosign/overview/) (keyless OIDC). Verify with:
 
 ```bash
-cs-unifi-bouncer-pro run          # Start the daemon
-cs-unifi-bouncer-pro healthcheck  # Exit 0 if healthy (used by Docker healthcheck)
-cs-unifi-bouncer-pro reconcile    # One-shot full reconcile then exit
-cs-unifi-bouncer-pro version      # Print version and build info
+cosign verify developingchet/cs-unifi-bouncer-pro:v1.0.0 \
+  --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
+  --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 ```
+
+A CycloneDX SBOM is attached to each release and embedded as a Cosign attestation on the image.
 
 ---
 
-## Full Documentation
+## Links
 
-- [Setup Guide](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/SETUP.md)
+- [GitHub Repository](https://github.com/developingchet/cs-unifi-bouncer-pro)
+- [Full README](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/README.md)
 - [Configuration Reference](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/CONFIGURATION.md)
-- [Architecture & Design](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/DESIGN.md)
+- [Setup Guide](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/SETUP.md)
 - [Troubleshooting](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/TROUBLESHOOTING.md)
-
----
-
-## License
-
-MIT — see [LICENSE](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/LICENSE)
+- [Security Policy](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/SECURITY.md)
+- [Docker Hub Image](https://hub.docker.com/r/developingchet/cs-unifi-bouncer-pro)
