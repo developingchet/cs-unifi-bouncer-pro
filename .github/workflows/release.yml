@@ -99,12 +99,13 @@ jobs:
             BUILD_DATE=${{ github.event.repository.updated_at }}
 
       - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2  # 0.28.0
+        uses: aquasecurity/trivy-action@0.34.1
         with:
           image-ref: local:scan
           exit-code: "1"
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          version: v0.69.2
 
   # ── 4. Multi-arch Docker push ────────────────────────────────────────────────
   docker-push:
