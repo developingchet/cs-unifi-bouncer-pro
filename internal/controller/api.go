@@ -126,6 +126,20 @@ type apiV1Policy struct {
 	LoggingEnabled        bool              `json:"loggingEnabled"`
 }
 
+// apiV1PolicyUpdate is used for PUT requests — the API rejects '$.id' in the body.
+type apiV1PolicyUpdate struct {
+	Enabled               bool              `json:"enabled"`
+	Name                  string            `json:"name"`
+	Description           string            `json:"description,omitempty"`
+	Index                 int               `json:"index,omitempty"`
+	Action                apiV1PolicyAction `json:"action"`
+	Source                apiV1PolicySrc    `json:"source"`
+	Destination           apiV1PolicyDst    `json:"destination"`
+	IPProtocolScope       apiV1IPScope      `json:"ipProtocolScope"`
+	ConnectionStateFilter []string          `json:"connectionStateFilter,omitempty"`
+	LoggingEnabled        bool              `json:"loggingEnabled"`
+}
+
 // --- Generic HTTP helpers ---------------------------------------------------
 
 func doGET(ctx context.Context, c *unifiClient, url, endpoint string) ([]json.RawMessage, error) {
@@ -618,7 +632,7 @@ func createZonePolicyV1(ctx context.Context, c *unifiClient, siteID string, poli
 func updateZonePolicyV1(ctx context.Context, c *unifiClient, siteID string, policy ZonePolicy) error {
 	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies/%s",
 		c.cfg.BaseURL, siteID, policy.ID)
-	return doPUT(ctx, c, endpointURL, "update-policy", modelToV1Policy(policy))
+	return doPUT(ctx, c, endpointURL, "update-policy", modelToV1PolicyUpdate(policy))
 }
 
 func deleteZonePolicyV1(ctx context.Context, c *unifiClient, siteID, id string) error {
@@ -675,6 +689,40 @@ func modelToV1Policy(p ZonePolicy) apiV1Policy {
 	}
 	return apiV1Policy{
 		ID:                    p.ID,
+		Enabled:               p.Enabled,
+		Name:                  p.Name,
+		Description:           p.Description,
+		Action:                apiV1PolicyAction{Type: p.Action, AllowReturnTraffic: p.AllowReturnTraffic},
+		Source:                src,
+		Destination:           apiV1PolicyDst{ZoneID: p.DstZone},
+		IPProtocolScope:       apiV1IPScope{IPVersion: ipVersion},
+		ConnectionStateFilter: p.ConnectionStateFilter,
+		LoggingEnabled:        p.LoggingEnabled,
+	}
+}
+
+// modelToV1PolicyUpdate converts to apiV1PolicyUpdate, omitting the ID field
+// so that PUT requests to /firewall/policies/{id} don't send '$.id' in the body.
+func modelToV1PolicyUpdate(p ZonePolicy) apiV1PolicyUpdate {
+	src := apiV1PolicySrc{ZoneID: p.SrcZone}
+	if len(p.TrafficMatchingListIDs) > 0 && p.TrafficMatchingListIDs[0] != "" {
+		src.TrafficFilter = &apiV1TrafficFilter{
+			Type: "IP_ADDRESS",
+			IPAddressFilter: &apiV1IPAddressFilter{
+				Type:                  "TRAFFIC_MATCHING_LIST",
+				MatchOpposite:         false,
+				TrafficMatchingListID: p.TrafficMatchingListIDs[0],
+			},
+		}
+	}
+	ipVersion := p.IPVersion
+	switch ipVersion {
+	case "BOTH":
+		ipVersion = "IPV4_AND_IPV6"
+	case "":
+		ipVersion = "IPV4"
+	}
+	return apiV1PolicyUpdate{
 		Enabled:               p.Enabled,
 		Name:                  p.Name,
 		Description:           p.Description,
