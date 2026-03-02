@@ -374,6 +374,54 @@ func TestEnsureShards_LoadsExisting(t *testing.T) {
 	}
 }
 
+// TestAddIP_ConcurrentShardBoundary exercises the TOCTOU race that previously
+// caused "no available shard capacity" errors in production.  Multiple goroutines
+// all call AddIP simultaneously when every existing shard is at or near capacity
+// (shardLimit=3).  They all observe a full shard, and previously they would all
+// compute the same nextIndex, race to re-acquire the lock, and all but the winner
+// would find the freshly-created shard already full — returning an error instead
+// of allocating a new shard.  The fix holds the lock for the full alloc+append
+// sequence, eliminating the window entirely.
+func TestAddIP_ConcurrentShardBoundary(t *testing.T) {
+	// capacity=3 means each shard holds exactly 3 IPs, forcing many shard
+	// creations with a modest goroutine count.
+	sm, _ := newShardTestManager(t, "legacy", 3)
+	ctx := context.Background()
+
+	const goroutines = 60
+	errs := make([]error, goroutines)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			ip := fmt.Sprintf("10.2.0.%d", i)
+			errs[i] = sm.AddIP(ctx, ip, "v4")
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d AddIP error: %v", i, err)
+		}
+	}
+
+	family := familyState(t, sm)
+	// All goroutines added unique IPs so ipOwner must contain all of them.
+	if got := len(family.ipOwner); got != goroutines {
+		t.Errorf("ipOwner len = %d, want %d", got, goroutines)
+	}
+	// Every IP must appear in exactly one shard (no duplicates, no missing).
+	for i := 0; i < goroutines; i++ {
+		ip := fmt.Sprintf("10.2.0.%d", i)
+		if got := countIPAcrossShards(family, ip); got != 1 {
+			t.Errorf("IP %s appears %d times across shards, want 1", ip, got)
+		}
+	}
+}
+
 func TestSyncAllFamilies_ConcurrentWithAddIP(t *testing.T) {
 	sm, _ := newShardTestManager(t, "zone", 3)
 	ctx := context.Background()

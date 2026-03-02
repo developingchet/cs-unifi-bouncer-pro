@@ -409,13 +409,23 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 
 // AddIP adds ip to the appropriate shard for ipFamily ("v4" or "v6").
 // If ip is already tracked in any shard, it is a no-op (deduplication).
-// If all shards are full, a new shard is created.
-func (sm *ShardManager) AddIP(ctx context.Context, ip, ipFamily string) error {
+// If all shards are full or draining, a new Pending shard is allocated
+// in-memory and the IP is placed into it immediately. The shard will be
+// created in UniFi on the next flush.
+//
+// The lock is held for the entire operation. allocShard is pure in-memory
+// (template rendering + struct creation, no I/O) so there is no reason to
+// drop the lock between the capacity check and the append, which previously
+// created a TOCTOU race: concurrent goroutines could all compute the same
+// nextIndex, one would win the re-lock and create the shard, and the rest
+// would find that shard already full and return an error.
+func (sm *ShardManager) AddIP(_ context.Context, ip, ipFamily string) error {
 	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
 	family := sm.familyStateLocked(ipFamily)
 
 	if _, owned := family.ipOwner[ip]; owned {
-		sm.mu.Unlock()
 		return nil
 	}
 
@@ -427,46 +437,18 @@ func (sm *ShardManager) AddIP(ctx context.Context, ip, ipFamily string) error {
 			shard.IPs.Add(ip)
 			family.ipOwner[ip] = shard.Index
 			sm.updateMetricsLocked()
-			sm.mu.Unlock()
 			return nil
 		}
 	}
 
+	// All existing shards are full or draining — allocate a new Pending shard.
 	nextIndex := len(family.Shards)
-	sm.mu.Unlock()
-
-	// Allocate a Pending shard in-memory. It will be created in UniFi on first flush.
 	shard := sm.allocShard(nextIndex)
-
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	family = sm.familyStateLocked(ipFamily)
-
-	if existing, _ := sm.findShardByIndexLocked(family, nextIndex); existing == nil {
-		family.Shards = append(family.Shards, shard)
-		sort.Slice(family.Shards, func(i, j int) bool {
-			return family.Shards[i].Index < family.Shards[j].Index
-		})
-	}
-
-	if _, owned := family.ipOwner[ip]; owned {
-		sm.updateMetricsLocked()
-		return nil
-	}
-
-	for _, s := range family.Shards {
-		if s.State == ShardStateDraining {
-			continue // draining shards cannot accept new IPs
-		}
-		if s.IPs.Capacity(sm.shardLimit) > 0 {
-			s.IPs.Add(ip)
-			family.ipOwner[ip] = s.Index
-			sm.updateMetricsLocked()
-			return nil
-		}
-	}
-
-	return fmt.Errorf("no available shard capacity for family %s", ipFamily)
+	family.Shards = append(family.Shards, shard)
+	shard.IPs.Add(ip)
+	family.ipOwner[ip] = shard.Index
+	sm.updateMetricsLocked()
+	return nil
 }
 
 // RemoveIP removes ip from whichever shard owns it. No-op if not tracked.
