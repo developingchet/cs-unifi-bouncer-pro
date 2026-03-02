@@ -17,7 +17,10 @@ func buildRoot() *cobra.Command {
 		Use:   "cs-unifi-bouncer-pro",
 		Short: "CrowdSec bouncer for UniFi firewall management",
 	}
-	root.AddCommand(runCmd(), healthcheckCmd(), versionCmd(), reconcileCmd())
+	root.AddCommand(
+		runCmd(), healthcheckCmd(), versionCmd(), reconcileCmd(),
+		statusCmd(), drainCmd(), validateCmd(), diagnoseCmd(),
+	)
 	return root
 }
 
@@ -30,7 +33,7 @@ func TestRootSubcommands(t *testing.T) {
 		registered[cmd.Use] = true
 	}
 
-	for _, want := range []string{"run", "version", "healthcheck", "reconcile"} {
+	for _, want := range []string{"run", "version", "healthcheck", "reconcile", "status", "drain", "validate", "diagnose"} {
 		if !registered[want] {
 			t.Errorf("subcommand %q not registered on root command", want)
 		}

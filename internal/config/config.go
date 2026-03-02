@@ -410,24 +410,46 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// InsecureLAPIURLWarning returns a non-empty warning message when
-// CROWDSEC_LAPI_URL uses http:// with a non-loopback host, meaning the LAPI
-// key will be transmitted in plaintext over the network. Returns "" when the
-// URL is https://, or when the host is a loopback address or "localhost".
+// InsecureLAPIURLWarning returns a non-empty warning message when the LAPI
+// connection is susceptible to eavesdropping or a man-in-the-middle attack:
+//   - http:// with a non-loopback host: LAPI key transmitted in plaintext.
+//   - https:// with CROWDSEC_LAPI_VERIFY_TLS=false and a non-loopback host:
+//     TLS is negotiated but certificate validation is disabled, so an attacker
+//     on the network path can present a self-signed certificate and intercept
+//     the LAPI key.
+//
+// Returns "" when the host is loopback/localhost (same machine), or when
+// https:// is used with certificate verification enabled.
 func (c *Config) InsecureLAPIURLWarning() string {
 	u, err := url.Parse(c.CrowdSecLAPIURL)
-	if err != nil || u.Scheme != "http" {
+	if err != nil {
 		return ""
 	}
 	host := u.Hostname() // strips port and brackets from IPv6 literals
+	if isLoopbackHost(host) {
+		return ""
+	}
+	switch {
+	case u.Scheme == "http":
+		return "CROWDSEC_LAPI_URL uses http:// with a non-loopback host — " +
+			"the LAPI key is transmitted in plaintext; use https:// in production"
+	case u.Scheme == "https" && !c.CrowdSecLAPIVerifyTLS:
+		return "CROWDSEC_LAPI_VERIFY_TLS is false with a non-loopback LAPI host — " +
+			"TLS certificate validation is disabled and a man-in-the-middle attack could " +
+			"intercept the LAPI key; set CROWDSEC_LAPI_VERIFY_TLS=true or mount a CA certificate"
+	}
+	return ""
+}
+
+// isLoopbackHost reports whether host is the loopback address or "localhost".
+func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
-		return ""
+		return true
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		return ""
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
 	}
-	return "CROWDSEC_LAPI_URL uses http:// with a non-loopback host — " +
-		"the LAPI key is transmitted in plaintext; use https:// in production"
+	return false
 }
 
 // injectFileSecrets reads _FILE env vars and injects their file contents.

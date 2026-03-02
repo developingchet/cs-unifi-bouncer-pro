@@ -368,3 +368,51 @@ func TestDeprecationAlias_SyncIntervalWins(t *testing.T) {
 		t.Errorf("expected SyncInterval=120s (SYNC_INTERVAL wins), got %s", cfg.SyncInterval)
 	}
 }
+
+func TestInsecureLAPIURLWarning(t *testing.T) {
+	tests := []struct {
+		name      string
+		url       string
+		verifyTLS bool
+		wantWarn  bool
+	}{
+		// http:// — plaintext, always warn on non-loopback
+		{name: "http_remote_ip", url: "http://1.2.3.4:8080", verifyTLS: true, wantWarn: true},
+		{name: "http_remote_host", url: "http://crowdsec.internal:8080", verifyTLS: true, wantWarn: true},
+		{name: "http_loopback_127", url: "http://127.0.0.1:8080", verifyTLS: true, wantWarn: false},
+		{name: "http_loopback_localhost", url: "http://localhost:8080", verifyTLS: true, wantWarn: false},
+		{name: "http_loopback_ipv6", url: "http://[::1]:8080", verifyTLS: true, wantWarn: false},
+
+		// https:// + verify=true — safe, no warning regardless of host
+		{name: "https_remote_verify_true", url: "https://1.2.3.4:8080", verifyTLS: true, wantWarn: false},
+		{name: "https_remote_host_verify_true", url: "https://crowdsec.internal:8080", verifyTLS: true, wantWarn: false},
+		{name: "https_loopback_verify_true", url: "https://127.0.0.1:8080", verifyTLS: true, wantWarn: false},
+
+		// https:// + verify=false — MITM risk, warn on non-loopback
+		{name: "https_remote_verify_false", url: "https://1.2.3.4:8080", verifyTLS: false, wantWarn: true},
+		{name: "https_remote_host_verify_false", url: "https://crowdsec.internal:8080", verifyTLS: false, wantWarn: true},
+		{name: "https_loopback_verify_false", url: "https://127.0.0.1:8080", verifyTLS: false, wantWarn: false},
+		{name: "https_localhost_verify_false", url: "https://localhost:8080", verifyTLS: false, wantWarn: false},
+		{name: "https_loopback_ipv6_verify_false", url: "https://[::1]:8080", verifyTLS: false, wantWarn: false},
+
+		// Edge cases
+		{name: "invalid_url", url: "://bad", verifyTLS: true, wantWarn: false},
+		{name: "empty_url", url: "", verifyTLS: true, wantWarn: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{
+				CrowdSecLAPIURL:       tc.url,
+				CrowdSecLAPIVerifyTLS: tc.verifyTLS,
+			}
+			got := cfg.InsecureLAPIURLWarning()
+			if tc.wantWarn && got == "" {
+				t.Errorf("expected a warning for url=%q verifyTLS=%v, got none", tc.url, tc.verifyTLS)
+			}
+			if !tc.wantWarn && got != "" {
+				t.Errorf("expected no warning for url=%q verifyTLS=%v, got: %q", tc.url, tc.verifyTLS, got)
+			}
+		})
+	}
+}
