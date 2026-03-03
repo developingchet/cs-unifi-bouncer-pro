@@ -22,7 +22,24 @@ jobs:
       - name: Run tests (race detector)
         run: go test -race ./... -count=1 -timeout=120s
 
-  # ── 2. Seccomp profile static validation ────────────────────────────────────
+  # ── 2. Lint ──────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
+          golangci-lint run ./...
+
+  # ── 4. Seccomp profile static validation ────────────────────────────────────
   validate-seccomp:
     name: Validate Seccomp Profile
     runs-on: ubuntu-latest
@@ -35,7 +52,7 @@ jobs:
       - name: Validate syscall allowlist
         run: bash scripts/validate-seccomp.sh ./security/seccomp-unifi.json
 
-  # ── 3. Seccomp integration test ─────────────────────────────────────────────
+  # ── 5. Seccomp integration test ─────────────────────────────────────────────
   # Builds the real image and runs it under the seccomp profile with all the
   # same security options used in production. The bouncer will exit with a
   # connection error (no real UniFi/LAPI) — that is expected. What must NOT

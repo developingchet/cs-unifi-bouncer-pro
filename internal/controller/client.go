@@ -199,9 +199,13 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 
 	switch resp.StatusCode {
 	case http.StatusBadRequest:
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("bad request: %s", string(body))
+		bodyStr := string(body)
+		if len(body) == 4096 {
+			bodyStr += "...(truncated)"
+		}
+		return nil, fmt.Errorf("bad request: %s", bodyStr)
 	case http.StatusUnauthorized:
 		_ = resp.Body.Close()
 		return nil, &ErrUnauthorized{Msg: "HTTP 401"}

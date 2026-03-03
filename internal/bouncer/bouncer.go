@@ -240,7 +240,8 @@ func (b *Bouncer) serveHealth(ctx context.Context) error {
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		if err := b.ctrl.Ping(r.Context()); err != nil {
-			http.Error(w, "not ready: "+err.Error(), http.StatusServiceUnavailable)
+			b.log.Warn().Err(err).Msg("readyz: controller ping failed")
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -248,8 +249,12 @@ func (b *Bouncer) serveHealth(ctx context.Context) error {
 	})
 
 	srv := &http.Server{
-		Addr:    b.cfg.HealthAddr,
-		Handler: mux,
+		Addr:              b.cfg.HealthAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 	go func() {
 		<-ctx.Done()

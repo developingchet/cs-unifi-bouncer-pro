@@ -32,7 +32,7 @@ func testNamer(t *testing.T) *Namer {
 // newBboltStore creates a temporary bbolt store for the test.
 func newBboltStore(t *testing.T) storage.Store {
 	t.Helper()
-	store, err := storage.NewBboltStore(t.TempDir())
+	store, err := storage.NewBboltStore(t.TempDir(), zerolog.Nop())
 	if err != nil {
 		t.Fatalf("NewBboltStore: %v", err)
 	}

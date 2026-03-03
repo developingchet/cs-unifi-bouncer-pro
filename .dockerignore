@@ -1,0 +1,9 @@
+.git
+.github
+docs/
+scripts/
+*.md
+*.sh
+dist/
+*.exe
+*_test.go

@@ -6,31 +6,18 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: write      # needed by softprops/action-gh-release to create releases
-  id-token: write      # OIDC token for keyless Cosign signing
-  attestations: write  # cosign attest
+  contents: write          # needed by softprops/action-gh-release to create releases
+  id-token: write          # OIDC token for keyless Cosign signing
+  attestations: write      # cosign attest
+  security-events: write   # upload SARIF to GitHub Security tab
 
 jobs:
-  # ── 1. Tests ────────────────────────────────────────────────────────────────
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+  # Tests are run in CI (ci.yml) which gates tag pushes; no need to repeat here.
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Run tests
-        run: go test -race ./... -count=1 -timeout=120s
-
-  # ── 2. Binary builds (matrix) ───────────────────────────────────────────────
+  # ── 1. Binary builds (matrix) ───────────────────────────────────────────────
   build-binaries:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) || '' }})
     runs-on: ubuntu-latest
-    needs: test
     strategy:
       matrix:
         include:
@@ -75,11 +62,10 @@ jobs:
           path: ${{ matrix.artifact }}
           if-no-files-found: error
 
-  # ── 3. Docker security scan ─────────────────────────────────────────────────
+  # ── 2. Docker security scan ─────────────────────────────────────────────────
   docker-scan:
     name: Docker Scan
     runs-on: ubuntu-latest
-    needs: test
     steps:
       - uses: actions/checkout@v4
 
@@ -106,12 +92,20 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           version: v0.69.2
+          format: sarif
+          output: trivy-results.sarif
 
-  # ── 4. Multi-arch Docker push ────────────────────────────────────────────────
+      - name: Upload Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+  # ── 3. Multi-arch Docker push ────────────────────────────────────────────────
   docker-push:
     name: Docker Push
     runs-on: ubuntu-latest
-    needs: [test, docker-scan]
+    needs: [docker-scan]
     steps:
       - uses: actions/checkout@v4
 
@@ -190,7 +184,7 @@ jobs:
           repository: developingchet/cs-unifi-bouncer-pro
           readme-filepath: ./DOCKERHUB.md
 
-  # ── 5. GitHub Release ────────────────────────────────────────────────────────
+  # ── 4. GitHub Release ────────────────────────────────────────────────────────
   release:
     name: GitHub Release
     runs-on: ubuntu-latest

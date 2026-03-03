@@ -5,12 +5,14 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
 )
 
 func newTestStore(t *testing.T) Store {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := NewBboltStore(dir)
+	s, err := NewBboltStore(dir, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("NewBboltStore: %v", err)
 	}
@@ -241,7 +243,7 @@ func TestListPolicies(t *testing.T) {
 // Ensure bbolt file is actually created on disk.
 func TestFileCreated(t *testing.T) {
 	dir := t.TempDir()
-	s, err := NewBboltStore(dir)
+	s, err := NewBboltStore(dir, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}

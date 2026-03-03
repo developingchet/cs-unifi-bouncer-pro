@@ -13,7 +13,7 @@ import (
 func newJanitorTestStore(t *testing.T) storage.Store {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := storage.NewBboltStore(dir)
+	s, err := storage.NewBboltStore(dir, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("NewBboltStore: %v", err)
 	}

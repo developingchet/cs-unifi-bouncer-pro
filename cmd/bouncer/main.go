@@ -95,7 +95,7 @@ func runDaemon() error {
 		Bool("appsec", capabilities.SupportsAppSec).
 		Msg("bouncer capabilities")
 
-	store, err := storage.NewBboltStore(cfg.DataDir)
+	store, err := storage.NewBboltStore(cfg.DataDir, log)
 	if err != nil {
 		return fmt.Errorf("open storage: %w", err)
 	}
@@ -359,7 +359,7 @@ func reconcileCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 
-			store, err := storage.NewBboltStore(cfg.DataDir)
+			store, err := storage.NewBboltStore(cfg.DataDir, log)
 			if err != nil {
 				return err
 			}
@@ -520,7 +520,7 @@ Requires either --force or --dry-run for safety.`,
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 
-		store, err := storage.NewBboltStore(cfg.DataDir)
+		store, err := storage.NewBboltStore(cfg.DataDir, log)
 		if err != nil {
 			return fmt.Errorf("open storage: %w", err)
 		}

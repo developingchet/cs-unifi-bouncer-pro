@@ -14,7 +14,7 @@ import (
 
 func newShardTestStore(t *testing.T) storage.Store {
 	t.Helper()
-	store, err := storage.NewBboltStore(t.TempDir())
+	store, err := storage.NewBboltStore(t.TempDir(), zerolog.Nop())
 	if err != nil {
 		t.Fatalf("NewBboltStore: %v", err)
 	}

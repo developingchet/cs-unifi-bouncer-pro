@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/vmihailenco/msgpack/v5"
 	bolt "go.etcd.io/bbolt"
 )
@@ -17,11 +18,12 @@ const (
 )
 
 type bboltStore struct {
-	db *bolt.DB
+	db  *bolt.DB
+	log zerolog.Logger
 }
 
 // NewBboltStore opens (or creates) a bbolt database at dataDir/bouncer.db.
-func NewBboltStore(dataDir string) (Store, error) {
+func NewBboltStore(dataDir string, log zerolog.Logger) (Store, error) {
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
@@ -41,7 +43,7 @@ func NewBboltStore(dataDir string) (Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &bboltStore{db: db}, nil
+	return &bboltStore{db: db, log: log}, nil
 }
 
 // NewBboltStoreReadOnly opens an existing bbolt database in read-only mode.
@@ -56,7 +58,7 @@ func NewBboltStoreReadOnly(dataDir string) (Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open bbolt (read-only) at %s: %w", path, err)
 	}
-	return &bboltStore{db: db}, nil
+	return &bboltStore{db: db, log: zerolog.Nop()}, nil
 }
 
 // ---- Ban operations --------------------------------------------------------
@@ -118,7 +120,8 @@ func (s *bboltStore) PruneExpiredBans() (int, error) {
 		if err := b.ForEach(func(k, v []byte) error {
 			var entry BanEntry
 			if err := msgpack.Unmarshal(v, &entry); err != nil {
-				return nil // skip corrupt entries
+				s.log.Warn().Str("key", string(k)).Err(err).Msg("janitor: skipping corrupt ban entry")
+				return nil
 			}
 			if !entry.ExpiresAt.IsZero() && entry.ExpiresAt.Before(now) {
 				key := make([]byte, len(k))
