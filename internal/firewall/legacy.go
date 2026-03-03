@@ -2,6 +2,7 @@ package firewall
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -113,6 +114,18 @@ func (lm *LegacyManager) ensureRulesForFamily(ctx context.Context, site string, 
 
 		created, err := lm.ctrl.CreateFirewallRule(ctx, site, rule)
 		if err != nil {
+			var conflict *controller.ErrConflict
+			if errors.As(err, &conflict) {
+				if id := lm.findExistingRuleByName(ctx, site, ruleName); id != "" {
+					lm.log.Warn().Str("rule", ruleName).Str("id", id).
+						Msg("legacy rule already exists (409 conflict); recovering existing ID")
+					if storeErr := lm.store.SetPolicy(ruleName, storage.PolicyRecord{UnifiID: id, Site: site, Mode: "legacy"}); storeErr != nil {
+						lm.log.Warn().Err(storeErr).Str("rule", ruleName).Msg("failed to cache recovered rule in bbolt")
+					}
+					existingByID[id] = true
+					continue
+				}
+			}
 			return fmt.Errorf("create legacy rule %s: %w", ruleName, err)
 		}
 		existingByID[created.ID] = true
@@ -179,6 +192,19 @@ func (lm *LegacyManager) EnsureRuleForShard(ctx context.Context, site, groupID s
 
 	created, err := lm.ctrl.CreateFirewallRule(ctx, site, rule)
 	if err != nil {
+		var conflict *controller.ErrConflict
+		if errors.As(err, &conflict) {
+			if id := lm.findExistingRuleByName(ctx, site, ruleName); id != "" {
+				lm.log.Warn().Str("rule", ruleName).Str("id", id).
+					Msg("legacy rule already exists (409 conflict); recovering existing ID")
+				if storeErr := lm.store.SetPolicy(ruleName, storage.PolicyRecord{UnifiID: id, Site: site, Mode: "legacy"}); storeErr != nil {
+					lm.log.Warn().Err(storeErr).Str("rule", ruleName).Msg("failed to cache recovered rule in bbolt")
+				}
+				lm.log.Info().Str("name", ruleName).Str("id", id).
+					Msg("recovered legacy firewall rule for new shard")
+				return nil
+			}
+		}
 		return fmt.Errorf("create legacy rule %s: %w", ruleName, err)
 	}
 
@@ -245,4 +271,20 @@ func (lm *LegacyManager) DeleteRules(ctx context.Context, site string) error {
 		}
 	}
 	return nil
+}
+
+// findExistingRuleByName queries the UniFi API for a firewall rule with the given name.
+// Used for 409 conflict recovery: if CreateFirewallRule returns ErrConflict, the rule
+// already exists and we can recover its ID to continue without re-creating.
+func (lm *LegacyManager) findExistingRuleByName(ctx context.Context, site, name string) string {
+	rules, err := lm.ctrl.ListFirewallRules(ctx, site)
+	if err != nil {
+		return ""
+	}
+	for _, r := range rules {
+		if r.Name == name {
+			return r.ID
+		}
+	}
+	return ""
 }

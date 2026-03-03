@@ -720,3 +720,141 @@ func TestEnsureShards_FiltersPlaceholder(t *testing.T) {
 		t.Errorf("Shards len: got %d, want 0 (placeholder-only TML should not be loaded as a shard)", got)
 	}
 }
+
+// --- State-divergence resilience tests ---------------------------------------
+
+// TestSyncShard_PutNotFound_ResetsToPending verifies that when an UpdateFirewallGroup
+// call returns ErrNotFound (404), syncShard resets the shard to Pending state with
+// an empty ID and clears the bbolt record, so the shard will be re-created on the
+// next flush cycle.
+func TestSyncShard_PutNotFound_ResetsToPending(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+
+	const shardID = "shard-id-1"
+	const shardName = "crowdsec-block-v4-0"
+
+	// Seed the API and bbolt with an existing Active group.
+	ctrl.SetGroups(testSite, []controller.FirewallGroup{
+		{ID: shardID, Name: shardName, GroupType: "address-group", GroupMembers: []string{"10.0.0.1"}},
+	})
+	if err := store.SetGroup(shardName, storage.GroupRecord{
+		UnifiID: shardID, Site: testSite, Members: []string{"10.0.0.1"}, IPv6: false,
+	}); err != nil {
+		t.Fatalf("SetGroup: %v", err)
+	}
+
+	sm := newV4ShardManager(t, 100, ctrl, store)
+	if err := sm.EnsureShards(context.Background()); err != nil {
+		t.Fatalf("EnsureShards: %v", err)
+	}
+
+	// Verify we loaded an Active shard.
+	sm.mu.RLock()
+	family := sm.families["v4"]
+	if len(family.Shards) != 1 || family.Shards[0].State != ShardStateActive {
+		sm.mu.RUnlock()
+		t.Fatalf("expected 1 Active shard after EnsureShards")
+	}
+	sm.mu.RUnlock()
+
+	// Add a new IP to make the shard dirty.
+	if _, _, err := sm.Add(context.Background(), "10.0.0.2"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// Inject a 404 on the next UpdateFirewallGroup call.
+	ctrl.SetError("UpdateFirewallGroup", &controller.ErrNotFound{URL: "/api/groups/" + shardID})
+
+	// syncAllFamilies should return nil (404 is handled gracefully).
+	if err := sm.syncAllFamilies(context.Background()); err != nil {
+		t.Fatalf("syncAllFamilies: expected nil on 404, got: %v", err)
+	}
+
+	// Shard must now be Pending with an empty ID.
+	sm.mu.RLock()
+	family = sm.families["v4"]
+	gotState := family.Shards[0].State
+	gotID := family.Shards[0].ID
+	sm.mu.RUnlock()
+
+	if gotState != ShardStatePending {
+		t.Errorf("shard state: got %v, want ShardStatePending", gotState)
+	}
+	if gotID != "" {
+		t.Errorf("shard ID: got %q, want empty", gotID)
+	}
+
+	// bbolt record must have empty UnifiID.
+	rec, err := store.GetGroup(shardName)
+	if err != nil {
+		t.Fatalf("store.GetGroup: %v", err)
+	}
+	if rec != nil && rec.UnifiID != "" {
+		t.Errorf("bbolt UnifiID: got %q, want empty", rec.UnifiID)
+	}
+}
+
+// TestDoCreateUniFiGroup_Conflict_ZoneMode verifies that when CreateTrafficMatchingList
+// returns ErrConflict (409), doCreateUniFiGroup recovers the existing TML ID via
+// ListTrafficMatchingLists instead of propagating the error.
+func TestDoCreateUniFiGroup_Conflict_ZoneMode(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+
+	const shardName = "crowdsec-block-v4-0"
+	const existingID = "existing-tml-id"
+
+	// Preset an existing TML in the mock API.
+	ctrl.SetTMLs(testSite, []controller.TrafficMatchingList{
+		{ID: existingID, Name: shardName, Type: "IPV4_ADDRESSES"},
+	})
+
+	// Inject 409 on the create call.
+	ctrl.SetError("CreateTrafficMatchingList", &controller.ErrConflict{Msg: "already exists"})
+
+	sm := newZoneV4ShardManager(t, 100, ctrl, store)
+
+	id, err := sm.doCreateUniFiGroup(context.Background(), shardName)
+	if err != nil {
+		t.Fatalf("doCreateUniFiGroup: expected nil on 409 with existing TML, got: %v", err)
+	}
+	if id != existingID {
+		t.Errorf("recovered ID: got %q, want %q", id, existingID)
+	}
+	if got := ctrl.Calls("ListTrafficMatchingLists"); got != 1 {
+		t.Errorf("ListTrafficMatchingLists calls: got %d, want 1", got)
+	}
+}
+
+// TestDoCreateUniFiGroup_Conflict_LegacyMode verifies that when CreateFirewallGroup
+// returns ErrConflict (409), doCreateUniFiGroup recovers the existing group ID via
+// ListFirewallGroups instead of propagating the error.
+func TestDoCreateUniFiGroup_Conflict_LegacyMode(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+
+	const shardName = "crowdsec-block-v4-0"
+	const existingID = "existing-group-id"
+
+	// Preset an existing group in the mock API.
+	ctrl.SetGroups(testSite, []controller.FirewallGroup{
+		{ID: existingID, Name: shardName, GroupType: "address-group", GroupMembers: []string{}},
+	})
+
+	// Inject 409 on the create call.
+	ctrl.SetError("CreateFirewallGroup", &controller.ErrConflict{Msg: "already exists"})
+
+	sm := newV4ShardManager(t, 100, ctrl, store)
+
+	id, err := sm.doCreateUniFiGroup(context.Background(), shardName)
+	if err != nil {
+		t.Fatalf("doCreateUniFiGroup: expected nil on 409 with existing group, got: %v", err)
+	}
+	if id != existingID {
+		t.Errorf("recovered ID: got %q, want %q", id, existingID)
+	}
+	if got := ctrl.Calls("ListFirewallGroups"); got != 1 {
+		t.Errorf("ListFirewallGroups calls: got %d, want 1", got)
+	}
+}

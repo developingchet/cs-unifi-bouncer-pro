@@ -629,3 +629,35 @@ func TestListFirewallGroups_VerifiesFields(t *testing.T) {
 		t.Errorf("GroupMembers[0]: got %q, want IPv6 address", g.GroupMembers[0])
 	}
 }
+
+// --- ignoreNotFound -----------------------------------------------------------
+
+func TestIgnoreNotFound(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   error
+		wantNil bool
+	}{
+		{"nil input", nil, true},
+		{"ErrNotFound direct", &ErrNotFound{URL: "/api/foo"}, true},
+		{"ErrNotFound no URL", &ErrNotFound{}, true},
+		{"wrapped ErrNotFound", fmt.Errorf("wrap: %w", &ErrNotFound{URL: "/bar"}), true},
+		{"other error", fmt.Errorf("something else"), false},
+		{"ErrConflict", &ErrConflict{Msg: "409"}, false},
+		{"ErrRateLimit", &ErrRateLimit{RetryAfter: 0}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ignoreNotFound(tt.input)
+			if tt.wantNil && got != nil {
+				t.Errorf("ignoreNotFound(%v) = %v, want nil", tt.input, got)
+			}
+			if !tt.wantNil && got == nil {
+				t.Errorf("ignoreNotFound(%v) = nil, want non-nil error", tt.input)
+			}
+			if !tt.wantNil && got != nil && got != tt.input {
+				t.Errorf("ignoreNotFound(%v) = %v, want same error back", tt.input, got)
+			}
+		})
+	}
+}

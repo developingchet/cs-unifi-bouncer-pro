@@ -2,6 +2,7 @@ package firewall
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -226,13 +227,23 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 			if apiPolicy, found := existingByID[existing.UnifiID]; found {
 				if needsUpdateZonePolicy(&apiPolicy, groupID) {
 					zm.log.Info().Str("policy", policyName).Msg("zone policy needs update, applying reconcile")
-					if err := zm.updateZonePolicy(ctx, site, apiPolicy, groupID); err != nil {
-						return fmt.Errorf("update zone policy %s: %w", policyName, err)
+					updateErr := zm.updateZonePolicy(ctx, site, apiPolicy, groupID)
+					if updateErr != nil {
+						var nf *controller.ErrNotFound
+						if !errors.As(updateErr, &nf) {
+							return fmt.Errorf("update zone policy %s: %w", policyName, updateErr)
+						}
+						// 404 on PUT: policy was externally deleted; clear bbolt and fall through to create.
+						zm.log.Warn().Str("policy", policyName).Str("id", existing.UnifiID).
+							Msg("zone policy not found on update (externally deleted?); clearing record for re-creation")
+						_ = zm.store.DeletePolicy(policyName)
+					} else {
+						continue
 					}
 				} else {
 					zm.log.Debug().Str("policy", policyName).Msg("zone policy already exists")
+					continue
 				}
-				continue
 			}
 			// Not found in API — fall through to create
 		}
@@ -267,6 +278,18 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 
 		created, err := zm.ctrl.CreateZonePolicy(ctx, site, policy)
 		if err != nil {
+			var conflict *controller.ErrConflict
+			if errors.As(err, &conflict) {
+				if id := zm.findExistingPolicyByName(ctx, site, policyName); id != "" {
+					zm.log.Warn().Str("policy", policyName).Str("id", id).
+						Msg("zone policy already exists (409 conflict); recovering existing ID")
+					if storeErr := zm.store.SetPolicy(policyName, storage.PolicyRecord{UnifiID: id, Site: site, Mode: "zone"}); storeErr != nil {
+						zm.log.Warn().Err(storeErr).Str("policy", policyName).Msg("failed to cache recovered policy in bbolt")
+					}
+					existingByID[id] = controller.ZonePolicy{ID: id}
+					continue
+				}
+			}
 			return fmt.Errorf("create zone policy %s: %w", policyName, err)
 		}
 		existingByID[created.ID] = created
@@ -362,6 +385,17 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 
 		created, err := zm.ctrl.CreateZonePolicy(ctx, site, policy)
 		if err != nil {
+			var conflict *controller.ErrConflict
+			if errors.As(err, &conflict) {
+				if id := zm.findExistingPolicyByName(ctx, site, policyName); id != "" {
+					zm.log.Warn().Str("policy", policyName).Str("id", id).
+						Msg("zone policy already exists (409 conflict); recovering existing ID")
+					if storeErr := zm.store.SetPolicy(policyName, storage.PolicyRecord{UnifiID: id, Site: site, Mode: "zone"}); storeErr != nil {
+						zm.log.Warn().Err(storeErr).Str("policy", policyName).Msg("failed to cache recovered policy in bbolt")
+					}
+					continue
+				}
+			}
 			return fmt.Errorf("create zone policy %s: %w", policyName, err)
 		}
 
@@ -484,4 +518,20 @@ func (zm *ZoneManager) updateZonePolicy(ctx context.Context, site string, policy
 	policy.ConnectionStateFilter = nil
 	policy.LoggingEnabled = zm.cfg.LogDrops
 	return zm.ctrl.UpdateZonePolicy(ctx, site, policy)
+}
+
+// findExistingPolicyByName queries the UniFi API for a zone policy with the given name.
+// Used for 409 conflict recovery: if CreateZonePolicy returns ErrConflict, the policy
+// already exists and we can recover its ID to continue without re-creating.
+func (zm *ZoneManager) findExistingPolicyByName(ctx context.Context, site, name string) string {
+	policies, err := zm.ctrl.ListZonePolicies(ctx, site)
+	if err != nil {
+		return ""
+	}
+	for _, p := range policies {
+		if p.Name == name {
+			return p.ID
+		}
+	}
+	return ""
 }

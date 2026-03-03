@@ -843,6 +843,14 @@ func (sm *ShardManager) doCreateUniFiGroup(ctx context.Context, name string) (st
 			Items:     tmlPlaceholderItems(sm.ipv6), // API requires non-empty items on create
 		})
 		if err != nil {
+			var conflict *controller.ErrConflict
+			if errors.As(err, &conflict) {
+				if id := sm.findExistingTMLByName(ctx, name); id != "" {
+					sm.log.Warn().Str("shard", name).Str("id", id).
+						Msg("TML already exists (409 conflict); recovering existing ID")
+					return id, nil
+				}
+			}
 			return "", fmt.Errorf("create %s %s: %w", objectKind, name, err)
 		}
 		if created.ID == "" {
@@ -865,6 +873,14 @@ func (sm *ShardManager) doCreateUniFiGroup(ctx context.Context, name string) (st
 		GroupMembers: []string{placeholder},
 	})
 	if err != nil {
+		var conflict *controller.ErrConflict
+		if errors.As(err, &conflict) {
+			if id := sm.findExistingGroupByName(ctx, name); id != "" {
+				sm.log.Warn().Str("shard", name).Str("id", id).
+					Msg("firewall group already exists (409 conflict); recovering existing ID")
+				return id, nil
+			}
+		}
 		return "", fmt.Errorf("create %s %s: %w", objectKind, name, err)
 	}
 	if created.ID == "" {
@@ -1124,6 +1140,20 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) error {
 			return putErr
 		}
 
+		// If the object was deleted from UniFi externally, reset to Pending so
+		// it gets re-created on the next flush.
+		var nf *controller.ErrNotFound
+		if errors.As(putErr, &nf) {
+			sm.log.Warn().Str("shard", shard.Name).Str("shard_id", shard.ID).
+				Msg("shard object not found in UniFi (externally deleted?); resetting to Pending for re-creation")
+			sm.mu.Lock()
+			shard.State = ShardStatePending
+			shard.ID = ""
+			sm.mu.Unlock()
+			_ = sm.store.SetGroup(shard.Name, storage.GroupRecord{Site: sm.site, IPv6: sm.ipv6})
+			return nil
+		}
+
 		sm.log.Error().Err(putErr).Str("shard", shard.Name).Str("shard_id", shard.ID).Int("ip_count", len(ips)).
 			Msg("shard sync failed, will retry next tick")
 		if sm.onSyncError != nil {
@@ -1176,6 +1206,37 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) error {
 			Msg("shard flushed to UniFi")
 	}
 	return nil
+}
+
+// findExistingTMLByName queries the UniFi API for a TML with the given name.
+// Used for 409 conflict recovery: if CreateTrafficMatchingList returns ErrConflict,
+// the TML already exists and we can recover its ID to continue without re-creating.
+func (sm *ShardManager) findExistingTMLByName(ctx context.Context, name string) string {
+	tmls, err := sm.ctrl.ListTrafficMatchingLists(ctx, sm.site)
+	if err != nil {
+		return ""
+	}
+	for _, t := range tmls {
+		if t.Name == name {
+			return t.ID
+		}
+	}
+	return ""
+}
+
+// findExistingGroupByName queries the UniFi API for a firewall group with the given name.
+// Used for 409 conflict recovery in legacy mode.
+func (sm *ShardManager) findExistingGroupByName(ctx context.Context, name string) string {
+	groups, err := sm.ctrl.ListFirewallGroups(ctx, sm.site)
+	if err != nil {
+		return ""
+	}
+	for _, g := range groups {
+		if g.Name == name {
+			return g.ID
+		}
+	}
+	return ""
 }
 
 func tmlTypeForFamily(family string) string {

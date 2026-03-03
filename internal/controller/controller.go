@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -149,4 +150,14 @@ type ErrConflict struct {
 
 func (e *ErrConflict) Error() string {
 	return fmt.Sprintf("conflict: %s", e.Msg)
+}
+
+// ignoreNotFound returns nil if err wraps *ErrNotFound, otherwise returns err.
+// Makes DELETE operations idempotent: "not found" means the object is already absent.
+func ignoreNotFound(err error) error {
+	var nf *ErrNotFound
+	if errors.As(err, &nf) {
+		return nil
+	}
+	return err
 }

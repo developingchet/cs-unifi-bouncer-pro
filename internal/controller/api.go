@@ -295,7 +295,7 @@ func updateFirewallGroup(ctx context.Context, c *unifiClient, site string, g Fir
 
 func deleteFirewallGroup(ctx context.Context, c *unifiClient, site, id string) error {
 	u := groupEndpoint(c.cfg.BaseURL, site) + "/" + id
-	return doDELETE(ctx, c, u, "delete-group")
+	return ignoreNotFound(doDELETE(ctx, c, u, "delete-group"))
 }
 
 // --- Firewall Rules (legacy REST) -------------------------------------------
@@ -353,7 +353,7 @@ func updateFirewallRule(ctx context.Context, c *unifiClient, site string, r Fire
 
 func deleteFirewallRule(ctx context.Context, c *unifiClient, site, id string) error {
 	u := ruleEndpoint(c.cfg.BaseURL, site) + "/" + id
-	return doDELETE(ctx, c, u, "delete-rule")
+	return ignoreNotFound(doDELETE(ctx, c, u, "delete-rule"))
 }
 
 // --- Integration v1 helpers -------------------------------------------------
@@ -498,7 +498,7 @@ func updateTML(ctx context.Context, c *unifiClient, siteID string, list TrafficM
 func deleteTML(ctx context.Context, c *unifiClient, siteID, id string) error {
 	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/traffic-matching-lists/%s",
 		c.cfg.BaseURL, siteID, id)
-	return doDELETE(ctx, c, endpointURL, "delete-tml")
+	return ignoreNotFound(doDELETE(ctx, c, endpointURL, "delete-tml"))
 }
 
 func tmlToWire(list TrafficMatchingList) apiTMLV1 {
@@ -601,7 +601,7 @@ func updateZonePolicyV1(ctx context.Context, c *unifiClient, siteID string, poli
 func deleteZonePolicyV1(ctx context.Context, c *unifiClient, siteID, id string) error {
 	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies/%s",
 		c.cfg.BaseURL, siteID, id)
-	return doDELETE(ctx, c, endpointURL, "delete-policy")
+	return ignoreNotFound(doDELETE(ctx, c, endpointURL, "delete-policy"))
 }
 
 func v1PolicyToModel(p apiV1Policy) ZonePolicy {
