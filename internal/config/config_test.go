@@ -217,6 +217,105 @@ func TestParseCloudflareZonePairs(t *testing.T) {
 	}
 }
 
+func TestSplitZonePairList(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{
+			name:  "empty",
+			input: "",
+			want:  nil,
+		},
+		{
+			name:  "single simple pair",
+			input: "External->Internal",
+			want:  []string{"External->Internal"},
+		},
+		{
+			name:  "multiple simple pairs comma-separated (backward compat)",
+			input: "wan->lan,wan->iot,wan->dmz",
+			want:  []string{"wan->lan", "wan->iot", "wan->dmz"},
+		},
+		{
+			name:  "single pair with dst ports — commas are port separators",
+			input: "External->Internal:80,443",
+			want:  []string{"External->Internal:80,443"},
+		},
+		{
+			name:  "single pair with src and dst ports",
+			input: "External:80,443->Dmz:80,443",
+			want:  []string{"External:80,443->Dmz:80,443"},
+		},
+		{
+			name:  "multiple pairs with ports semicolon-separated",
+			input: "External:80,443->Dmz:80,443;External->Corporate",
+			want:  []string{"External:80,443->Dmz:80,443", "External->Corporate"},
+		},
+		{
+			name:  "multiple simple pairs semicolon-separated",
+			input: "External->Internal;External->DMZ",
+			want:  []string{"External->Internal", "External->DMZ"},
+		},
+		{
+			name:  "semicolon with whitespace",
+			input: "External:80,443->Dmz ; External->Corporate",
+			want:  []string{"External:80,443->Dmz", "External->Corporate"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitZonePairList(tc.input)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len: got %d (%v), want %d (%v)", len(got), got, len(tc.want), tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("[%d]: got %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestZonePairsWithPortsViaLoad verifies that a CLOUDFLARE_ZONE_PAIRS value
+// containing port-list commas is treated as a single zone pair by Load().
+func TestZonePairsWithPortsViaLoad(t *testing.T) {
+	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
+	setEnv(t, "UNIFI_API_KEY", "key")
+	setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
+	setEnv(t, "CLOUDFLARE_WHITELIST_ENABLED", "true")
+	setEnv(t, "CLOUDFLARE_ZONE_PAIRS", "External:80,443->Dmz:80,443")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.CloudflareZonePairs) != 1 {
+		t.Fatalf("expected 1 CloudflareZonePair, got %d: %v", len(cfg.CloudflareZonePairs), cfg.CloudflareZonePairs)
+	}
+	if cfg.CloudflareZonePairs[0] != "External:80,443->Dmz:80,443" {
+		t.Errorf("CloudflareZonePairs[0]: got %q", cfg.CloudflareZonePairs[0])
+	}
+	pairs, err := cfg.ParseCloudflareZonePairs()
+	if err != nil {
+		t.Fatalf("ParseCloudflareZonePairs: %v", err)
+	}
+	if len(pairs) != 1 {
+		t.Fatalf("expected 1 parsed pair, got %d", len(pairs))
+	}
+	if pairs[0].Src != "External" || pairs[0].Dst != "Dmz" {
+		t.Errorf("unexpected zones: src=%q dst=%q", pairs[0].Src, pairs[0].Dst)
+	}
+	if len(pairs[0].SrcPorts) != 2 || pairs[0].SrcPorts[0] != 80 || pairs[0].SrcPorts[1] != 443 {
+		t.Errorf("unexpected SrcPorts: %v", pairs[0].SrcPorts)
+	}
+	if len(pairs[0].DstPorts) != 2 || pairs[0].DstPorts[0] != 80 || pairs[0].DstPorts[1] != 443 {
+		t.Errorf("unexpected DstPorts: %v", pairs[0].DstPorts)
+	}
+}
+
 func TestInvalidZonePairs(t *testing.T) {
 	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
 	setEnv(t, "UNIFI_API_KEY", "key")

@@ -334,8 +334,8 @@ func Load() (*Config, error) {
 	cfg.CrowdSecOrigins = splitCSV(k.String("crowdsec_origins"))
 	cfg.BlockScenarioExclude = splitCSV(k.String("block_scenario_exclude"))
 	cfg.BlockWhitelist = splitCSV(k.String("block_whitelist"))
-	cfg.ZonePairs = splitCSV(k.String("zone_pairs"))
-	cfg.CloudflareZonePairs = splitCSV(k.String("cloudflare_zone_pairs"))
+	cfg.ZonePairs = splitZonePairList(k.String("zone_pairs"))
+	cfg.CloudflareZonePairs = splitZonePairList(k.String("cloudflare_zone_pairs"))
 
 	// Strip Docker env-file quoting from all string values
 	cfg.sanitise()
@@ -555,6 +555,64 @@ func splitCSV(s string) []string {
 		}
 	}
 	return result
+}
+
+// splitZonePairList splits a zone-pair list string into individual zone pair
+// strings. It handles two formats:
+//
+//  1. Semicolon-separated (required when any pair contains port lists):
+//     "External:80,443->Internal;External->DMZ"
+//
+//  2. Comma-separated without port syntax (backward-compatible):
+//     "wan->lan,wan->iot,wan->dmz"
+//
+// If the string contains semicolons, it is always split on semicolons.
+// Otherwise, if every comma-separated part contains "->", the commas are
+// treated as zone-pair separators (old-style format). If any part lacks "->",
+// the entire string is treated as a single zone pair (commas are port
+// separators within that pair, e.g. "External:80,443->Internal:80,443").
+func splitZonePairList(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+
+	// Prefer semicolons — unambiguous with port-list commas.
+	if strings.Contains(s, ";") {
+		parts := strings.Split(s, ";")
+		result := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				result = append(result, p)
+			}
+		}
+		return result
+	}
+
+	// Try comma split: only use it when every part contains "->" so we know
+	// the commas are zone-pair separators, not port-list separators.
+	parts := strings.Split(s, ",")
+	allHaveArrow := true
+	for _, p := range parts {
+		if !strings.Contains(strings.TrimSpace(p), "->") {
+			allHaveArrow = false
+			break
+		}
+	}
+	if allHaveArrow {
+		result := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				result = append(result, p)
+			}
+		}
+		return result
+	}
+
+	// Commas are port-list separators — the whole string is a single zone pair.
+	return []string{s}
 }
 
 // rawProvider implements koanf.Provider for a map[string]interface{}.
