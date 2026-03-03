@@ -135,18 +135,35 @@ type apiV1Policy struct {
 	LoggingEnabled        bool              `json:"loggingEnabled"`
 }
 
-// apiV1PolicyUpdate is used for PUT requests — the API rejects '$.id' in the body.
+// apiV1PolicyUpdateSrc is the source struct for PUT requests.
+// portFilter is intentionally absent: the UniFi PUT endpoint rejects
+// '$.source.portFilter' as an unknown property. portFilter can only be
+// set at creation time (POST). When portFilter needs to change, the
+// caller must delete the existing policy and recreate it.
+type apiV1PolicyUpdateSrc struct {
+	ZoneID        string              `json:"zoneId"`
+	TrafficFilter *apiV1TrafficFilter `json:"trafficFilter,omitempty"`
+}
+
+// apiV1PolicyUpdateDst is the destination struct for PUT requests.
+// portFilter is intentionally absent for the same reason as apiV1PolicyUpdateSrc.
+type apiV1PolicyUpdateDst struct {
+	ZoneID string `json:"zoneId"`
+}
+
+// apiV1PolicyUpdate is used for PUT requests — omits both '$.id' and portFilter,
+// both of which the UniFi PUT endpoint rejects.
 type apiV1PolicyUpdate struct {
-	Enabled               bool              `json:"enabled"`
-	Name                  string            `json:"name"`
-	Description           string            `json:"description,omitempty"`
-	Index                 int               `json:"index,omitempty"`
-	Action                apiV1PolicyAction `json:"action"`
-	Source                apiV1PolicySrc    `json:"source"`
-	Destination           apiV1PolicyDst    `json:"destination"`
-	IPProtocolScope       apiV1IPScope      `json:"ipProtocolScope"`
-	ConnectionStateFilter []string          `json:"connectionStateFilter,omitempty"`
-	LoggingEnabled        bool              `json:"loggingEnabled"`
+	Enabled               bool                 `json:"enabled"`
+	Name                  string               `json:"name"`
+	Description           string               `json:"description,omitempty"`
+	Index                 int                  `json:"index,omitempty"`
+	Action                apiV1PolicyAction    `json:"action"`
+	Source                apiV1PolicyUpdateSrc `json:"source"`
+	Destination           apiV1PolicyUpdateDst `json:"destination"`
+	IPProtocolScope       apiV1IPScope         `json:"ipProtocolScope"`
+	ConnectionStateFilter []string             `json:"connectionStateFilter,omitempty"`
+	LoggingEnabled        bool                 `json:"loggingEnabled"`
 }
 
 // --- Generic HTTP helpers ---------------------------------------------------
@@ -696,10 +713,12 @@ func modelToV1Policy(p ZonePolicy) apiV1Policy {
 	}
 }
 
-// modelToV1PolicyUpdate converts to apiV1PolicyUpdate, omitting the ID field
-// so that PUT requests to /firewall/policies/{id} don't send '$.id' in the body.
+// modelToV1PolicyUpdate converts to apiV1PolicyUpdate for PUT requests.
+// It omits both '$.id' and portFilter — the UniFi PUT endpoint rejects both.
+// When portFilter needs to be added or changed on an existing policy, the
+// caller must delete the old policy and call createZonePolicyV1 instead.
 func modelToV1PolicyUpdate(p ZonePolicy) apiV1PolicyUpdate {
-	src := apiV1PolicySrc{ZoneID: p.SrcZone}
+	src := apiV1PolicyUpdateSrc{ZoneID: p.SrcZone}
 	if len(p.TrafficMatchingListIDs) > 0 && p.TrafficMatchingListIDs[0] != "" {
 		src.TrafficFilter = &apiV1TrafficFilter{
 			Type: "IP_ADDRESS",
@@ -710,8 +729,7 @@ func modelToV1PolicyUpdate(p ZonePolicy) apiV1PolicyUpdate {
 			},
 		}
 	}
-	src.PortFilter = buildPortFilter(p.SrcPortTMLID)
-	dst := apiV1PolicyDst{ZoneID: p.DstZone, PortFilter: buildPortFilter(p.DstPortTMLID)}
+	dst := apiV1PolicyUpdateDst{ZoneID: p.DstZone}
 	ipVersion := p.IPVersion
 	switch ipVersion {
 	case "BOTH":

@@ -28,6 +28,7 @@ Common issues and solutions for cs-unifi-bouncer-pro.
   - [Invalid port in ZONE_PAIRS or CLOUDFLARE_ZONE_PAIRS](#invalid-port-in-zone_pairs-or-cloudflare_zone_pairs)
 - [State and Reconcile Issues](#state-and-reconcile-issues)
   - [IPs not removed on unban](#ips-not-removed-on-unban)
+  - [Stale policies after removing a zone pair](#stale-policies-after-removing-a-zone-pair)
   - [Duplicate firewall groups after rename](#duplicate-firewall-groups-after-rename)
 - [Performance Issues](#performance-issues)
   - [API rate gate triggered](#api-rate-gate-triggered)
@@ -484,6 +485,22 @@ docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro reconcile
 ```
 
 The reconcile command compares bbolt state with the current UniFi firewall state and removes any IPs not in the active ban list.
+
+---
+
+### Stale policies after removing a zone pair
+
+**Symptom:** After removing an entry from `ZONE_PAIRS` or `CLOUDFLARE_ZONE_PAIRS` and restarting, the old block or ALLOW policies (and any associated port-filter Traffic Matching Lists) remain visible in the UniFi console.
+
+**Cause:** In versions before v1.1.2 the bouncer did not sweep for orphaned managed objects. Starting with v1.1.2, orphan cleanup runs automatically:
+
+- **Block policies** (`ZONE_PAIRS`): at every `EnsurePolicies` call, policies tracked in bbolt for the site but no longer produced by the current config are deleted from UniFi and removed from bbolt.
+- **Cloudflare ALLOW policies** (`CLOUDFLARE_ZONE_PAIRS`): at every Cloudflare sync, policies with the managed description and naming prefix (`crowdsec-whitelist-cloudflare-`) that are no longer in `CLOUDFLARE_ZONE_PAIRS` are deleted.
+- **Port-filter TMLs** (both `ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS`): TMLs named `crowdsec-ports-src-*`, `crowdsec-ports-dst-*`, `crowdsec-whitelist-cloudflare-srcports-*`, and `crowdsec-whitelist-cloudflare-dstports-*` that no longer correspond to a configured zone pair are deleted.
+
+The cleanup only targets objects that bear the bouncer's managed description — user-created policies are never touched.
+
+**Action (upgrade from < v1.1.2):** Restart the bouncer after upgrading. The orphan sweep runs at startup and will remove the stale objects automatically. No manual deletion is needed.
 
 ---
 

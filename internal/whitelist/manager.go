@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/rs/zerolog"
@@ -85,37 +86,100 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 	}
 
 	// Ensure ALLOW policies for each zone pair, creating port TMLs as needed.
+	// Track expected policy and TML names for the orphan sweep below.
+	expectedPolicyNames := make(map[string]bool)
+	expectedTMLNames := map[string]bool{TMLNameV4: true, TMLNameV6: true}
+
 	for _, pair := range zonePairs {
 		var srcPortTMLID, dstPortTMLID string
+		srcPortTMLName := "crowdsec-whitelist-cloudflare-srcports-" + pair.SrcName + "-" + pair.DstName
+		dstPortTMLName := "crowdsec-whitelist-cloudflare-dstports-" + pair.SrcName + "-" + pair.DstName
 
 		if len(pair.SrcPorts) > 0 {
-			srcPortTMLName := "crowdsec-whitelist-cloudflare-srcports-" + pair.SrcName + "-" + pair.DstName
 			portItems := portsToItems(pair.SrcPorts)
 			t, portErr := m.ensureTML(ctx, site, srcPortTMLName, "PORTS", portItems)
 			if portErr != nil {
 				m.log.Error().Err(portErr).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure src port TML failed")
 			} else {
 				srcPortTMLID = t.ID
+				expectedTMLNames[srcPortTMLName] = true
 			}
 		}
 		if len(pair.DstPorts) > 0 {
-			dstPortTMLName := "crowdsec-whitelist-cloudflare-dstports-" + pair.SrcName + "-" + pair.DstName
 			portItems := portsToItems(pair.DstPorts)
 			t, portErr := m.ensureTML(ctx, site, dstPortTMLName, "PORTS", portItems)
 			if portErr != nil {
 				m.log.Error().Err(portErr).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure dst port TML failed")
 			} else {
 				dstPortTMLID = t.ID
+				expectedTMLNames[dstPortTMLName] = true
 			}
 		}
 
-		if err := m.ensureAllowPolicy(ctx, site, pair, tmlV4.ID, srcPortTMLID, dstPortTMLID, "IPV4", "crowdsec-whitelist-cloudflare-External-"+pair.DstName+"-v4", existingPolicies); err != nil {
+		v4Name := "crowdsec-whitelist-cloudflare-External-" + pair.DstName + "-v4"
+		v6Name := "crowdsec-whitelist-cloudflare-External-" + pair.DstName + "-v6"
+		expectedPolicyNames[v4Name] = true
+		expectedPolicyNames[v6Name] = true
+
+		if err := m.ensureAllowPolicy(ctx, site, pair, tmlV4.ID, srcPortTMLID, dstPortTMLID, "IPV4", v4Name, existingPolicies); err != nil {
 			m.log.Error().Err(err).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure v4 allow policy failed")
 		}
-		if err := m.ensureAllowPolicy(ctx, site, pair, tmlV6.ID, srcPortTMLID, dstPortTMLID, "IPV6", "crowdsec-whitelist-cloudflare-External-"+pair.DstName+"-v6", existingPolicies); err != nil {
+		if err := m.ensureAllowPolicy(ctx, site, pair, tmlV6.ID, srcPortTMLID, dstPortTMLID, "IPV6", v6Name, existingPolicies); err != nil {
 			m.log.Error().Err(err).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure v6 allow policy failed")
 		}
 	}
+
+	// Sweep for orphaned whitelist policies — managed by this bouncer but no
+	// longer declared in CLOUDFLARE_ZONE_PAIRS.
+	const (
+		whitelistPolicyPrefix = "crowdsec-whitelist-cloudflare-"
+		whitelistDesc         = "Managed by cs-unifi-bouncer-pro. Cloudflare whitelist. Do not edit manually."
+	)
+	for _, p := range existingPolicies {
+		if !strings.HasPrefix(p.Name, whitelistPolicyPrefix) {
+			continue
+		}
+		if p.Description != whitelistDesc {
+			continue
+		}
+		if expectedPolicyNames[p.Name] {
+			continue
+		}
+		if err := m.ctrl.DeleteZonePolicy(ctx, site, p.ID); err != nil {
+			m.log.Warn().Err(err).Str("policy", p.Name).Msg("failed to delete orphaned whitelist policy")
+		} else {
+			m.log.Info().Str("policy", p.Name).Str("site", site).
+				Msg("deleted orphaned Cloudflare whitelist policy (zone pair removed from config)")
+		}
+	}
+
+	// Sweep for orphaned port-filter TMLs (srcports/dstports) that no longer
+	// correspond to any configured CLOUDFLARE_ZONE_PAIRS entry with port filters.
+	const portTMLPrefix = "crowdsec-whitelist-cloudflare-"
+	allTMLs, tmlErr := m.ctrl.ListTrafficMatchingLists(ctx, site)
+	if tmlErr != nil {
+		m.log.Warn().Err(tmlErr).Str("site", site).Msg("failed to list TMLs for orphan sweep")
+	} else {
+		for _, t := range allTMLs {
+			if !strings.HasPrefix(t.Name, portTMLPrefix) {
+				continue
+			}
+			// Only target port-filter TMLs (srcports / dstports), not the IP TMLs.
+			if !strings.Contains(t.Name, "srcports-") && !strings.Contains(t.Name, "dstports-") {
+				continue
+			}
+			if expectedTMLNames[t.Name] {
+				continue
+			}
+			if err := m.ctrl.DeleteTrafficMatchingList(ctx, site, t.ID); err != nil {
+				m.log.Warn().Err(err).Str("tml", t.Name).Msg("failed to delete orphaned whitelist port TML")
+			} else {
+				m.log.Info().Str("tml", t.Name).Str("site", site).
+					Msg("deleted orphaned Cloudflare whitelist port TML (zone pair removed from config)")
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -181,11 +245,25 @@ func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZoneP
 				p.SrcPortTMLID == srcPortTMLID && p.DstPortTMLID == dstPortTMLID {
 				return nil // up to date
 			}
+
+			// If portFilter is changing, the UniFi PUT endpoint rejects portFilter
+			// in the request body. Delete and recreate so portFilter takes effect via POST.
+			portFilterChanging := p.SrcPortTMLID != srcPortTMLID || p.DstPortTMLID != dstPortTMLID
+			if portFilterChanging {
+				m.log.Info().Str("policy", policyName).Str("site", site).
+					Msg("portFilter changed on existing policy — deleting for recreation with new portFilter")
+				if delErr := m.ctrl.DeleteZonePolicy(ctx, site, p.ID); delErr != nil {
+					return fmt.Errorf("delete policy %s before portFilter recreation: %w", policyName, delErr)
+				}
+				// Fall through to the creation path below.
+				break
+			}
+
+			// portFilter is unchanged; only the IP TML changed. Use PUT (portFilter
+			// is not in the PUT body, server preserves the existing value).
 			p.TrafficMatchingListIDs = []string{ipTMLID}
 			p.ConnectionStateFilter = nil
 			p.AllowReturnTraffic = true
-			p.SrcPortTMLID = srcPortTMLID
-			p.DstPortTMLID = dstPortTMLID
 			return m.ctrl.UpdateZonePolicy(ctx, site, p)
 		}
 	}

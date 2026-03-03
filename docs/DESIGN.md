@@ -113,6 +113,21 @@ Two concrete implementations sit behind this interface:
 
 The `managerImpl` wraps both and selects based on the detected or configured mode. In `auto` mode, feature detection (`internal/controller/version.go`) probes the `/rest/firewallzone` endpoint per site and caches the result.
 
+#### Zone policy portFilter constraint
+
+The UniFi zone policy PUT endpoint (`/v1/firewall/policies/{id}`) rejects `$.source.portFilter` and `$.destination.portFilter` in the request body. portFilter can only be set at creation time (POST). The wire structs used for PUT (`apiV1PolicyUpdateSrc` / `apiV1PolicyUpdateDst`) intentionally omit portFilter — the server preserves the existing value on update. When portFilter needs to be added or changed on an existing policy, the bouncer deletes the existing policy and recreates it via POST. This is logged at `info` level with the message `portFilter changed — deleting policy for recreation with new portFilter`.
+
+#### Orphan cleanup
+
+When a zone pair is removed from `ZONE_PAIRS` or `CLOUDFLARE_ZONE_PAIRS`, previously managed firewall objects are automatically cleaned up:
+
+- **Block policies**: at `EnsurePolicies` time, any policy recorded in bbolt for the site under mode `zone` whose name is no longer produced by the current config is deleted from UniFi and removed from bbolt — but only if it bears the managed description (`cfg.Description`).
+- **Block port TMLs**: at `Bootstrap` time, Traffic Matching Lists named `crowdsec-ports-src-*` or `crowdsec-ports-dst-*` not required by any current zone pair are deleted.
+- **Cloudflare ALLOW policies**: at each Cloudflare sync, policies with the `crowdsec-whitelist-cloudflare-` prefix and the managed description not in the current `CLOUDFLARE_ZONE_PAIRS` set are deleted.
+- **Cloudflare port TMLs**: at each Cloudflare sync, TMLs named `crowdsec-whitelist-cloudflare-srcports-*` or `crowdsec-whitelist-cloudflare-dstports-*` not required by any current Cloudflare zone pair are deleted.
+
+User-created policies and TMLs are never touched — the description check is the guard.
+
 ### Shard managers
 
 Each (site, family) combination has its own `ShardManager` that tracks in-memory shadows of firewall group members. This avoids a full API round-trip for every ban — the bouncer accumulates changes in memory and flushes them as a single `PUT` request after the batch window expires.
@@ -282,7 +297,7 @@ All tests are table-driven and run without external services. The test suite cov
   remediation support flags) and the intentional distinction between `BouncerType`
   (used in the metrics payload `type` field) and the LAPI user-agent service token
   (`crowdsec-unifi-bouncer`, used in HTTP headers)
-- **`internal/whitelist`**: TML creation and update idempotency, ALLOW policy creation with IP TML IDs and port TML IDs, no-op when current, update triggered when port TML IDs change
+- **`internal/whitelist`**: TML creation and update idempotency, ALLOW policy creation with IP TML IDs and port TML IDs, no-op when current, delete+recreate triggered when port TML IDs change (portFilter constraint), orphan policy and TML sweep
 
 A `nopRecorder` no-op implementation of `MetricsRecorder` is used in handler tests
 to keep them independent of the LAPI metrics reporter.

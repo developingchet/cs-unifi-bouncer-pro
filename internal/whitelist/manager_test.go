@@ -485,7 +485,9 @@ func TestEnsureAllowPolicy_WithPorts_NoOpWhenCurrent(t *testing.T) {
 	}
 }
 
-// TestEnsureAllowPolicy_WithPorts_UpdatesWhenChanged verifies update when port TML IDs differ.
+// TestEnsureAllowPolicy_WithPorts_UpdatesWhenChanged verifies that when portFilter
+// IDs change on an existing policy, the policy is deleted and recreated (not PUT),
+// because the UniFi PUT endpoint does not accept portFilter in the request body.
 func TestEnsureAllowPolicy_WithPorts_UpdatesWhenChanged(t *testing.T) {
 	ctrl := testutil.NewMockController()
 	log := zerolog.Nop()
@@ -520,17 +522,27 @@ func TestEnsureAllowPolicy_WithPorts_UpdatesWhenChanged(t *testing.T) {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
 
-	if got := ctrl.Calls("UpdateZonePolicy"); got != 1 {
-		t.Errorf("UpdateZonePolicy calls: got %d, want 1", got)
+	// portFilter changed → must use delete+recreate, not PUT
+	if got := ctrl.Calls("UpdateZonePolicy"); got != 0 {
+		t.Errorf("UpdateZonePolicy calls: got %d, want 0 (portFilter change requires delete+recreate, not PUT)", got)
+	}
+	if got := ctrl.Calls("DeleteZonePolicy"); got != 1 {
+		t.Errorf("DeleteZonePolicy calls: got %d, want 1", got)
+	}
+	if got := ctrl.Calls("CreateZonePolicy"); got != 1 {
+		t.Errorf("CreateZonePolicy calls: got %d, want 1", got)
 	}
 	policies, err := ctrl.ListZonePolicies(ctx, "test-site")
 	if err != nil {
 		t.Fatalf("ListZonePolicies failed: %v", err)
 	}
+	if len(policies) != 1 {
+		t.Fatalf("expected 1 policy after recreate, got %d", len(policies))
+	}
 	if policies[0].SrcPortTMLID != "new-src-port-tml" {
-		t.Errorf("updated SrcPortTMLID: got %q, want %q", policies[0].SrcPortTMLID, "new-src-port-tml")
+		t.Errorf("recreated SrcPortTMLID: got %q, want %q", policies[0].SrcPortTMLID, "new-src-port-tml")
 	}
 	if policies[0].DstPortTMLID != "new-dst-port-tml" {
-		t.Errorf("updated DstPortTMLID: got %q, want %q", policies[0].DstPortTMLID, "new-dst-port-tml")
+		t.Errorf("recreated DstPortTMLID: got %q, want %q", policies[0].DstPortTMLID, "new-dst-port-tml")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -96,6 +97,9 @@ func (zm *ZoneManager) Bootstrap(ctx context.Context, sites []string) error {
 		if err != nil {
 			return fmt.Errorf("ensure port TMLs for site %q: %w", site, err)
 		}
+
+		// Sweep for orphaned port TMLs whose zone pair is no longer in config.
+		zm.cleanupOrphanedPortTMLs(ctx, site, sitePortTMLs)
 
 		zm.mu.Lock()
 		if zm.zoneCache == nil {
@@ -299,6 +303,34 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 		existingByID[p.ID] = p
 	}
 
+	// Build the set of all policy names expected by the current config so that
+	// cleanupOrphanedBlockPolicies can identify policies from removed zone pairs.
+	expectedNames := make(map[string]bool)
+	for _, pair := range zm.cfg.ZonePairs {
+		for _, ipv6 := range []bool{false, true} {
+			sm := v4Shards
+			if ipv6 {
+				sm = v6Shards
+			}
+			if sm == nil {
+				continue
+			}
+			family := Family(ipv6)
+			for i := range sm.GroupIDs() {
+				name, err := zm.namer.PolicyName(NameData{
+					Family:  family,
+					Index:   i,
+					Site:    site,
+					SrcZone: pair.Src,
+					DstZone: pair.Dst,
+				})
+				if err == nil {
+					expectedNames[name] = true
+				}
+			}
+		}
+	}
+
 	for _, pair := range zm.cfg.ZonePairs {
 		// ConnectionStateFilter = nil means "All" states in UniFi API.
 		if err := zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, existingByID, false, v4Shards); err != nil {
@@ -310,6 +342,10 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 			}
 		}
 	}
+
+	// Remove any block policies that were managed by this bouncer but whose
+	// zone pair has since been removed from ZONE_PAIRS config.
+	zm.cleanupOrphanedBlockPolicies(ctx, site, expectedNames, existingByID)
 
 	return nil
 }
@@ -359,18 +395,37 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 			if apiPolicy, found := existingByID[existing.UnifiID]; found {
 				if needsUpdateZonePolicy(&apiPolicy, groupID, srcPortTMLID, dstPortTMLID) {
 					zm.log.Info().Str("policy", policyName).Msg("zone policy needs update, applying reconcile")
-					updateErr := zm.updateZonePolicy(ctx, site, apiPolicy, groupID, srcPortTMLID, dstPortTMLID)
-					if updateErr != nil {
-						var nf *controller.ErrNotFound
-						if !errors.As(updateErr, &nf) {
-							return fmt.Errorf("update zone policy %s: %w", policyName, updateErr)
+
+					// If portFilter is the reason for the update, the UniFi PUT endpoint
+					// rejects portFilter in the request body. Delete the existing policy
+					// so it can be recreated via POST (which accepts portFilter).
+					portFilterChanging := apiPolicy.SrcPortTMLID != srcPortTMLID || apiPolicy.DstPortTMLID != dstPortTMLID
+					if portFilterChanging {
+						zm.log.Info().Str("policy", policyName).Str("id", existing.UnifiID).
+							Msg("portFilter changed — deleting policy for recreation with new portFilter")
+						if delErr := zm.ctrl.DeleteZonePolicy(ctx, site, existing.UnifiID); delErr != nil {
+							var nf *controller.ErrNotFound
+							if !errors.As(delErr, &nf) {
+								return fmt.Errorf("delete zone policy %s before portFilter recreation: %w", policyName, delErr)
+							}
 						}
-						// 404 on PUT: policy was externally deleted; clear bbolt and fall through to create.
-						zm.log.Warn().Str("policy", policyName).Str("id", existing.UnifiID).
-							Msg("zone policy not found on update (externally deleted?); clearing record for re-creation")
+						delete(existingByID, existing.UnifiID)
 						_ = zm.store.DeletePolicy(policyName)
+						// Fall through to creation below.
 					} else {
-						continue
+						updateErr := zm.updateZonePolicy(ctx, site, apiPolicy, groupID, srcPortTMLID, dstPortTMLID)
+						if updateErr != nil {
+							var nf *controller.ErrNotFound
+							if !errors.As(updateErr, &nf) {
+								return fmt.Errorf("update zone policy %s: %w", policyName, updateErr)
+							}
+							// 404 on PUT: policy was externally deleted; clear bbolt and fall through to create.
+							zm.log.Warn().Str("policy", policyName).Str("id", existing.UnifiID).
+								Msg("zone policy not found on update (externally deleted?); clearing record for re-creation")
+							_ = zm.store.DeletePolicy(policyName)
+						} else {
+							continue
+						}
 					}
 				} else {
 					zm.log.Debug().Str("policy", policyName).Msg("zone policy already exists")
@@ -558,6 +613,86 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 			Msg("created zone policy for new shard")
 	}
 	return nil
+}
+
+// cleanupOrphanedPortTMLs deletes port-filter TMLs (crowdsec-ports-src-* and
+// crowdsec-ports-dst-*) that no longer correspond to any zone pair in the
+// current ZONE_PAIRS config. The expected set comes directly from the
+// sitePortTMLs map returned by ensurePortTMLs, which contains only the TML
+// names needed for the current config.
+func (zm *ZoneManager) cleanupOrphanedPortTMLs(ctx context.Context, site string, sitePortTMLs map[string]portTMLIDs) {
+	// Build the set of TML names that are still needed.
+	expectedTMLNames := make(map[string]bool, len(sitePortTMLs)*2)
+	for _, pair := range zm.cfg.ZonePairs {
+		key := pair.Src + ":" + pair.Dst
+		if ids, ok := sitePortTMLs[key]; ok {
+			if len(pair.SrcPorts) > 0 {
+				expectedTMLNames["crowdsec-ports-src-"+pair.Src+"-"+pair.Dst] = true
+				_ = ids.SrcTMLID // referenced for clarity
+			}
+			if len(pair.DstPorts) > 0 {
+				expectedTMLNames["crowdsec-ports-dst-"+pair.Src+"-"+pair.Dst] = true
+				_ = ids.DstTMLID
+			}
+		}
+	}
+
+	allTMLs, err := zm.ctrl.ListTrafficMatchingLists(ctx, site)
+	if err != nil {
+		zm.log.Warn().Err(err).Str("site", site).Msg("orphan port TML cleanup: failed to list TMLs")
+		return
+	}
+	for _, t := range allTMLs {
+		if !strings.HasPrefix(t.Name, "crowdsec-ports-src-") &&
+			!strings.HasPrefix(t.Name, "crowdsec-ports-dst-") {
+			continue
+		}
+		if expectedTMLNames[t.Name] {
+			continue
+		}
+		if delErr := zm.ctrl.DeleteTrafficMatchingList(ctx, site, t.ID); delErr != nil {
+			zm.log.Warn().Err(delErr).Str("tml", t.Name).Str("site", site).
+				Msg("failed to delete orphaned block port TML")
+		} else {
+			zm.log.Info().Str("tml", t.Name).Str("site", site).
+				Msg("deleted orphaned block port TML (zone pair removed from config)")
+		}
+	}
+}
+
+// cleanupOrphanedBlockPolicies deletes block zone policies that are tracked in
+// bbolt (mode "zone") for the given site but whose names are no longer in
+// expectedNames — meaning the zone pair they belong to was removed from config.
+//
+// A policy is only deleted if it also bears the managed description, confirming
+// it was created by this bouncer and not by the user.
+func (zm *ZoneManager) cleanupOrphanedBlockPolicies(ctx context.Context, site string, expectedNames map[string]bool, existingByID map[string]controller.ZonePolicy) {
+	allBbolt, err := zm.store.ListPolicies()
+	if err != nil {
+		zm.log.Warn().Err(err).Str("site", site).Msg("orphan cleanup: failed to list bbolt policies")
+		return
+	}
+	for name, rec := range allBbolt {
+		if rec.Site != site || rec.Mode != "zone" {
+			continue
+		}
+		if expectedNames[name] {
+			continue
+		}
+		// Orphan: in bbolt for this site but not expected by current config.
+		if p, exists := existingByID[rec.UnifiID]; exists && p.Description == zm.cfg.Description {
+			if delErr := zm.ctrl.DeleteZonePolicy(ctx, site, rec.UnifiID); delErr != nil {
+				zm.log.Warn().Err(delErr).Str("policy", name).Msg("failed to delete orphaned zone policy")
+			} else {
+				zm.log.Info().Str("policy", name).Str("site", site).
+					Msg("deleted orphaned zone policy (zone pair removed from config)")
+			}
+		}
+		// Remove from bbolt regardless — it no longer belongs to any active zone pair.
+		if delErr := zm.store.DeletePolicy(name); delErr != nil {
+			zm.log.Warn().Err(delErr).Str("policy", name).Msg("failed to remove orphaned policy from bbolt")
+		}
+	}
 }
 
 // DeletePoliciesForShard deletes all zone policies for the given shard across all zone pairs.
