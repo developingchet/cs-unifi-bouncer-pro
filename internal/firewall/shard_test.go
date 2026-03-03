@@ -299,7 +299,7 @@ func TestSyncLoop_OnlyDirtyShards(t *testing.T) {
 	family.Shards[1].IPs.MarkClean()
 	ctrl.SetError("UpdateTrafficMatchingList", nil)
 
-	sm.syncAllFamilies(context.Background())
+	_ = sm.syncAllFamilies(context.Background())
 
 	if got := ctrl.Calls("UpdateTrafficMatchingList"); got != 1 {
 		t.Fatalf("UpdateTrafficMatchingList calls = %d, want 1", got)
@@ -316,7 +316,7 @@ func TestSyncLoop_RetryOnError(t *testing.T) {
 	family := familyState(t, sm)
 	ctrl.SetError("UpdateTrafficMatchingList", fmt.Errorf("boom"))
 
-	sm.syncShard(context.Background(), family.Shards[0])
+	_ = sm.syncShard(context.Background(), family.Shards[0])
 
 	if !family.Shards[0].IPs.IsDirty() {
 		t.Fatal("expected shard to remain dirty after failed sync")
@@ -447,7 +447,7 @@ func TestSyncAllFamilies_ConcurrentWithAddIP(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < iterations; i++ {
-			sm.syncAllFamilies(ctx)
+			_ = sm.syncAllFamilies(ctx)
 		}
 	}()
 
