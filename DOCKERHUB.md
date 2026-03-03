@@ -4,7 +4,7 @@
 
 # cs-unifi-bouncer-pro
 
-[![Build](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml/badge.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml) [![Version](https://img.shields.io/badge/version-v1.1.4-blue)](https://github.com/developingchet/cs-unifi-bouncer-pro/releases/tag/v1.1.4) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/LICENSE) [![Docker Pulls](https://img.shields.io/docker/pulls/developingchet/cs-unifi-bouncer-pro)](https://hub.docker.com/r/developingchet/cs-unifi-bouncer-pro)
+[![Build](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml/badge.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml) [![Version](https://img.shields.io/badge/version-v1.1.5-blue)](https://github.com/developingchet/cs-unifi-bouncer-pro/releases/tag/v1.1.5) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/LICENSE) [![Docker Pulls](https://img.shields.io/docker/pulls/developingchet/cs-unifi-bouncer-pro)](https://hub.docker.com/r/developingchet/cs-unifi-bouncer-pro)
 
 ---
 
@@ -76,7 +76,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) acc
 | Tag | When to use |
 |-----|-------------|
 | `latest` | stable, always points to the newest release |
-| `v1.1.4` | exact version, recommended for production |
+| `v1.1.5` | exact version, recommended for production |
 | `1.0` | minor-pinned |
 | `1` | major-pinned |
 
@@ -87,7 +87,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) acc
 This image is signed with [Cosign](https://docs.sigstore.dev/cosign/overview/) (keyless OIDC). Verify with:
 
 ```bash
-cosign verify developingchet/cs-unifi-bouncer-pro:v1.1.4 \
+cosign verify developingchet/cs-unifi-bouncer-pro:v1.1.5 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 ```

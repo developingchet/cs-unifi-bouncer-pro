@@ -247,7 +247,7 @@ docker logs cs-unifi-bouncer-pro
 Look for these startup log lines (exact field order may vary):
 
 ```json
-{"level":"info","version":"1.1.4","msg":"cs-unifi-bouncer-pro starting"}
+{"level":"info","version":"1.1.5","msg":"cs-unifi-bouncer-pro starting"}
 {"level":"info","sites":["default"],"msg":"ensuring firewall infrastructure"}
 {"level":"info","addr":":9090","msg":"Prometheus metrics server started"}
 {"level":"info","addr":":8081","msg":"health server started"}
