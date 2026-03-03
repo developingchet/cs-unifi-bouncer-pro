@@ -15,14 +15,6 @@ const (
 	FeatureZoneBasedFirewall = "ZONE_BASED_FIREWALL"
 )
 
-// --- UniFi Network API path helpers -----------------------------------------
-
-const (
-	pathNetworkAPI = "/proxy/network/api/s/%s/rest/"
-	pathLogin      = "/api/auth/login"
-	pathSelf       = "/api/self"
-)
-
 // hasFeature detects whether the controller supports a named feature.
 // Results are cached per (site, feature) to avoid repeated API calls.
 func hasFeature(ctx context.Context, c *unifiClient, site, feature string) (bool, error) {
@@ -65,7 +57,7 @@ func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool,
 	siteID, err := getSiteID(ctx, c, site)
 	if err != nil {
 		// Cannot resolve site UUID — integration v1 not available; fall back to legacy.
-		return false, nil
+		return false, nil //nolint:nilerr
 	}
 
 	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/zones?limit=1",

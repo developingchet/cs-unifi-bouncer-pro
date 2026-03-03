@@ -265,12 +265,7 @@ func listFirewallGroups(ctx context.Context, c *unifiClient, site string) ([]Fir
 		if err := json.Unmarshal(raw, &g); err != nil {
 			continue
 		}
-		groups = append(groups, FirewallGroup{
-			ID:           g.ID,
-			Name:         g.Name,
-			GroupType:    g.GroupType,
-			GroupMembers: g.GroupMembers,
-		})
+		groups = append(groups, FirewallGroup(g))
 	}
 	return groups, nil
 }
@@ -289,21 +284,11 @@ func createFirewallGroup(ctx context.Context, c *unifiClient, site string, g Fir
 	if err := json.Unmarshal(raw, &created); err != nil {
 		return FirewallGroup{}, err
 	}
-	return FirewallGroup{
-		ID:           created.ID,
-		Name:         created.Name,
-		GroupType:    created.GroupType,
-		GroupMembers: created.GroupMembers,
-	}, nil
+	return FirewallGroup(created), nil
 }
 
 func updateFirewallGroup(ctx context.Context, c *unifiClient, site string, g FirewallGroup) error {
-	payload := apiGroup{
-		ID:           g.ID,
-		Name:         g.Name,
-		GroupType:    g.GroupType,
-		GroupMembers: g.GroupMembers,
-	}
+	payload := apiGroup(g)
 	u := groupEndpoint(c.cfg.BaseURL, site) + "/" + g.ID
 	return doPUT(ctx, c, u, "update-group", payload)
 }
@@ -326,18 +311,7 @@ func listFirewallRules(ctx context.Context, c *unifiClient, site string) ([]Fire
 		if err := json.Unmarshal(raw, &r); err != nil {
 			continue
 		}
-		rules = append(rules, FirewallRule{
-			ID:                  r.ID,
-			Name:                r.Name,
-			Enabled:             r.Enabled,
-			RuleIndex:           r.RuleIndex,
-			Action:              r.Action,
-			Ruleset:             r.Ruleset,
-			Description:         r.Description,
-			Logging:             r.Logging,
-			Protocol:            r.Protocol,
-			SrcFirewallGroupIDs: r.SrcFirewallGroupIDs,
-		})
+		rules = append(rules, FirewallRule(r))
 	}
 	return rules, nil
 }

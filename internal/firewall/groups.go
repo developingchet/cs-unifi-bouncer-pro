@@ -573,9 +573,6 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 			shard.ID = createdID
 			sm.log.Debug().Str("shard", shard.Name).Str("id", createdID).Msg("created shard in UniFi during flush")
 			// Re-acquire lock for the rest of the phase
-			sm.mu.Lock()
-			// Cache the newly created shard with empty members (will be updated by the PUT below)
-			sm.mu.Unlock()
 			if err := sm.store.SetGroup(shard.Name, storage.GroupRecord{
 				UnifiID: createdID,
 				Site:    sm.site,
@@ -587,10 +584,7 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 			sm.mu.Lock()
 		}
 
-		members := make([]string, 0, len(ips))
-		for _, m := range ips {
-			members = append(members, m)
-		}
+		members := append(make([]string, 0, len(ips)), ips...)
 		sort.Strings(members)
 
 		// UniFi API rejects empty items arrays on both create and update (HTTP 400).
@@ -948,12 +942,6 @@ func (sm *ShardManager) updateMetricsLocked() {
 			metrics.ShardOccupancy.WithLabelValues(familyName, name, sm.site).Set(count / float64(sm.shardLimit))
 		}
 	}
-}
-
-func (sm *ShardManager) updateMetrics() {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	sm.updateMetricsLocked()
 }
 
 // countDirty returns the number of shards that currently have dirty IPs.

@@ -25,13 +25,12 @@ const (
 // circuitBreaker is a minimal three-state circuit breaker embedded in managerImpl.
 // It opens after N consecutive failures and resets to half-open after a timeout.
 type circuitBreaker struct {
-	mu           sync.Mutex
-	state        circuitBreakerState
-	failures     int
-	threshold    int
-	resetAfter   time.Duration
-	openedAt     time.Time
-	lastLoggedAt time.Time
+	mu         sync.Mutex
+	state      circuitBreakerState
+	failures   int
+	threshold  int
+	resetAfter time.Duration
+	openedAt   time.Time
 }
 
 func newCircuitBreaker(threshold int, resetAfter time.Duration) *circuitBreaker {

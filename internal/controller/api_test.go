@@ -38,23 +38,6 @@ func makeAPIResp(items ...interface{}) []byte {
 	return b
 }
 
-// makeBareArray encodes items as a bare JSON array (for v2 API responses).
-func makeBareArray(items ...interface{}) []byte {
-	data := make([]json.RawMessage, 0, len(items))
-	for _, item := range items {
-		b, err := json.Marshal(item)
-		if err != nil {
-			panic(fmt.Sprintf("makeBareArray: marshal failed: %v", err))
-		}
-		data = append(data, json.RawMessage(b))
-	}
-	b, err := json.Marshal(data)
-	if err != nil {
-		panic(fmt.Sprintf("makeBareArray: marshal array failed: %v", err))
-	}
-	return b
-}
-
 // makeBareObject encodes an item as a bare JSON object (for v2 API single-object responses).
 func makeBareObject(item interface{}) []byte {
 	b, err := json.Marshal(item)
