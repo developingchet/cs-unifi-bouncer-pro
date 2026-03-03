@@ -346,18 +346,7 @@ func createFirewallRule(ctx context.Context, c *unifiClient, site string, r Fire
 }
 
 func updateFirewallRule(ctx context.Context, c *unifiClient, site string, r FirewallRule) error {
-	payload := apiRule{
-		ID:                  r.ID,
-		Name:                r.Name,
-		Enabled:             r.Enabled,
-		RuleIndex:           r.RuleIndex,
-		Action:              r.Action,
-		Ruleset:             r.Ruleset,
-		Description:         r.Description,
-		Logging:             r.Logging,
-		Protocol:            r.Protocol,
-		SrcFirewallGroupIDs: r.SrcFirewallGroupIDs,
-	}
+	payload := apiRule(r)
 	u := ruleEndpoint(c.cfg.BaseURL, site) + "/" + r.ID
 	return doPUT(ctx, c, u, "update-rule", payload)
 }
