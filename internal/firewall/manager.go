@@ -468,23 +468,23 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 
 	// Add missing IPs
 	for ip := range desiredV4 {
+		if ctx.Err() != nil {
+			return added, removed, append(errs, ctx.Err())
+		}
 		if !v4Mgr.Contains(ip) {
-			if _, newIdx, err := v4Mgr.Add(ctx, ip); err != nil {
+			if _, _, err := v4Mgr.Add(ctx, ip); err != nil {
 				errs = append(errs, err)
 			} else {
 				added++
-				if newIdx >= 0 {
-					if err2 := m.ensureNewShardInfrastructure(ctx, site, false, newIdx, v4Mgr); err2 != nil {
-						m.log.Error().Err(err2).Str("site", site).Int("shard", newIdx).
-							Msg("failed to provision new v4 shard rule/policy during reconcile")
-					}
-				}
 			}
 		}
 	}
 
 	// Remove extra IPs from v4
 	for _, ip := range v4Mgr.AllMembers() {
+		if ctx.Err() != nil {
+			return added, removed, append(errs, ctx.Err())
+		}
 		if _, ok := desiredV4[ip]; !ok {
 			if _, err := v4Mgr.Remove(ctx, ip); err != nil {
 				errs = append(errs, err)
@@ -497,21 +497,21 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 	// IPv6
 	if v6Mgr != nil {
 		for ip := range desiredV6 {
+			if ctx.Err() != nil {
+				return added, removed, append(errs, ctx.Err())
+			}
 			if !v6Mgr.Contains(ip) {
-				if _, newIdx, err := v6Mgr.Add(ctx, ip); err != nil {
+				if _, _, err := v6Mgr.Add(ctx, ip); err != nil {
 					errs = append(errs, err)
 				} else {
 					added++
-					if newIdx >= 0 {
-						if err2 := m.ensureNewShardInfrastructure(ctx, site, true, newIdx, v6Mgr); err2 != nil {
-							m.log.Error().Err(err2).Str("site", site).Int("shard", newIdx).
-								Msg("failed to provision new v6 shard rule/policy during reconcile")
-						}
-					}
 				}
 			}
 		}
 		for _, ip := range v6Mgr.AllMembers() {
+			if ctx.Err() != nil {
+				return added, removed, append(errs, ctx.Err())
+			}
 			if _, ok := desiredV6[ip]; !ok {
 				if _, err := v6Mgr.Remove(ctx, ip); err != nil {
 					errs = append(errs, err)
@@ -531,9 +531,13 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 		func() {
 			m.syncMu.Lock()
 			defer m.syncMu.Unlock()
-			v4Mgr.syncAllFamilies(ctx)
+			if err := v4Mgr.syncAllFamilies(ctx); err != nil {
+				errs = append(errs, fmt.Errorf("v4 flush: %w", err))
+			}
 			if v6Mgr != nil {
-				v6Mgr.syncAllFamilies(ctx)
+				if err := v6Mgr.syncAllFamilies(ctx); err != nil {
+					errs = append(errs, fmt.Errorf("v6 flush: %w", err))
+				}
 			}
 		}()
 		m.pruneEmptyTailShards(ctx, site, v4Mgr, v6Mgr)
@@ -650,10 +654,10 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 		func() {
 			defer m.syncMu.Unlock()
 			if v4 != nil {
-				v4.syncAllFamilies(ctx)
+				_ = v4.syncAllFamilies(ctx)
 			}
 			if v6 != nil {
-				v6.syncAllFamilies(ctx)
+				_ = v6.syncAllFamilies(ctx)
 			}
 		}()
 

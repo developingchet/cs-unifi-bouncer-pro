@@ -963,8 +963,9 @@ func (sm *ShardManager) countDirty() int {
 
 // syncAllFamilies flushes dirty shards for every family managed by this ShardManager.
 // Takes a snapshot of shard pointers under lock to avoid data races with concurrent AddIP calls
-// that may append to the Shards slice.
-func (sm *ShardManager) syncAllFamilies(ctx context.Context) {
+// that may append to the Shards slice. Returns the first error encountered (subsequent errors
+// are still attempted and logged internally by syncShard).
+func (sm *ShardManager) syncAllFamilies(ctx context.Context) error {
 	// Snapshot shard pointers under read lock.
 	// Individual shard operations (IPSet) are internally lock-protected,
 	// so iterating snapshots outside the lock is safe.
@@ -977,15 +978,19 @@ func (sm *ShardManager) syncAllFamilies(ctx context.Context) {
 	}
 	sm.mu.RUnlock()
 
+	var firstErr error
 	for _, shard := range shards {
-		sm.syncShard(ctx, shard)
+		if err := sm.syncShard(ctx, shard); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
+	return firstErr
 }
 
-func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
+func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) error {
 	ips, dirty := shard.IPs.PeekDirty()
 	if !dirty {
-		return
+		return nil
 	}
 
 	// Snapshot State under the read lock to avoid races with concurrent AddIP/Rebalance
@@ -996,12 +1001,12 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 
 	// Skip Draining shards; they are handled by drainDraining.
 	if state == ShardStateDraining {
-		return
+		return nil
 	}
 
 	// If the shard is Pending and has no IPs, don't create it in UniFi yet.
 	if state == ShardStatePending && len(ips) == 0 {
-		return
+		return nil
 	}
 
 	start := time.Now()
@@ -1029,7 +1034,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 		if pendingCB != nil {
 			pendingCB()
 		}
-		return
+		return nil
 	}
 
 	// Skip the PUT if content is unchanged from last successful flush.
@@ -1039,7 +1044,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 	if state == ShardStateActive && !shard.IPs.HasChangedFromFlushed() {
 		shard.IPs.MarkClean() // clear dirty flag; lastFlushed snapshot remains valid
 		sm.log.Debug().Str("shard", shard.Name).Msg("shard skipped: no change from last flush")
-		return
+		return nil
 	}
 
 	// Pending→Active transition: POST to create the group first
@@ -1048,7 +1053,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 		createdID, err := sm.doCreateUniFiGroup(ctx, shard.Name)
 		if err != nil {
 			sm.log.Error().Err(err).Str("shard", shard.Name).Msg("failed to create shard in UniFi")
-			return
+			return err
 		}
 		shard.ID = createdID
 		wasCreating = true
@@ -1116,7 +1121,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 			sm.onRateLimit(rl.RetryAfter)
 			sm.log.Warn().Dur("retry_after", rl.RetryAfter).Str("shard", shard.Name).
 				Msg("rate limited by controller; backing off")
-			return
+			return putErr
 		}
 
 		sm.log.Error().Err(putErr).Str("shard", shard.Name).Str("shard_id", shard.ID).Int("ip_count", len(ips)).
@@ -1124,7 +1129,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 		if sm.onSyncError != nil {
 			sm.onSyncError()
 		}
-		return
+		return putErr
 	}
 
 	shard.IPs.CommitFlushed()
@@ -1170,6 +1175,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) {
 			Str("site", sm.site).
 			Msg("shard flushed to UniFi")
 	}
+	return nil
 }
 
 func tmlTypeForFamily(family string) string {

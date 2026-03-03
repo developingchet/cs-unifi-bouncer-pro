@@ -2,6 +2,7 @@ package firewall
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -248,6 +249,8 @@ func TestApplyUnban_UnknownSite(t *testing.T) {
 
 // TestReconcile_AddsMissing verifies that Reconcile adds an IP to the shard
 // when the store has it but the shard does not (UpdateFirewallGroup is called).
+// Also confirms no infrastructure-provisioning calls occur during the add phase
+// (the activation callback, not the add loop, is responsible for rule/policy creation).
 func TestReconcile_AddsMissing(t *testing.T) {
 	cfg := defaultManagerConfig()
 
@@ -267,6 +270,10 @@ func TestReconcile_AddsMissing(t *testing.T) {
 	}
 	if result.Added < 1 {
 		t.Errorf("Reconcile.Added: got %d, want >= 1", result.Added)
+	}
+	// A clean reconcile must not report any errors.
+	if len(result.Errors) != 0 {
+		t.Errorf("Reconcile.Errors: got %v, want empty", result.Errors)
 	}
 	if got := ctrl.Calls("UpdateFirewallGroup"); got < 1 {
 		t.Errorf("UpdateFirewallGroup calls: got %d, want >= 1 (flush after reconcile)", got)
@@ -401,6 +408,114 @@ func TestSyncDirty_FlushesAllSites(t *testing.T) {
 	}
 	if got := ctrl.Calls("UpdateFirewallGroup") - updatesBefore; got != 0 {
 		t.Errorf("UpdateFirewallGroup calls on clean sync = %d, want 0", got)
+	}
+}
+
+// TestReconcile_ActivationCallbackFires verifies that when reconcile causes a new
+// shard to be created (capacity overflow during the add phase), infrastructure is
+// provisioned via the activation callback (fired during flush), not from the add loop.
+func TestReconcile_ActivationCallbackFires(t *testing.T) {
+	cfg := defaultManagerConfig()
+	cfg.FirewallMode = "legacy"
+	cfg.GroupCapacityV4 = 1 // capacity=1 forces overflow on second IP
+
+	mgr, ctrl, store := newTestManager(t, cfg)
+	if err := mgr.EnsureInfrastructure(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("EnsureInfrastructure: %v", err)
+	}
+
+	// Two IPs: first fills shard 0, second triggers shard 1 (Pending).
+	if err := store.BanRecord("10.0.0.1", time.Time{}, false); err != nil {
+		t.Fatalf("BanRecord: %v", err)
+	}
+	if err := store.BanRecord("10.0.0.2", time.Time{}, false); err != nil {
+		t.Fatalf("BanRecord: %v", err)
+	}
+
+	result, err := mgr.Reconcile(context.Background(), []string{testSite})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if result.Added < 2 {
+		t.Errorf("Reconcile.Added: got %d, want >= 2", result.Added)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("Reconcile.Errors: got %v, want empty", result.Errors)
+	}
+
+	// Both shards flushed: shard 0 and shard 1 each trigger a CreateFirewallGroup
+	// and a CreateFirewallRule (via the activation callback, not the add loop).
+	if got := ctrl.Calls("CreateFirewallGroup"); got < 2 {
+		t.Errorf("CreateFirewallGroup calls: got %d, want >= 2", got)
+	}
+	if got := ctrl.Calls("CreateFirewallRule"); got < 2 {
+		t.Errorf("CreateFirewallRule calls: got %d, want >= 2 (activation callback must fire for both shards)", got)
+	}
+}
+
+// TestReconcile_ContextCancellation verifies that when the context is already
+// cancelled, reconcile returns promptly with a context error without iterating
+// all IPs in the store.
+func TestReconcile_ContextCancellation(t *testing.T) {
+	cfg := defaultManagerConfig()
+
+	mgr, _, store := newTestManager(t, cfg)
+	if err := mgr.EnsureInfrastructure(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("EnsureInfrastructure: %v", err)
+	}
+
+	// Populate the store with many IPs.
+	for i := 0; i < 50; i++ {
+		ip := fmt.Sprintf("10.0.%d.%d", i/256, i%256)
+		if err := store.BanRecord(ip, time.Time{}, false); err != nil {
+			t.Fatalf("BanRecord: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	result, err := mgr.Reconcile(ctx, []string{testSite})
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	// At least one error must be a context cancellation.
+	found := false
+	for _, e := range result.Errors {
+		if e == context.Canceled {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Reconcile.Errors: got %v, want context.Canceled among errors", result.Errors)
+	}
+}
+
+// TestReconcile_FlushErrorSurfaced verifies that when a shard flush fails,
+// the error is included in ReconcileResult.Errors so callers can detect it.
+func TestReconcile_FlushErrorSurfaced(t *testing.T) {
+	cfg := defaultManagerConfig()
+
+	mgr, ctrl, store := newTestManager(t, cfg)
+	if err := mgr.EnsureInfrastructure(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("EnsureInfrastructure: %v", err)
+	}
+
+	// Put an IP in the ban list so the shard becomes dirty.
+	if err := store.BanRecord("10.0.0.99", time.Time{}, false); err != nil {
+		t.Fatalf("BanRecord: %v", err)
+	}
+
+	// Make the UpdateFirewallGroup call fail (called during the flush after adding).
+	ctrl.SetError("UpdateFirewallGroup", errTest("simulated flush failure"))
+
+	result, err := mgr.Reconcile(context.Background(), []string{testSite})
+	if err != nil {
+		t.Fatalf("Reconcile returned unexpected top-level error: %v", err)
+	}
+	if len(result.Errors) == 0 {
+		t.Error("Reconcile.Errors: got empty, want flush error to be surfaced")
 	}
 }
 
