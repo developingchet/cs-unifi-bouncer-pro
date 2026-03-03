@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -108,28 +109,80 @@ type Config struct {
 	DeprecationWarnings []string `koanf:"-"`
 }
 
-// ZonePair represents a parsed src->dst zone pair.
+// ZonePair represents a parsed src->dst zone pair, optionally with port filters.
 type ZonePair struct {
-	Src string
-	Dst string
+	Src      string
+	Dst      string
+	SrcPorts []int // empty = any source ports
+	DstPorts []int // empty = any destination ports
 }
 
-// ParseZonePairs parses zone pair strings in "src->dst" format.
-func (c *Config) ParseZonePairs() ([]ZonePair, error) {
-	pairs := make([]ZonePair, 0, len(c.ZonePairs))
-	for _, p := range c.ZonePairs {
+// parseZoneSide parses "zoneName[:port1,port2,...]" and returns the zone name
+// and optional port list. A bare zone name (no colon) returns nil ports.
+func parseZoneSide(side string) (zoneName string, ports []int, err error) {
+	idx := strings.Index(side, ":")
+	if idx == -1 {
+		if side == "" {
+			return "", nil, fmt.Errorf("zone name must not be empty")
+		}
+		return side, nil, nil
+	}
+	zoneName = side[:idx]
+	if zoneName == "" {
+		return "", nil, fmt.Errorf("zone name must not be empty")
+	}
+	portStr := side[idx+1:]
+	if portStr == "" {
+		return "", nil, fmt.Errorf("port list after ':' must not be empty")
+	}
+	portParts := strings.Split(portStr, ",")
+	ports = make([]int, 0, len(portParts))
+	for _, ps := range portParts {
+		ps = strings.TrimSpace(ps)
+		if ps == "" {
+			return "", nil, fmt.Errorf("empty port in port list")
+		}
+		n, parseErr := strconv.Atoi(ps)
+		if parseErr != nil {
+			return "", nil, fmt.Errorf("invalid port %q: must be an integer", ps)
+		}
+		if n < 1 || n > 65535 {
+			return "", nil, fmt.Errorf("port %d out of range (must be 1-65535)", n)
+		}
+		ports = append(ports, n)
+	}
+	return zoneName, ports, nil
+}
+
+// parseZonePairList parses zone pair strings in "src[:port,...]->dst[:port,...]" format.
+func parseZonePairList(pairs []string) ([]ZonePair, error) {
+	result := make([]ZonePair, 0, len(pairs))
+	for _, p := range pairs {
 		parts := strings.SplitN(p, "->", 2)
 		if len(parts) != 2 {
 			return nil, fmt.Errorf("invalid zone pair %q: expected format src->dst", p)
 		}
-		src := strings.TrimSpace(parts[0])
-		dst := strings.TrimSpace(parts[1])
-		if src == "" || dst == "" {
-			return nil, fmt.Errorf("invalid zone pair %q: src and dst must not be empty", p)
+		src, srcPorts, err := parseZoneSide(strings.TrimSpace(parts[0]))
+		if err != nil {
+			return nil, fmt.Errorf("invalid zone pair %q src: %w", p, err)
 		}
-		pairs = append(pairs, ZonePair{Src: src, Dst: dst})
+		dst, dstPorts, err := parseZoneSide(strings.TrimSpace(parts[1]))
+		if err != nil {
+			return nil, fmt.Errorf("invalid zone pair %q dst: %w", p, err)
+		}
+		result = append(result, ZonePair{Src: src, Dst: dst, SrcPorts: srcPorts, DstPorts: dstPorts})
 	}
-	return pairs, nil
+	return result, nil
+}
+
+// ParseZonePairs parses ZONE_PAIRS in "src[:port,...]->dst[:port,...]" format.
+func (c *Config) ParseZonePairs() ([]ZonePair, error) {
+	return parseZonePairList(c.ZonePairs)
+}
+
+// ParseCloudflareZonePairs parses CLOUDFLARE_ZONE_PAIRS in "src[:port,...]->dst[:port,...]" format.
+func (c *Config) ParseCloudflareZonePairs() ([]ZonePair, error) {
+	return parseZonePairList(c.CloudflareZonePairs)
 }
 
 // sanitise removes a single layer of matching surrounding quotes from all string
@@ -404,6 +457,9 @@ func (c *Config) Validate() error {
 		}
 		if len(c.CloudflareZonePairs) == 0 {
 			return fmt.Errorf("CLOUDFLARE_WHITELIST_ENABLED is set but CLOUDFLARE_ZONE_PAIRS is empty")
+		}
+		if _, err := c.ParseCloudflareZonePairs(); err != nil {
+			return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: %w", err)
 		}
 	}
 

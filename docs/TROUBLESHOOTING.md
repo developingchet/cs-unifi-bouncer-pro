@@ -18,9 +18,14 @@ Common issues and solutions for cs-unifi-bouncer-pro.
 - [Authentication Errors](#authentication-errors)
   - [UniFi controller returns 401](#unifi-controller-returns-401)
   - [CrowdSec LAPI returns 401](#crowdsec-lapi-returns-401)
+- [Cloudflare Whitelist Issues](#cloudflare-whitelist-issues)
+  - [Cloudflare ALLOW policies not created](#cloudflare-allow-policies-not-created)
+  - [Cloudflare whitelist blocks legitimate traffic](#cloudflare-whitelist-blocks-legitimate-traffic)
+  - [Port filter TML not applied to whitelist policy](#port-filter-tml-not-applied-to-whitelist-policy)
 - [Firewall Objects Not Created](#firewall-objects-not-created)
   - [Wrong firewall mode detected](#wrong-firewall-mode-detected)
   - [Zone names do not match](#zone-names-do-not-match)
+  - [Invalid port in ZONE_PAIRS or CLOUDFLARE_ZONE_PAIRS](#invalid-port-in-zone_pairs-or-cloudflare_zone_pairs)
 - [State and Reconcile Issues](#state-and-reconcile-issues)
   - [IPs not removed on unban](#ips-not-removed-on-unban)
   - [Duplicate firewall groups after rename](#duplicate-firewall-groups-after-rename)
@@ -345,6 +350,58 @@ Look for `"msg":"decision filtered"` lines. The `stage` field identifies which s
 
 ---
 
+## Cloudflare Whitelist Issues
+
+### Cloudflare ALLOW policies not created
+
+**Symptom:** `CLOUDFLARE_WHITELIST_ENABLED=true` is set but no ALLOW policies appear in UniFi.
+
+**Check:**
+
+```bash
+docker logs cs-unifi-bouncer-pro | grep cloudflare
+```
+
+Common causes and fixes:
+
+| Log message | Cause | Fix |
+|-------------|-------|-----|
+| `CLOUDFLARE_ZONE_PAIRS is empty` | `CLOUDFLARE_ZONE_PAIRS` not set | Set `CLOUDFLARE_ZONE_PAIRS=External->Internal` (or your zone names) |
+| `resolve src zone ... not found` | Zone name in `CLOUDFLARE_ZONE_PAIRS` is wrong | Check zone names in Settings → Firewall → Zones; zone names are case-sensitive |
+| `fetch Cloudflare IPv4: ...` | Cannot reach Cloudflare IP list URL | Check outbound internet access from the container; verify `CLOUDFLARE_IPV4_URL` |
+
+### Cloudflare whitelist blocks legitimate traffic
+
+**Symptom:** Traffic from Cloudflare IPs is being dropped despite the whitelist being enabled.
+
+**Cause:** ALLOW policies must be created before block shard policies — they are evaluated in ascending index order. If the bouncer was redeployed without draining first, block policies may have lower indices than the ALLOW policies.
+
+**Fix:**
+
+```bash
+# 1. Drain all managed policies
+docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro drain --force
+
+# 2. Restart — ALLOW policies are created first (startup sync), then block shard policies
+docker compose up -d --force-recreate cs-unifi-bouncer-pro
+```
+
+### Port filter TML not applied to whitelist policy
+
+**Symptom:** Cloudflare ALLOW policies exist but do not have port filters as expected from `CLOUDFLARE_ZONE_PAIRS` port syntax (e.g. `External->Internal:80,443`).
+
+**Check:**
+
+```bash
+docker logs cs-unifi-bouncer-pro | grep -E "cloudflare.*port|ensure.*port TML"
+```
+
+If you see `ensure src port TML failed` or `ensure dst port TML failed`, the port TML creation failed. Check for controller connectivity errors.
+
+**Fix:** If the TML could not be created, the ALLOW policy is still created but without a port filter. Restart the bouncer to retry TML creation.
+
+---
+
 ## Firewall Objects Not Created
 
 ### Wrong firewall mode detected
@@ -381,6 +438,32 @@ The startup log line shows the detected or configured mode.
    ```bash
    ZONE_PAIRS=WAN->LAN    # Use the exact names from UniFi
    ```
+
+### Invalid port in ZONE_PAIRS or CLOUDFLARE_ZONE_PAIRS
+
+**Symptom:** Bouncer exits at startup with a configuration error:
+
+```
+ZONE_PAIRS: invalid zone pair "External->Internal:0" dst: port 0 out of range (must be 1-65535)
+```
+
+**Cause:** A port number in the zone pair port list is `0`, above `65535`, non-numeric, or the port list after `:` is empty.
+
+**Fix:** Correct the port list in `ZONE_PAIRS` or `CLOUDFLARE_ZONE_PAIRS`:
+
+```bash
+# Wrong — port 0 is invalid
+ZONE_PAIRS=External->Internal:0,443
+
+# Correct
+ZONE_PAIRS=External->Internal:80,443
+```
+
+Use the `validate` subcommand to check configuration before deployment:
+
+```bash
+docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro validate
+```
 
 ---
 

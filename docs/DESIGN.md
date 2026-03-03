@@ -212,11 +212,11 @@ This design allows:
 
 ### Prometheus metrics
 
-15 metrics under the `crowdsec_unifi_` namespace cover the full lifecycle:
+20 metrics under the `crowdsec_unifi_` namespace cover the full lifecycle:
 
-- **Counters**: decisions processed/filtered, jobs enqueued/dropped/processed, API calls, auth errors
-- **Histograms**: API call duration (per endpoint), reconcile duration (per trigger)
-- **Gauges**: active bans (per site/family), firewall group size, DB size, worker queue depth, reconcile delta
+- **Counters**: decisions processed/filtered, API calls, auth errors, reauth attempts, shard syncs, shards rebalanced
+- **Histograms**: API call duration (per endpoint), reconcile duration (per trigger), decision latency (filter pipeline → successful UniFi write)
+- **Gauges**: active bans (per site/family), firewall group size, DB size, dirty shards, last sync timestamp, shard IP count, shard occupancy ratio, circuit breaker state, reconcile delta
 
 ### CrowdSec usage metrics
 
@@ -269,10 +269,10 @@ All log output is written through a `RedactWriter` that applies regexp substitut
 
 All tests are table-driven and run without external services. The test suite covers:
 
-- **`internal/config`**: required field validation, defaults, `_FILE` injection, template syntax, zone pair parsing
+- **`internal/config`**: required field validation, defaults, `_FILE` injection, template syntax, zone pair parsing including port filter syntax (`src[:ports]->dst[:ports]`), out-of-range and non-numeric port validation, Cloudflare zone pair parsing
 - **`internal/decision`**: filter pipeline (all 8 stages), IP parsing and sanitisation, private IP detection, whitelist matching
-- **`internal/firewall`**: namer template rendering, shard manager operations
-- **`internal/controller`**: session management, 401 re-authentication logic
+- **`internal/firewall`**: namer template rendering, shard manager operations, port TML creation and idempotency, `needsUpdateZonePolicy` including port TML ID comparison
+- **`internal/controller`**: session management, 401 re-authentication logic, TML wire format conversion (PORT_NUMBER as int), port filter population in policy wire structs
 - **`internal/storage`**: bbolt ban operations, group/policy cache
 - **`internal/logger`**: redaction patterns
 - **`internal/lapi_metrics`**: Reporter construction, interval clamping, counter reset
@@ -282,6 +282,7 @@ All tests are table-driven and run without external services. The test suite cov
   remediation support flags) and the intentional distinction between `BouncerType`
   (used in the metrics payload `type` field) and the LAPI user-agent service token
   (`crowdsec-unifi-bouncer`, used in HTTP headers)
+- **`internal/whitelist`**: TML creation and update idempotency, ALLOW policy creation with IP TML IDs and port TML IDs, no-op when current, update triggered when port TML IDs change
 
 A `nopRecorder` no-op implementation of `MetricsRecorder` is used in handler tests
 to keep them independent of the LAPI metrics reporter.
@@ -300,7 +301,7 @@ The race detector (`go test -race ./...`) is run in CI for all packages. Concurr
 | Multi-site | No | Yes |
 | Firewall mode | Legacy only | Auto / legacy / zone |
 | Object naming | Hardcoded strings | Go templates |
-| Prometheus metrics | None | 15 `crowdsec_unifi_*` metrics |
+| Prometheus metrics | None | 20 `crowdsec_unifi_*` metrics |
 | Log redaction | None | `RedactWriter` (regex-based) |
 | Dry-run mode | No | Yes |
 | Startup reconcile | No | Yes |
@@ -309,3 +310,7 @@ The race detector (`go test -race ./...`) is run in CI for all packages. Concurr
 | IPv6 | Limited | Full dual-stack with separate shard managers |
 | Seccomp profile | None | 78-syscall allowlist |
 | Image signing | None | Cosign keyless OIDC + CycloneDX SBOM |
+| Port filtering | No | Per-direction port TMLs for block and ALLOW policies |
+| Cloudflare whitelist | No | ALLOW policies for Cloudflare IP ranges, weekly refresh |
+| Circuit breaker | No | Three-state breaker with configurable threshold and cooldown |
+| Validate / diagnose | No | CLI subcommands for CI config checks and connectivity probes |

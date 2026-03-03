@@ -141,7 +141,17 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ZONE_PAIRS` | `External->Internal` | Comma-separated `src->dst` zone pairs. Zone names are auto-resolved to UUIDs at startup; standard UUIDs and MongoDB ObjectIDs are accepted directly. `External`/`Internal` are the default UniFi 8.x names — check Settings → Firewall → Zones if you renamed them. |
+| `ZONE_PAIRS` | `External->Internal` | Comma-separated zone pairs in `src[:sport,...]->dst[:dport,...]` format. Zone names are auto-resolved to UUIDs at startup; standard UUIDs and MongoDB ObjectIDs are accepted directly. `External`/`Internal` are the default UniFi 8.x names — check Settings → Firewall → Zones if you renamed them. Optional colon-separated port lists restrict which source or destination ports the block policies match (empty = any). |
+
+### Cloudflare whitelist
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | Enable Cloudflare IP whitelist sync. When `true`, ALLOW policies are created for all current Cloudflare IP ranges before block policies take effect. |
+| `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | How often to re-fetch Cloudflare IP ranges and update the Traffic Matching Lists (default: weekly). |
+| `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | Source URL for Cloudflare IPv4 ranges. |
+| `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | Source URL for Cloudflare IPv6 ranges. |
+| `CLOUDFLARE_ZONE_PAIRS` | — | Comma-separated zone pairs (same `src[:sport,...]->dst[:dport,...]` syntax as `ZONE_PAIRS`) that ALLOW policies are applied to. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. |
 
 ### Object naming
 
@@ -229,6 +239,12 @@ ZONE_PAIRS=External->Internal,External->IoT,External->DMZ
 
 # UUID pairs (passed through directly)
 ZONE_PAIRS=aaaaaaaa-0000-4000-8000-aaaaaaaaaaaa->bbbbbbbb-0000-4000-8000-bbbbbbbbbbbb
+
+# Port filtering — restrict block policies to specific destination ports
+ZONE_PAIRS=External->Internal:80,443
+
+# Separate source and destination port filters
+ZONE_PAIRS=External:81,8443->Internal:80,443
 ```
 
 ### Policy Ordering

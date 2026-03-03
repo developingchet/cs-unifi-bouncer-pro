@@ -11,57 +11,65 @@ import (
 
 // TestTMLItemsEqual_Symmetric tests that order doesn't matter.
 func TestTMLItemsEqual_Symmetric(t *testing.T) {
-	items := []controller.TrafficMatchingListItem{
+	existing := []controller.TrafficMatchingListItem{
 		{Value: "1.1.1.0/24"},
 		{Value: "2.2.2.0/24"},
 		{Value: "3.3.3.0/24"},
 	}
-	cidrs := []string{"3.3.3.0/24", "1.1.1.0/24", "2.2.2.0/24"}
+	desired := []controller.TrafficMatchingListItem{
+		{Value: "3.3.3.0/24"},
+		{Value: "1.1.1.0/24"},
+		{Value: "2.2.2.0/24"},
+	}
 
-	if !tmlItemsEqual(items, cidrs) {
-		t.Error("expected items to equal cidrs (order-independent)")
+	if !tmlItemsEqual(existing, desired) {
+		t.Error("expected items to equal (order-independent)")
 	}
 }
 
 // TestTMLItemsEqual_LengthMismatch tests that different lengths return false.
 func TestTMLItemsEqual_LengthMismatch(t *testing.T) {
-	items := []controller.TrafficMatchingListItem{
+	existing := []controller.TrafficMatchingListItem{
 		{Value: "1.1.1.0/24"},
 		{Value: "2.2.2.0/24"},
 	}
-	cidrs := []string{"1.1.1.0/24", "2.2.2.0/24", "3.3.3.0/24"}
+	desired := []controller.TrafficMatchingListItem{
+		{Value: "1.1.1.0/24"},
+		{Value: "2.2.2.0/24"},
+		{Value: "3.3.3.0/24"},
+	}
 
-	if tmlItemsEqual(items, cidrs) {
-		t.Error("expected items to NOT equal cidrs (different lengths)")
+	if tmlItemsEqual(existing, desired) {
+		t.Error("expected items to NOT equal (different lengths)")
 	}
 }
 
 // TestTMLItemsEqual_Empty tests that empty lists are equal.
 func TestTMLItemsEqual_Empty(t *testing.T) {
-	items := []controller.TrafficMatchingListItem{}
-	cidrs := []string{}
+	existing := []controller.TrafficMatchingListItem{}
+	desired := []controller.TrafficMatchingListItem{}
 
-	if !tmlItemsEqual(items, cidrs) {
-		t.Error("expected empty items to equal empty cidrs")
+	if !tmlItemsEqual(existing, desired) {
+		t.Error("expected empty items to be equal")
 	}
 }
 
 // TestTMLItemsEqual_Single tests single element lists.
 func TestTMLItemsEqual_Single(t *testing.T) {
-	items := []controller.TrafficMatchingListItem{{Value: "1.1.1.0/24"}}
-	cidrs := []string{"1.1.1.0/24"}
+	existing := []controller.TrafficMatchingListItem{{Value: "1.1.1.0/24"}}
+	desired := []controller.TrafficMatchingListItem{{Value: "1.1.1.0/24"}}
 
-	if !tmlItemsEqual(items, cidrs) {
+	if !tmlItemsEqual(existing, desired) {
 		t.Error("expected single items to match")
 	}
 }
 
 // TestTMLItemsEqual_SingleMismatch tests single element mismatch.
 func TestTMLItemsEqual_SingleMismatch(t *testing.T) {
-	items := []controller.TrafficMatchingListItem{{Value: "1.1.1.0/24"}}
-	cidrs := []string{"2.2.2.0/24"}
+	existing := []controller.TrafficMatchingListItem{{Value: "1.1.1.0/24"}}
+	desired := []controller.TrafficMatchingListItem{{Value: "2.2.2.0/24"}}
 
-	if tmlItemsEqual(items, cidrs) {
+	if tmlItemsEqual(existing, desired) {
 		t.Error("expected single items to NOT match")
 	}
 }
@@ -111,8 +119,11 @@ func TestEnsureTML_Creates(t *testing.T) {
 	ctx := context.Background()
 
 	// Call ensureTML with new TML name
-	cidrs := []string{"1.1.1.0/24", "2.2.2.0/24"}
-	_, err := mgr.ensureTML(ctx, "test-site", "test-tml", "IPV4_ADDRESSES", cidrs)
+	items := []controller.TrafficMatchingListItem{
+		{Type: "SUBNET", Value: "1.1.1.0/24"},
+		{Type: "SUBNET", Value: "2.2.2.0/24"},
+	}
+	_, err := mgr.ensureTML(ctx, "test-site", "test-tml", "IPV4_ADDRESSES", items)
 	if err != nil {
 		t.Fatalf("ensureTML failed: %v", err)
 	}
@@ -142,8 +153,11 @@ func TestEnsureTML_NoUpdateWhenUnchanged(t *testing.T) {
 	ctrl.SetTMLs("test-site", []controller.TrafficMatchingList{initialTML})
 
 	// Call ensureTML with matching items
-	cidrs := []string{"1.1.1.0/24", "2.2.2.0/24"}
-	_, err := mgr.ensureTML(ctx, "test-site", "test-tml", "IPV4_ADDRESSES", cidrs)
+	items := []controller.TrafficMatchingListItem{
+		{Type: "SUBNET", Value: "1.1.1.0/24"},
+		{Type: "SUBNET", Value: "2.2.2.0/24"},
+	}
+	_, err := mgr.ensureTML(ctx, "test-site", "test-tml", "IPV4_ADDRESSES", items)
 	if err != nil {
 		t.Fatalf("ensureTML failed: %v", err)
 	}
@@ -173,8 +187,11 @@ func TestEnsureTML_UpdatesWhenChanged(t *testing.T) {
 	ctrl.SetTMLs("test-site", []controller.TrafficMatchingList{initialTML})
 
 	// Call ensureTML with different items
-	cidrs := []string{"1.1.1.0/24", "2.2.2.0/24"}
-	_, err := mgr.ensureTML(ctx, "test-site", "test-tml", "IPV4_ADDRESSES", cidrs)
+	items := []controller.TrafficMatchingListItem{
+		{Type: "SUBNET", Value: "1.1.1.0/24"},
+		{Type: "SUBNET", Value: "2.2.2.0/24"},
+	}
+	_, err := mgr.ensureTML(ctx, "test-site", "test-tml", "IPV4_ADDRESSES", items)
 	if err != nil {
 		t.Fatalf("ensureTML failed: %v", err)
 	}
@@ -202,7 +219,7 @@ func TestEnsureAllowPolicy_Creates(t *testing.T) {
 	}
 
 	// No policies exist initially
-	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "IPV4", "test-allow-policy", nil)
+	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "", "", "IPV4", "test-allow-policy", nil)
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -231,7 +248,7 @@ func TestEnsureAllowPolicy_TMLIDPopulated(t *testing.T) {
 
 	// Get the created policy from mock's policies list after CreateZonePolicy
 	// We need to verify the policy struct passed to CreateZonePolicy has correct TML ID
-	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "IPV4", "test-allow-policy", nil)
+	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "", "", "IPV4", "test-allow-policy", nil)
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -287,7 +304,7 @@ func TestEnsureAllowPolicy_NoOpWhenCurrent(t *testing.T) {
 	}
 	ctrl.SetPolicies("test-site", []controller.ZonePolicy{existingPolicy})
 
-	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
+	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "", "", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -328,7 +345,7 @@ func TestEnsureAllowPolicy_UpdatesWhenTMLChanged(t *testing.T) {
 	}
 	ctrl.SetPolicies("test-site", []controller.ZonePolicy{existingPolicy})
 
-	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "new-tml-id", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
+	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "new-tml-id", "", "", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -353,13 +370,167 @@ func TestEnsureAllowPolicy_UpdatesWhenTMLChanged(t *testing.T) {
 
 // TestTMLItemsEqual_Match tests matching items in different order.
 func TestTMLItemsEqual_Match(t *testing.T) {
-	items := []controller.TrafficMatchingListItem{
+	existing := []controller.TrafficMatchingListItem{
 		{Value: "1.1.1.0/24"},
 		{Value: "2.2.2.0/24"},
 	}
-	cidrs := []string{"2.2.2.0/24", "1.1.1.0/24"}
+	desired := []controller.TrafficMatchingListItem{
+		{Value: "2.2.2.0/24"},
+		{Value: "1.1.1.0/24"},
+	}
 
-	if !tmlItemsEqual(items, cidrs) {
+	if !tmlItemsEqual(existing, desired) {
 		t.Error("expected items to match (different order)")
+	}
+}
+
+// TestEnsureTML_Creates_PortTML verifies a PORTS TML is created correctly.
+func TestEnsureTML_Creates_PortTML(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	log := zerolog.Nop()
+	provider := NewCloudflareProvider("", "")
+
+	mgr := NewManager(ctrl, []string{"test-site"}, provider, log)
+	ctx := context.Background()
+
+	portItems := []controller.TrafficMatchingListItem{
+		{Type: "PORT_NUMBER", Value: "80"},
+		{Type: "PORT_NUMBER", Value: "443"},
+	}
+	tml, err := mgr.ensureTML(ctx, "test-site", "test-ports-tml", "PORTS", portItems)
+	if err != nil {
+		t.Fatalf("ensureTML failed: %v", err)
+	}
+	if tml.ID == "" {
+		t.Error("expected non-empty TML ID")
+	}
+	if ctrl.Calls("CreateTrafficMatchingList") != 1 {
+		t.Errorf("CreateTrafficMatchingList calls: got %d, want 1", ctrl.Calls("CreateTrafficMatchingList"))
+	}
+}
+
+// TestEnsureAllowPolicy_WithSrcDstPorts_Creates verifies port TML IDs are set on the created policy.
+func TestEnsureAllowPolicy_WithSrcDstPorts_Creates(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	log := zerolog.Nop()
+	provider := NewCloudflareProvider("", "")
+
+	mgr := NewManager(ctrl, []string{"test-site"}, provider, log)
+	ctx := context.Background()
+
+	pair := ZonePairConfig{
+		SrcName:   "External",
+		DstName:   "Internal",
+		SrcZoneID: "zone-external",
+		DstZoneID: "zone-internal",
+	}
+
+	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "tml-src-port-1", "tml-dst-port-2", "IPV4", "test-allow-policy", nil)
+	if err != nil {
+		t.Fatalf("ensureAllowPolicy failed: %v", err)
+	}
+
+	policies, err := ctrl.ListZonePolicies(ctx, "test-site")
+	if err != nil {
+		t.Fatalf("ListZonePolicies failed: %v", err)
+	}
+	if len(policies) != 1 {
+		t.Fatalf("expected 1 policy, got %d", len(policies))
+	}
+	if policies[0].SrcPortTMLID != "tml-src-port-1" {
+		t.Errorf("SrcPortTMLID: got %q, want %q", policies[0].SrcPortTMLID, "tml-src-port-1")
+	}
+	if policies[0].DstPortTMLID != "tml-dst-port-2" {
+		t.Errorf("DstPortTMLID: got %q, want %q", policies[0].DstPortTMLID, "tml-dst-port-2")
+	}
+}
+
+// TestEnsureAllowPolicy_WithPorts_NoOpWhenCurrent verifies no update when port TML IDs match.
+func TestEnsureAllowPolicy_WithPorts_NoOpWhenCurrent(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	log := zerolog.Nop()
+	provider := NewCloudflareProvider("", "")
+
+	mgr := NewManager(ctrl, []string{"test-site"}, provider, log)
+	ctx := context.Background()
+
+	pair := ZonePairConfig{
+		SrcName:   "External",
+		DstName:   "Internal",
+		SrcZoneID: "zone-external",
+		DstZoneID: "zone-internal",
+	}
+
+	existingPolicy := controller.ZonePolicy{
+		ID:                     "policy-123",
+		Name:                   "test-allow-policy",
+		Enabled:                true,
+		Action:                 "ALLOW",
+		SrcZone:                "zone-external",
+		DstZone:                "zone-internal",
+		IPVersion:              "IPV4",
+		TrafficMatchingListIDs: []string{"tml-ip-123"},
+		SrcPortTMLID:           "tml-src-port-1",
+		DstPortTMLID:           "tml-dst-port-2",
+	}
+	ctrl.SetPolicies("test-site", []controller.ZonePolicy{existingPolicy})
+
+	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "tml-src-port-1", "tml-dst-port-2", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
+	if err != nil {
+		t.Fatalf("ensureAllowPolicy failed: %v", err)
+	}
+
+	if got := ctrl.Calls("UpdateZonePolicy"); got != 0 {
+		t.Errorf("UpdateZonePolicy calls: got %d, want 0 (no update)", got)
+	}
+}
+
+// TestEnsureAllowPolicy_WithPorts_UpdatesWhenChanged verifies update when port TML IDs differ.
+func TestEnsureAllowPolicy_WithPorts_UpdatesWhenChanged(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	log := zerolog.Nop()
+	provider := NewCloudflareProvider("", "")
+
+	mgr := NewManager(ctrl, []string{"test-site"}, provider, log)
+	ctx := context.Background()
+
+	pair := ZonePairConfig{
+		SrcName:   "External",
+		DstName:   "Internal",
+		SrcZoneID: "zone-external",
+		DstZoneID: "zone-internal",
+	}
+
+	existingPolicy := controller.ZonePolicy{
+		ID:                     "policy-123",
+		Name:                   "test-allow-policy",
+		Enabled:                true,
+		Action:                 "ALLOW",
+		SrcZone:                "zone-external",
+		DstZone:                "zone-internal",
+		IPVersion:              "IPV4",
+		TrafficMatchingListIDs: []string{"tml-ip-123"},
+		SrcPortTMLID:           "old-src-port-tml",
+		DstPortTMLID:           "",
+	}
+	ctrl.SetPolicies("test-site", []controller.ZonePolicy{existingPolicy})
+
+	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "new-src-port-tml", "new-dst-port-tml", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
+	if err != nil {
+		t.Fatalf("ensureAllowPolicy failed: %v", err)
+	}
+
+	if got := ctrl.Calls("UpdateZonePolicy"); got != 1 {
+		t.Errorf("UpdateZonePolicy calls: got %d, want 1", got)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, "test-site")
+	if err != nil {
+		t.Fatalf("ListZonePolicies failed: %v", err)
+	}
+	if policies[0].SrcPortTMLID != "new-src-port-tml" {
+		t.Errorf("updated SrcPortTMLID: got %q, want %q", policies[0].SrcPortTMLID, "new-src-port-tml")
+	}
+	if policies[0].DstPortTMLID != "new-dst-port-tml" {
+		t.Errorf("updated DstPortTMLID: got %q, want %q", policies[0].DstPortTMLID, "new-dst-port-tml")
 	}
 }

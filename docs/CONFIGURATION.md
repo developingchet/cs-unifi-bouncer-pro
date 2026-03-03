@@ -22,6 +22,7 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 - [Object Naming Templates](#object-naming-templates)
 - [Legacy Firewall Mode](#legacy-firewall-mode)
 - [Zone-Based Firewall Mode](#zone-based-firewall-mode)
+- [Cloudflare Whitelist](#cloudflare-whitelist)
 - [CrowdSec LAPI](#crowdsec-lapi)
 - [Decision Filtering](#decision-filtering)
 - [Session Management](#session-management)
@@ -165,20 +166,78 @@ These settings apply only when `FIREWALL_MODE=zone` or when `auto` detects a zon
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ZONE_PAIRS` | `External->Internal` | Comma-separated `src->dst` zone pairs. A policy is created for each pair and each shard. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. `External` and `Internal` are the default zone names in UniFi Network 8.x — check Settings → Firewall → Zones if you have renamed them. Standard UUIDs (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) and MongoDB ObjectIDs (24-char hex) are also accepted and passed through without a lookup. |
+| `ZONE_PAIRS` | `External->Internal` | Comma-separated zone pairs in `src[:sport,...]->dst[:dport,...]` format. A block policy is created for each pair and each shard. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. `External` and `Internal` are the default zone names in UniFi Network 8.x — check Settings → Firewall → Zones if you have renamed them. Standard UUIDs (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) and MongoDB ObjectIDs (24-char hex) are also accepted and passed through without a lookup. Optional colon-separated port lists after a zone name restrict which source or destination ports the block policies match (empty = any port). |
 
 ```bash
-# Named zones (auto-resolved at startup)
+# Named zones (auto-resolved at startup) — no port filter (any port)
 ZONE_PAIRS=External->Internal
 
 # Multiple pairs
 ZONE_PAIRS=External->Internal,External->IoT
+
+# Restrict block policies to specific destination ports only
+ZONE_PAIRS=External->Internal:80,443
+
+# Separate source and destination port filters
+ZONE_PAIRS=External:81,8443->Internal:80,443
 
 # Pass through UUIDs directly (standard 8-4-4-4-12 format)
 ZONE_PAIRS=aaaaaaaa-0000-4000-8000-aaaaaaaaaaaa->bbbbbbbb-0000-4000-8000-bbbbbbbbbbbb
 ```
 
 Zone names are case-sensitive and must match the names shown in Settings → Firewall → Zones. If a zone name cannot be found at startup the bouncer exits with an error listing the available zones.
+
+### Port filtering for zone pairs
+
+Both `ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS` support an optional port list appended to either zone name using a colon separator:
+
+```
+src[:sport1,sport2,...]->dst[:dport1,dport2,...]
+```
+
+When a port list is provided, the bouncer creates a separate PORTS Traffic Matching List for that direction and attaches it to the corresponding firewall policy as a port filter. Ports must be integers in the range 1–65535.
+
+| Example | Effect |
+|---------|--------|
+| `External->Internal` | Match all ports (no filter) |
+| `External->Internal:80,443` | Match only destination ports 80 and 443 |
+| `External:81,8443->Internal` | Match only source ports 81 and 8443 |
+| `External:81,8443->Internal:80,443` | Match source ports 81/8443 **and** destination ports 80/443 |
+
+Port TMLs are named `crowdsec-ports-src-{Src}-{Dst}` and `crowdsec-ports-dst-{Src}-{Dst}` (block policies) or `crowdsec-whitelist-cloudflare-srcports-{Src}-{Dst}` and `crowdsec-whitelist-cloudflare-dstports-{Src}-{Dst}` (Cloudflare ALLOW policies). They are created or updated at startup alongside the zone cache.
+
+---
+
+## Cloudflare Whitelist
+
+When enabled, the bouncer periodically fetches current Cloudflare IP ranges and maintains ALLOW policies in UniFi so that Cloudflare traffic is never blocked by the CrowdSec block policies. ALLOW policies are created at startup (before block shard policies are created), ensuring they receive lower policy indices and are evaluated first.
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | No | Enable the Cloudflare IP whitelist sync. |
+| `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | No | How often to re-fetch Cloudflare IP ranges and update the IP TMLs (default: weekly). |
+| `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | No | URL to fetch the current Cloudflare IPv4 CIDR list. |
+| `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | No | URL to fetch the current Cloudflare IPv6 CIDR list. |
+| `CLOUDFLARE_ZONE_PAIRS` | — | If enabled | Comma-separated zone pairs in `src[:sport,...]->dst[:dport,...]` format. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. Determines which zone pair(s) the Cloudflare ALLOW policies are created for. Supports the same port filter syntax as `ZONE_PAIRS`. |
+
+```bash
+# Minimal — ALLOW Cloudflare traffic from External to Internal on any port
+CLOUDFLARE_WHITELIST_ENABLED=true
+CLOUDFLARE_ZONE_PAIRS=External->Internal
+
+# Restrict Cloudflare ALLOW policies to HTTP/HTTPS traffic only
+CLOUDFLARE_ZONE_PAIRS=External->Internal:80,443
+
+# Full control — restrict both source and destination ports
+CLOUDFLARE_ZONE_PAIRS=External:80,443->Internal:8080,8443
+
+# Multiple zone pairs
+CLOUDFLARE_ZONE_PAIRS=External->Internal,External->DMZ
+```
+
+The IPv4 and IPv6 TMLs are named `crowdsec-whitelist-cloudflare-v4` and `crowdsec-whitelist-cloudflare-v6`. ALLOW policies are named `crowdsec-whitelist-cloudflare-External-{DstName}-v4` and `crowdsec-whitelist-cloudflare-External-{DstName}-v6`.
+
+Zone names in `CLOUDFLARE_ZONE_PAIRS` are resolved independently of `ZONE_PAIRS` — they do not need to be the same pairs.
 
 ---
 

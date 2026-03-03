@@ -99,13 +99,22 @@ type apiV1TrafficFilter struct {
 	IPAddressFilter *apiV1IPAddressFilter `json:"ipAddressFilter,omitempty"`
 }
 
+// apiV1PortFilter references a PORTS TML for source or destination port filtering.
+type apiV1PortFilter struct {
+	Type                  string `json:"type"`                            // "TRAFFIC_MATCHING_LIST"
+	MatchOpposite         bool   `json:"matchOpposite"`
+	TrafficMatchingListID string `json:"trafficMatchingListId,omitempty"`
+}
+
 type apiV1PolicySrc struct {
 	ZoneID        string              `json:"zoneId"`
 	TrafficFilter *apiV1TrafficFilter `json:"trafficFilter,omitempty"`
+	PortFilter    *apiV1PortFilter    `json:"portFilter,omitempty"`
 }
 
 type apiV1PolicyDst struct {
-	ZoneID string `json:"zoneId"`
+	ZoneID     string           `json:"zoneId"`
+	PortFilter *apiV1PortFilter `json:"portFilter,omitempty"`
 }
 
 type apiV1IPScope struct {
@@ -501,18 +510,27 @@ func deleteTML(ctx context.Context, c *unifiClient, siteID, id string) error {
 	return ignoreNotFound(doDELETE(ctx, c, endpointURL, "delete-tml"))
 }
 
+func tmlItemToWire(item TrafficMatchingListItem) apiTMLItemV1 {
+	t := item.Type
+	if t == "" {
+		// Fallback to inference if Type is not set
+		t = "IP_ADDRESS"
+		if strings.Contains(item.Value, "/") {
+			t = "SUBNET"
+		}
+	}
+	if t == "PORT_NUMBER" {
+		if n, err := strconv.Atoi(item.Value); err == nil {
+			return apiTMLItemV1{Type: t, Value: n}
+		}
+	}
+	return apiTMLItemV1{Type: t, Value: item.Value}
+}
+
 func tmlToWire(list TrafficMatchingList) apiTMLV1 {
 	items := make([]apiTMLItemV1, 0, len(list.Items))
 	for _, item := range list.Items {
-		t := item.Type
-		if t == "" {
-			// Fallback to inference if Type is not set
-			t = "IP_ADDRESS"
-			if strings.Contains(item.Value, "/") {
-				t = "SUBNET"
-			}
-		}
-		items = append(items, apiTMLItemV1{Type: t, Value: item.Value})
+		items = append(items, tmlItemToWire(item))
 	}
 	tmlType := list.Type
 	if tmlType == "" {
@@ -528,15 +546,7 @@ func tmlToWire(list TrafficMatchingList) apiTMLV1 {
 func tmlToWireUpdate(list TrafficMatchingList) apiTMLV1Update {
 	items := make([]apiTMLItemV1, 0, len(list.Items))
 	for _, item := range list.Items {
-		t := item.Type
-		if t == "" {
-			// Fallback to inference if Type is not set
-			t = "IP_ADDRESS"
-			if strings.Contains(item.Value, "/") {
-				t = "SUBNET"
-			}
-		}
-		items = append(items, apiTMLItemV1{Type: t, Value: item.Value})
+		items = append(items, tmlItemToWire(item))
 	}
 	tmlType := list.Type
 	if tmlType == "" {
@@ -611,6 +621,13 @@ func v1PolicyToModel(p apiV1Policy) ZonePolicy {
 		p.Source.TrafficFilter.IPAddressFilter.TrafficMatchingListID != "" {
 		tmlIDs = []string{p.Source.TrafficFilter.IPAddressFilter.TrafficMatchingListID}
 	}
+	var srcPortTMLID, dstPortTMLID string
+	if p.Source.PortFilter != nil {
+		srcPortTMLID = p.Source.PortFilter.TrafficMatchingListID
+	}
+	if p.Destination.PortFilter != nil {
+		dstPortTMLID = p.Destination.PortFilter.TrafficMatchingListID
+	}
 	ipVersion := p.IPProtocolScope.IPVersion
 	if ipVersion == "IPV4_AND_IPV6" {
 		ipVersion = "BOTH"
@@ -628,6 +645,19 @@ func v1PolicyToModel(p apiV1Policy) ZonePolicy {
 		ConnectionStateFilter:  p.ConnectionStateFilter,
 		LoggingEnabled:         p.LoggingEnabled,
 		TrafficMatchingListIDs: tmlIDs,
+		SrcPortTMLID:           srcPortTMLID,
+		DstPortTMLID:           dstPortTMLID,
+	}
+}
+
+func buildPortFilter(tmlID string) *apiV1PortFilter {
+	if tmlID == "" {
+		return nil
+	}
+	return &apiV1PortFilter{
+		Type:                  "TRAFFIC_MATCHING_LIST",
+		MatchOpposite:         false,
+		TrafficMatchingListID: tmlID,
 	}
 }
 
@@ -643,6 +673,8 @@ func modelToV1Policy(p ZonePolicy) apiV1Policy {
 			},
 		}
 	}
+	src.PortFilter = buildPortFilter(p.SrcPortTMLID)
+	dst := apiV1PolicyDst{ZoneID: p.DstZone, PortFilter: buildPortFilter(p.DstPortTMLID)}
 	ipVersion := p.IPVersion
 	switch ipVersion {
 	case "BOTH":
@@ -657,7 +689,7 @@ func modelToV1Policy(p ZonePolicy) apiV1Policy {
 		Description:           p.Description,
 		Action:                apiV1PolicyAction{Type: p.Action, AllowReturnTraffic: p.AllowReturnTraffic},
 		Source:                src,
-		Destination:           apiV1PolicyDst{ZoneID: p.DstZone},
+		Destination:           dst,
 		IPProtocolScope:       apiV1IPScope{IPVersion: ipVersion},
 		ConnectionStateFilter: p.ConnectionStateFilter,
 		LoggingEnabled:        p.LoggingEnabled,
@@ -678,6 +710,8 @@ func modelToV1PolicyUpdate(p ZonePolicy) apiV1PolicyUpdate {
 			},
 		}
 	}
+	src.PortFilter = buildPortFilter(p.SrcPortTMLID)
+	dst := apiV1PolicyDst{ZoneID: p.DstZone, PortFilter: buildPortFilter(p.DstPortTMLID)}
 	ipVersion := p.IPVersion
 	switch ipVersion {
 	case "BOTH":
@@ -691,7 +725,7 @@ func modelToV1PolicyUpdate(p ZonePolicy) apiV1PolicyUpdate {
 		Description:           p.Description,
 		Action:                apiV1PolicyAction{Type: p.Action, AllowReturnTraffic: p.AllowReturnTraffic},
 		Source:                src,
-		Destination:           apiV1PolicyDst{ZoneID: p.DstZone},
+		Destination:           dst,
 		IPProtocolScope:       apiV1IPScope{IPVersion: ipVersion},
 		ConnectionStateFilter: p.ConnectionStateFilter,
 		LoggingEnabled:        p.LoggingEnabled,

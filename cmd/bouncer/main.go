@@ -124,27 +124,27 @@ func runDaemon() error {
 	// Parse Cloudflare zone pairs if enabled (after ctx is created for zone resolution)
 	var cfZonePairs []whitelist.ZonePairConfig
 	if cfg.CloudflareWhitelistEnabled {
-		for _, raw := range cfg.CloudflareZonePairs {
-			parts := strings.SplitN(raw, "->", 2)
-			if len(parts) != 2 {
-				return fmt.Errorf("invalid CLOUDFLARE_ZONE_PAIRS entry %q: expected SrcName->DstName", raw)
-			}
-			srcName, dstName := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-
+		parsedCFPairs, cfParseErr := cfg.ParseCloudflareZonePairs()
+		if cfParseErr != nil {
+			return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: %w", cfParseErr)
+		}
+		for _, pair := range parsedCFPairs {
 			// Resolve zone names to UUIDs - independent of main zone pair resolution.
-			srcID, err := ctrl.GetZoneID(ctx, cfg.UnifiSites[0], srcName)
+			srcID, err := ctrl.GetZoneID(ctx, cfg.UnifiSites[0], pair.Src)
 			if err != nil {
-				return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: resolve src zone %q: %w", srcName, err)
+				return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: resolve src zone %q: %w", pair.Src, err)
 			}
-			dstID, err := ctrl.GetZoneID(ctx, cfg.UnifiSites[0], dstName)
+			dstID, err := ctrl.GetZoneID(ctx, cfg.UnifiSites[0], pair.Dst)
 			if err != nil {
-				return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: resolve dst zone %q: %w", dstName, err)
+				return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: resolve dst zone %q: %w", pair.Dst, err)
 			}
 			cfZonePairs = append(cfZonePairs, whitelist.ZonePairConfig{
-				SrcName:   srcName,
-				DstName:   dstName,
+				SrcName:   pair.Src,
+				DstName:   pair.Dst,
 				SrcZoneID: srcID,
 				DstZoneID: dstID,
+				SrcPorts:  pair.SrcPorts,
+				DstPorts:  pair.DstPorts,
 			})
 		}
 	}

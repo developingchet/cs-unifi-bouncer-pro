@@ -44,6 +44,8 @@ type ZonePolicy struct {
 	Predefined             bool     // true for built-in policies managed by UniFi
 	ConnectionStateFilter  []string // e.g. ["NEW", "INVALID"]
 	LoggingEnabled         bool
+	SrcPortTMLID           string // TML of type "PORTS" for source port filter (empty = any)
+	DstPortTMLID           string // TML of type "PORTS" for destination port filter (empty = any)
 }
 
 // Zone represents a UniFi network zone (topology discovery).

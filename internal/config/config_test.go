@@ -108,6 +108,115 @@ func TestZonePairsParsing(t *testing.T) {
 	}
 }
 
+func TestParseZonePairs_NoPort(t *testing.T) {
+	cfg := &Config{ZonePairs: []string{"External->Internal"}}
+	pairs, err := cfg.ParseZonePairs()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pairs) != 1 {
+		t.Fatalf("expected 1 pair, got %d", len(pairs))
+	}
+	if pairs[0].Src != "External" || pairs[0].Dst != "Internal" {
+		t.Errorf("unexpected pair: %+v", pairs[0])
+	}
+	if len(pairs[0].SrcPorts) != 0 || len(pairs[0].DstPorts) != 0 {
+		t.Errorf("expected empty ports for no-port pair, got src=%v dst=%v", pairs[0].SrcPorts, pairs[0].DstPorts)
+	}
+}
+
+func TestParseZonePairs_DstPortsOnly(t *testing.T) {
+	cfg := &Config{ZonePairs: []string{"External->Internal:80,443"}}
+	pairs, err := cfg.ParseZonePairs()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pairs[0].Src != "External" || pairs[0].Dst != "Internal" {
+		t.Errorf("unexpected zone names: %+v", pairs[0])
+	}
+	if len(pairs[0].SrcPorts) != 0 {
+		t.Errorf("expected empty SrcPorts, got %v", pairs[0].SrcPorts)
+	}
+	if len(pairs[0].DstPorts) != 2 || pairs[0].DstPorts[0] != 80 || pairs[0].DstPorts[1] != 443 {
+		t.Errorf("expected DstPorts=[80,443], got %v", pairs[0].DstPorts)
+	}
+}
+
+func TestParseZonePairs_SrcPortsOnly(t *testing.T) {
+	cfg := &Config{ZonePairs: []string{"External:80->Internal"}}
+	pairs, err := cfg.ParseZonePairs()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pairs[0].SrcPorts) != 1 || pairs[0].SrcPorts[0] != 80 {
+		t.Errorf("expected SrcPorts=[80], got %v", pairs[0].SrcPorts)
+	}
+	if len(pairs[0].DstPorts) != 0 {
+		t.Errorf("expected empty DstPorts, got %v", pairs[0].DstPorts)
+	}
+}
+
+func TestParseZonePairs_SeparatePorts(t *testing.T) {
+	cfg := &Config{ZonePairs: []string{"External:81,8443->Internal:80,443"}}
+	pairs, err := cfg.ParseZonePairs()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pairs[0].Src != "External" || pairs[0].Dst != "Internal" {
+		t.Errorf("unexpected zone names: %+v", pairs[0])
+	}
+	if len(pairs[0].SrcPorts) != 2 || pairs[0].SrcPorts[0] != 81 || pairs[0].SrcPorts[1] != 8443 {
+		t.Errorf("expected SrcPorts=[81,8443], got %v", pairs[0].SrcPorts)
+	}
+	if len(pairs[0].DstPorts) != 2 || pairs[0].DstPorts[0] != 80 || pairs[0].DstPorts[1] != 443 {
+		t.Errorf("expected DstPorts=[80,443], got %v", pairs[0].DstPorts)
+	}
+}
+
+func TestParseZonePairs_InvalidPort_OutOfRange(t *testing.T) {
+	cfg := &Config{ZonePairs: []string{"External->Internal:0"}}
+	_, err := cfg.ParseZonePairs()
+	if err == nil {
+		t.Error("expected error for port 0 (out of range)")
+	}
+}
+
+func TestParseZonePairs_InvalidPort_TooHigh(t *testing.T) {
+	cfg := &Config{ZonePairs: []string{"External->Internal:65536"}}
+	_, err := cfg.ParseZonePairs()
+	if err == nil {
+		t.Error("expected error for port 65536 (out of range)")
+	}
+}
+
+func TestParseZonePairs_InvalidPort_NonNumeric(t *testing.T) {
+	cfg := &Config{ZonePairs: []string{"External->Internal:http"}}
+	_, err := cfg.ParseZonePairs()
+	if err == nil {
+		t.Error("expected error for non-numeric port")
+	}
+}
+
+func TestParseCloudflareZonePairs(t *testing.T) {
+	cfg := &Config{CloudflareZonePairs: []string{"External:81,8443->DMZ:80,443"}}
+	pairs, err := cfg.ParseCloudflareZonePairs()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pairs) != 1 {
+		t.Fatalf("expected 1 pair, got %d", len(pairs))
+	}
+	if pairs[0].Src != "External" || pairs[0].Dst != "DMZ" {
+		t.Errorf("unexpected zone names: src=%q dst=%q", pairs[0].Src, pairs[0].Dst)
+	}
+	if len(pairs[0].SrcPorts) != 2 || pairs[0].SrcPorts[0] != 81 {
+		t.Errorf("unexpected SrcPorts: %v", pairs[0].SrcPorts)
+	}
+	if len(pairs[0].DstPorts) != 2 || pairs[0].DstPorts[0] != 80 {
+		t.Errorf("unexpected DstPorts: %v", pairs[0].DstPorts)
+	}
+}
+
 func TestInvalidZonePairs(t *testing.T) {
 	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
 	setEnv(t, "UNIFI_API_KEY", "key")
