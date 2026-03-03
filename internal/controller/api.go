@@ -680,6 +680,18 @@ func buildPortFilter(tmlID string) *apiV1PortFilter {
 	}
 }
 
+// buildMatchAllIPFilter returns an ipAddressFilter that matches any IP address.
+// matchOpposite:true with no TML ID means "invert an empty set = match all".
+// Used when a trafficFilter is needed solely to carry a portFilter with no
+// IP restriction on the destination side.
+func buildMatchAllIPFilter() *apiV1IPAddressFilter {
+	return &apiV1IPAddressFilter{
+		Type:          "TRAFFIC_MATCHING_LIST",
+		MatchOpposite: true,
+		// TrafficMatchingListID intentionally empty: complement of empty set = match all IPs
+	}
+}
+
 func modelToV1Policy(p ZonePolicy) apiV1Policy {
 	src := apiV1PolicySrc{ZoneID: p.SrcZone}
 	var srcTF *apiV1TrafficFilter
@@ -695,14 +707,20 @@ func modelToV1Policy(p ZonePolicy) apiV1Policy {
 	}
 	if p.SrcPortTMLID != "" {
 		if srcTF == nil {
-			srcTF = &apiV1TrafficFilter{Type: "IP_ADDRESS"}
+			// No IP TML on source — use match-all IP filter so portFilter has a valid companion.
+			srcTF = &apiV1TrafficFilter{Type: "IP_ADDRESS", IPAddressFilter: buildMatchAllIPFilter()}
 		}
 		srcTF.PortFilter = buildPortFilter(p.SrcPortTMLID)
 	}
 	src.TrafficFilter = srcTF
 	dst := apiV1PolicyDst{ZoneID: p.DstZone}
 	if p.DstPortTMLID != "" {
-		dst.TrafficFilter = &apiV1TrafficFilter{Type: "IP_ADDRESS", PortFilter: buildPortFilter(p.DstPortTMLID)}
+		// Destination has no IP TML — use match-all IP filter so portFilter has a valid companion.
+		dst.TrafficFilter = &apiV1TrafficFilter{
+			Type:            "IP_ADDRESS",
+			IPAddressFilter: buildMatchAllIPFilter(),
+			PortFilter:      buildPortFilter(p.DstPortTMLID),
+		}
 	}
 	ipVersion := p.IPVersion
 	switch ipVersion {
