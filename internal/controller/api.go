@@ -94,27 +94,29 @@ type apiV1IPAddressFilter struct {
 	TrafficMatchingListID string `json:"trafficMatchingListId,omitempty"`
 }
 
-type apiV1TrafficFilter struct {
-	Type            string                `json:"type,omitempty"` // "IP_ADDRESS"
-	IPAddressFilter *apiV1IPAddressFilter `json:"ipAddressFilter,omitempty"`
-}
-
 // apiV1PortFilter references a PORTS TML for source or destination port filtering.
+// It is always nested inside trafficFilter — the UniFi POST endpoint rejects
+// portFilter at the top level of source or destination.
 type apiV1PortFilter struct {
 	Type                  string `json:"type"`                            // "TRAFFIC_MATCHING_LIST"
 	MatchOpposite         bool   `json:"matchOpposite"`
 	TrafficMatchingListID string `json:"trafficMatchingListId,omitempty"`
 }
 
+type apiV1TrafficFilter struct {
+	Type            string                `json:"type,omitempty"` // "IP_ADDRESS"
+	IPAddressFilter *apiV1IPAddressFilter `json:"ipAddressFilter,omitempty"`
+	PortFilter      *apiV1PortFilter      `json:"portFilter,omitempty"` // nested here, not at source/dst level
+}
+
 type apiV1PolicySrc struct {
 	ZoneID        string              `json:"zoneId"`
 	TrafficFilter *apiV1TrafficFilter `json:"trafficFilter,omitempty"`
-	PortFilter    *apiV1PortFilter    `json:"portFilter,omitempty"`
 }
 
 type apiV1PolicyDst struct {
-	ZoneID     string           `json:"zoneId"`
-	PortFilter *apiV1PortFilter `json:"portFilter,omitempty"`
+	ZoneID        string              `json:"zoneId"`
+	TrafficFilter *apiV1TrafficFilter `json:"trafficFilter,omitempty"`
 }
 
 type apiV1IPScope struct {
@@ -639,11 +641,11 @@ func v1PolicyToModel(p apiV1Policy) ZonePolicy {
 		tmlIDs = []string{p.Source.TrafficFilter.IPAddressFilter.TrafficMatchingListID}
 	}
 	var srcPortTMLID, dstPortTMLID string
-	if p.Source.PortFilter != nil {
-		srcPortTMLID = p.Source.PortFilter.TrafficMatchingListID
+	if p.Source.TrafficFilter != nil && p.Source.TrafficFilter.PortFilter != nil {
+		srcPortTMLID = p.Source.TrafficFilter.PortFilter.TrafficMatchingListID
 	}
-	if p.Destination.PortFilter != nil {
-		dstPortTMLID = p.Destination.PortFilter.TrafficMatchingListID
+	if p.Destination.TrafficFilter != nil && p.Destination.TrafficFilter.PortFilter != nil {
+		dstPortTMLID = p.Destination.TrafficFilter.PortFilter.TrafficMatchingListID
 	}
 	ipVersion := p.IPProtocolScope.IPVersion
 	if ipVersion == "IPV4_AND_IPV6" {
@@ -680,8 +682,9 @@ func buildPortFilter(tmlID string) *apiV1PortFilter {
 
 func modelToV1Policy(p ZonePolicy) apiV1Policy {
 	src := apiV1PolicySrc{ZoneID: p.SrcZone}
+	var srcTF *apiV1TrafficFilter
 	if len(p.TrafficMatchingListIDs) > 0 && p.TrafficMatchingListIDs[0] != "" {
-		src.TrafficFilter = &apiV1TrafficFilter{
+		srcTF = &apiV1TrafficFilter{
 			Type: "IP_ADDRESS",
 			IPAddressFilter: &apiV1IPAddressFilter{
 				Type:                  "TRAFFIC_MATCHING_LIST",
@@ -690,8 +693,17 @@ func modelToV1Policy(p ZonePolicy) apiV1Policy {
 			},
 		}
 	}
-	src.PortFilter = buildPortFilter(p.SrcPortTMLID)
-	dst := apiV1PolicyDst{ZoneID: p.DstZone, PortFilter: buildPortFilter(p.DstPortTMLID)}
+	if p.SrcPortTMLID != "" {
+		if srcTF == nil {
+			srcTF = &apiV1TrafficFilter{}
+		}
+		srcTF.PortFilter = buildPortFilter(p.SrcPortTMLID)
+	}
+	src.TrafficFilter = srcTF
+	dst := apiV1PolicyDst{ZoneID: p.DstZone}
+	if p.DstPortTMLID != "" {
+		dst.TrafficFilter = &apiV1TrafficFilter{PortFilter: buildPortFilter(p.DstPortTMLID)}
+	}
 	ipVersion := p.IPVersion
 	switch ipVersion {
 	case "BOTH":

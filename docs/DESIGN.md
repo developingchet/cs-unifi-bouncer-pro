@@ -115,7 +115,10 @@ The `managerImpl` wraps both and selects based on the detected or configured mod
 
 #### Zone policy portFilter constraint
 
-The UniFi zone policy PUT endpoint (`/v1/firewall/policies/{id}`) rejects `$.source.portFilter` and `$.destination.portFilter` in the request body. portFilter can only be set at creation time (POST). The wire structs used for PUT (`apiV1PolicyUpdateSrc` / `apiV1PolicyUpdateDst`) intentionally omit portFilter — the server preserves the existing value on update. When portFilter needs to be added or changed on an existing policy, the bouncer deletes the existing policy and recreates it via POST. This is logged at `info` level with the message `portFilter changed — deleting policy for recreation with new portFilter`.
+The UniFi zone policy API has two portFilter constraints:
+
+1. **Nesting**: `portFilter` must be nested inside `trafficFilter` on both source and destination — the POST endpoint rejects it as an unknown property if placed at the top level of `$.source` or `$.destination`.
+2. **PUT exclusion**: The PUT endpoint (`/v1/firewall/policies/{id}`) rejects `portFilter` even when correctly nested. The wire structs used for PUT (`apiV1PolicyUpdateSrc` / `apiV1PolicyUpdateDst`) intentionally omit `trafficFilter.portFilter` — the server preserves the existing value on update. When portFilter needs to be added or changed on an existing policy, the bouncer deletes the existing policy and recreates it via POST. This is logged at `info` level with the message `portFilter changed — deleting policy for recreation with new portFilter`.
 
 #### Orphan cleanup
 
