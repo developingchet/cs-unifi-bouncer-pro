@@ -695,14 +695,14 @@ func modelToV1Policy(p ZonePolicy) apiV1Policy {
 	}
 	if p.SrcPortTMLID != "" {
 		if srcTF == nil {
-			srcTF = &apiV1TrafficFilter{}
+			srcTF = &apiV1TrafficFilter{Type: "NETWORK"}
 		}
 		srcTF.PortFilter = buildPortFilter(p.SrcPortTMLID)
 	}
 	src.TrafficFilter = srcTF
 	dst := apiV1PolicyDst{ZoneID: p.DstZone}
 	if p.DstPortTMLID != "" {
-		dst.TrafficFilter = &apiV1TrafficFilter{PortFilter: buildPortFilter(p.DstPortTMLID)}
+		dst.TrafficFilter = &apiV1TrafficFilter{Type: "NETWORK", PortFilter: buildPortFilter(p.DstPortTMLID)}
 	}
 	ipVersion := p.IPVersion
 	switch ipVersion {
