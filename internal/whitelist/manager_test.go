@@ -219,7 +219,7 @@ func TestEnsureAllowPolicy_Creates(t *testing.T) {
 	}
 
 	// No policies exist initially
-	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "", "", "IPV4", "test-allow-policy", nil)
+	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "", "", "IPV4", "test-allow-policy", nil)
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestEnsureAllowPolicy_TMLIDPopulated(t *testing.T) {
 
 	// Get the created policy from mock's policies list after CreateZonePolicy
 	// We need to verify the policy struct passed to CreateZonePolicy has correct TML ID
-	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "", "", "IPV4", "test-allow-policy", nil)
+	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "", "", "IPV4", "test-allow-policy", nil)
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestEnsureAllowPolicy_NoOpWhenCurrent(t *testing.T) {
 	}
 	ctrl.SetPolicies("test-site", []controller.ZonePolicy{existingPolicy})
 
-	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "", "", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
+	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "", "", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestEnsureAllowPolicy_UpdatesWhenTMLChanged(t *testing.T) {
 	}
 	ctrl.SetPolicies("test-site", []controller.ZonePolicy{existingPolicy})
 
-	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "new-tml-id", "", "", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
+	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "new-tml-id", "", "", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestEnsureAllowPolicy_WithSrcDstPorts_Creates(t *testing.T) {
 		DstZoneID: "zone-internal",
 	}
 
-	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "tml-src-port-1", "tml-dst-port-2", "IPV4", "test-allow-policy", nil)
+	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "tml-src-port-1", "tml-dst-port-2", "IPV4", "test-allow-policy", nil)
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -475,7 +475,7 @@ func TestEnsureAllowPolicy_WithPorts_NoOpWhenCurrent(t *testing.T) {
 	}
 	ctrl.SetPolicies("test-site", []controller.ZonePolicy{existingPolicy})
 
-	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "tml-src-port-1", "tml-dst-port-2", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
+	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "tml-src-port-1", "tml-dst-port-2", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -517,7 +517,7 @@ func TestEnsureAllowPolicy_WithPorts_UpdatesWhenChanged(t *testing.T) {
 	}
 	ctrl.SetPolicies("test-site", []controller.ZonePolicy{existingPolicy})
 
-	err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "new-src-port-tml", "new-dst-port-tml", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
+	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "new-src-port-tml", "new-dst-port-tml", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}

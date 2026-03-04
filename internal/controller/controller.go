@@ -70,6 +70,13 @@ type TrafficMatchingListItem struct {
 	Value string
 }
 
+// PolicyOrdering holds the sorted list of user-defined policy IDs for a
+// specific source/destination zone pair.
+type PolicyOrdering struct {
+	BeforeSystemDefined []string
+	AfterSystemDefined  []string
+}
+
 // Controller is the UniFi API seam. All methods accept context for deadline control.
 type Controller interface {
 	// Firewall Groups (address lists) — legacy mode only
@@ -89,6 +96,8 @@ type Controller interface {
 	CreateZonePolicy(ctx context.Context, site string, p ZonePolicy) (ZonePolicy, error)
 	UpdateZonePolicy(ctx context.Context, site string, p ZonePolicy) error
 	DeleteZonePolicy(ctx context.Context, site string, id string) error
+	GetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string) (PolicyOrdering, error)
+	SetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string, ordering PolicyOrdering) error
 
 	// Traffic Matching Lists — integration v1, zone mode only
 	ListTrafficMatchingLists(ctx context.Context, site string) ([]TrafficMatchingList, error)

@@ -118,14 +118,27 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 
 		v4Name := "crowdsec-whitelist-cloudflare-External-" + pair.DstName + "-v4"
 		v6Name := "crowdsec-whitelist-cloudflare-External-" + pair.DstName + "-v6"
+		// Include UniFi's auto-created (Return) mirror policies in the expected set.
 		expectedPolicyNames[v4Name] = true
+		expectedPolicyNames[v4Name+" (Return)"] = true
 		expectedPolicyNames[v6Name] = true
+		expectedPolicyNames[v6Name+" (Return)"] = true
 
-		if err := m.ensureAllowPolicy(ctx, site, pair, tmlV4.ID, srcPortTMLID, dstPortTMLID, "IPV4", v4Name, existingPolicies); err != nil {
+		var pairPolicyIDs []string
+		if p, err := m.ensureAllowPolicy(ctx, site, pair, tmlV4.ID, srcPortTMLID, dstPortTMLID, "IPV4", v4Name, existingPolicies); err != nil {
 			m.log.Error().Err(err).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure v4 allow policy failed")
+		} else {
+			pairPolicyIDs = append(pairPolicyIDs, p.ID)
 		}
-		if err := m.ensureAllowPolicy(ctx, site, pair, tmlV6.ID, srcPortTMLID, dstPortTMLID, "IPV6", v6Name, existingPolicies); err != nil {
+		if p, err := m.ensureAllowPolicy(ctx, site, pair, tmlV6.ID, srcPortTMLID, dstPortTMLID, "IPV6", v6Name, existingPolicies); err != nil {
 			m.log.Error().Err(err).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure v6 allow policy failed")
+		} else {
+			pairPolicyIDs = append(pairPolicyIDs, p.ID)
+		}
+
+		// Ensure whitelist allow policies sit above block policies for this zone pair.
+		if len(pairPolicyIDs) > 0 {
+			m.reorderWhitelistFirst(ctx, site, pair, pairPolicyIDs)
 		}
 	}
 
@@ -139,11 +152,22 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 		if !strings.HasPrefix(p.Name, whitelistPolicyPrefix) {
 			continue
 		}
-		if p.Description != whitelistDesc {
-			continue
-		}
 		if expectedPolicyNames[p.Name] {
 			continue
+		}
+		// UniFi auto-creates a "(Return)" mirror for every ALLOW policy with
+		// AllowReturnTraffic=true. Keep Return mirrors of managed policies and
+		// delete Return mirrors of orphaned policies.
+		baseName := strings.TrimSuffix(p.Name, " (Return)")
+		if baseName != p.Name {
+			// This is a (Return) policy — already handled via expectedPolicyNames
+			// above; reaching here means the base policy is orphaned, so delete.
+		} else {
+			// Non-Return: only consider it a bouncer-managed orphan if it carries
+			// our description or was created before description support (empty desc).
+			if p.Description != whitelistDesc && p.Description != "" {
+				continue
+			}
 		}
 		if err := m.ctrl.DeleteZonePolicy(ctx, site, p.ID); err != nil {
 			m.log.Warn().Err(err).Str("policy", p.Name).Msg("failed to delete orphaned whitelist policy")
@@ -232,10 +256,10 @@ func (m *Manager) ensureTML(ctx context.Context, site, name, tmlType string, ite
 	return *found, nil
 }
 
-func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZonePairConfig, ipTMLID, srcPortTMLID, dstPortTMLID, ipVersion, policyName string, existingPolicies []controller.ZonePolicy) error {
+func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZonePairConfig, ipTMLID, srcPortTMLID, dstPortTMLID, ipVersion, policyName string, existingPolicies []controller.ZonePolicy) (controller.ZonePolicy, error) {
 	// Guard against empty TML ID - Cloudflare ALLOW policies MUST have a source filter
 	if ipTMLID == "" {
-		return fmt.Errorf("Cloudflare TML ID is empty for policy %s in site %s — cannot create ALLOW policy without source filter", policyName, site)
+		return controller.ZonePolicy{}, fmt.Errorf("Cloudflare TML ID is empty for policy %s in site %s — cannot create ALLOW policy without source filter", policyName, site)
 	}
 
 	for _, p := range existingPolicies {
@@ -243,7 +267,7 @@ func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZoneP
 			// Already exists; check if IP TML ID and port TML IDs all match.
 			if len(p.TrafficMatchingListIDs) > 0 && p.TrafficMatchingListIDs[0] == ipTMLID &&
 				p.SrcPortTMLID == srcPortTMLID && p.DstPortTMLID == dstPortTMLID {
-				return nil // up to date
+				return p, nil // up to date
 			}
 
 			// If portFilter is changing, the UniFi PUT endpoint rejects portFilter
@@ -253,7 +277,7 @@ func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZoneP
 				m.log.Info().Str("policy", policyName).Str("site", site).
 					Msg("portFilter changed on existing policy — deleting for recreation with new portFilter")
 				if delErr := m.ctrl.DeleteZonePolicy(ctx, site, p.ID); delErr != nil {
-					return fmt.Errorf("delete policy %s before portFilter recreation: %w", policyName, delErr)
+					return controller.ZonePolicy{}, fmt.Errorf("delete policy %s before portFilter recreation: %w", policyName, delErr)
 				}
 				// Fall through to the creation path below.
 				break
@@ -264,11 +288,11 @@ func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZoneP
 			p.TrafficMatchingListIDs = []string{ipTMLID}
 			p.ConnectionStateFilter = nil
 			p.AllowReturnTraffic = true
-			return m.ctrl.UpdateZonePolicy(ctx, site, p)
+			return p, m.ctrl.UpdateZonePolicy(ctx, site, p)
 		}
 	}
 
-	_, err := m.ctrl.CreateZonePolicy(ctx, site, controller.ZonePolicy{
+	created, err := m.ctrl.CreateZonePolicy(ctx, site, controller.ZonePolicy{
 		Name:               policyName,
 		Enabled:            true,
 		Action:             "ALLOW",
@@ -283,10 +307,46 @@ func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZoneP
 		DstPortTMLID:           dstPortTMLID,
 	})
 	if err != nil {
-		return fmt.Errorf("create allow policy %s: %w", policyName, err)
+		return controller.ZonePolicy{}, fmt.Errorf("create allow policy %s: %w", policyName, err)
 	}
 	m.log.Info().Str("policy", policyName).Str("site", site).Msg("created Cloudflare whitelist ALLOW policy")
-	return nil
+	return created, nil
+}
+
+// reorderWhitelistFirst ensures the given whitelist policy IDs appear first in
+// the beforeSystemDefined ordering for the zone pair.
+func (m *Manager) reorderWhitelistFirst(ctx context.Context, site string, pair ZonePairConfig, policyIDs []string) {
+	current, err := m.ctrl.GetPolicyOrdering(ctx, site, pair.SrcZoneID, pair.DstZoneID)
+	if err != nil {
+		m.log.Warn().Err(err).Str("pair", pair.SrcName+"->"+pair.DstName).
+			Msg("failed to fetch policy ordering for whitelist reorder")
+		return
+	}
+
+	// Build a set of our whitelist IDs so we can filter duplicates.
+	idSet := make(map[string]bool, len(policyIDs))
+	for _, id := range policyIDs {
+		idSet[id] = true
+	}
+	// Retain existing ordering for non-whitelist policies.
+	others := make([]string, 0, len(current.BeforeSystemDefined))
+	for _, id := range current.BeforeSystemDefined {
+		if !idSet[id] {
+			others = append(others, id)
+		}
+	}
+	newBefore := append(policyIDs, others...)
+
+	if err := m.ctrl.SetPolicyOrdering(ctx, site, pair.SrcZoneID, pair.DstZoneID, controller.PolicyOrdering{
+		BeforeSystemDefined: newBefore,
+		AfterSystemDefined:  current.AfterSystemDefined,
+	}); err != nil {
+		m.log.Warn().Err(err).Str("pair", pair.SrcName+"->"+pair.DstName).
+			Msg("failed to reorder whitelist policies to top")
+		return
+	}
+	m.log.Info().Str("pair", pair.SrcName+"->"+pair.DstName).
+		Msg("reordered Cloudflare whitelist allow policies to top of zone pair")
 }
 
 // tmlItemsEqual returns true if two TML item slices have the same values (order-independent).

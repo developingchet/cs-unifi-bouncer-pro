@@ -118,7 +118,8 @@ The `managerImpl` wraps both and selects based on the detected or configured mod
 The UniFi zone policy API has two portFilter constraints:
 
 1. **Nesting**: `portFilter` must be nested inside `trafficFilter` on both source and destination — the POST endpoint rejects it as an unknown property if placed at the top level of `$.source` or `$.destination`.
-2. **PUT exclusion**: The PUT endpoint (`/v1/firewall/policies/{id}`) rejects `portFilter` even when correctly nested. The wire structs used for PUT (`apiV1PolicyUpdateSrc` / `apiV1PolicyUpdateDst`) intentionally omit `trafficFilter.portFilter` — the server preserves the existing value on update. When portFilter needs to be added or changed on an existing policy, the bouncer deletes the existing policy and recreates it via POST. This is logged at `info` level with the message `portFilter changed — deleting policy for recreation with new portFilter`.
+2. **`trafficFilter.type`**: When the only filter required is port-based (no IP/network filter), `trafficFilter.type` must be `"PORT"`. Using `"NETWORK"` requires a non-null `networkFilter`; using `"IP_ADDRESS"` requires a non-null `ipAddressFilter`. `"PORT"` is the dedicated port-only type and accepts only `portFilter`.
+3. **PUT exclusion**: The PUT endpoint (`/v1/firewall/policies/{id}`) rejects `portFilter` even when correctly nested. The wire structs used for PUT (`apiV1PolicyUpdateSrc` / `apiV1PolicyUpdateDst`) intentionally omit `trafficFilter.portFilter` — the server preserves the existing value on update. When portFilter needs to be added or changed on an existing policy, the bouncer deletes the existing policy and recreates it via POST. This is logged at `info` level with the message `portFilter changed — deleting policy for recreation with new portFilter`.
 
 #### Orphan cleanup
 
@@ -126,7 +127,7 @@ When a zone pair is removed from `ZONE_PAIRS` or `CLOUDFLARE_ZONE_PAIRS`, previo
 
 - **Block policies**: at `EnsurePolicies` time, any policy recorded in bbolt for the site under mode `zone` whose name is no longer produced by the current config is deleted from UniFi and removed from bbolt — but only if it bears the managed description (`cfg.Description`).
 - **Block port TMLs**: at `Bootstrap` time, Traffic Matching Lists named `crowdsec-ports-src-*` or `crowdsec-ports-dst-*` not required by any current zone pair are deleted.
-- **Cloudflare ALLOW policies**: at each Cloudflare sync, policies with the `crowdsec-whitelist-cloudflare-` prefix and the managed description not in the current `CLOUDFLARE_ZONE_PAIRS` set are deleted.
+- **Cloudflare ALLOW policies**: at each Cloudflare sync, policies with the `crowdsec-whitelist-cloudflare-` prefix not in the current `CLOUDFLARE_ZONE_PAIRS` set are deleted. Policies with our managed description or an empty description (old policies created before description support) are considered bouncer-owned. UniFi's auto-created `(Return)` mirror policies are cleaned up when their corresponding forward policy is orphaned.
 - **Cloudflare port TMLs**: at each Cloudflare sync, TMLs named `crowdsec-whitelist-cloudflare-srcports-*` or `crowdsec-whitelist-cloudflare-dstports-*` not required by any current Cloudflare zone pair are deleted.
 
 User-created policies and TMLs are never touched — the description check is the guard.
@@ -300,7 +301,7 @@ All tests are table-driven and run without external services. The test suite cov
   remediation support flags) and the intentional distinction between `BouncerType`
   (used in the metrics payload `type` field) and the LAPI user-agent service token
   (`crowdsec-unifi-bouncer`, used in HTTP headers)
-- **`internal/whitelist`**: TML creation and update idempotency, ALLOW policy creation with IP TML IDs and port TML IDs, no-op when current, delete+recreate triggered when port TML IDs change (portFilter constraint), orphan policy and TML sweep
+- **`internal/whitelist`**: TML creation and update idempotency, ALLOW policy creation with IP TML IDs and port TML IDs, no-op when current, delete+recreate triggered when port TML IDs change (portFilter constraint), orphan policy and TML sweep, policy ordering (whitelist ALLOW policies placed before block policies via the ordering API)
 
 A `nopRecorder` no-op implementation of `MetricsRecorder` is used in handler tests
 to keep them independent of the LAPI metrics reporter.

@@ -366,6 +366,22 @@ func (c *unifiClient) DeleteZonePolicy(ctx context.Context, site string, id stri
 	return deleteZonePolicyV1(ctx, c, siteID, id)
 }
 
+func (c *unifiClient) GetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string) (PolicyOrdering, error) {
+	siteID, err := getSiteID(ctx, c, site)
+	if err != nil {
+		return PolicyOrdering{}, err
+	}
+	return getPolicyOrderingV1(ctx, c, siteID, srcZoneID, dstZoneID)
+}
+
+func (c *unifiClient) SetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string, ordering PolicyOrdering) error {
+	siteID, err := getSiteID(ctx, c, site)
+	if err != nil {
+		return err
+	}
+	return setPolicyOrderingV1(ctx, c, siteID, srcZoneID, dstZoneID, ordering)
+}
+
 // ---- Traffic Matching Lists (integration v1) --------------------------------
 
 func (c *unifiClient) ListTrafficMatchingLists(ctx context.Context, site string) ([]TrafficMatchingList, error) {

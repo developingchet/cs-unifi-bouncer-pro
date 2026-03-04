@@ -20,6 +20,9 @@ type MockController struct {
 	zones    map[string][]controller.Zone
 	tmls     map[string][]controller.TrafficMatchingList
 
+	// Policy orderings keyed by "site:srcZoneID:dstZoneID"
+	orderings map[string]controller.PolicyOrdering
+
 	// Preset site ID mappings: internalReference -> UUID
 	siteIDs map[string]string
 
@@ -39,15 +42,16 @@ type MockController struct {
 // NewMockController returns a zero-state MockController ready for use.
 func NewMockController() *MockController {
 	return &MockController{
-		groups:   make(map[string][]controller.FirewallGroup),
-		rules:    make(map[string][]controller.FirewallRule),
-		policies: make(map[string][]controller.ZonePolicy),
-		zones:    make(map[string][]controller.Zone),
-		tmls:     make(map[string][]controller.TrafficMatchingList),
-		siteIDs:  make(map[string]string),
-		features: make(map[string]map[string]bool),
-		errors:   make(map[string]error),
-		calls:    make(map[string]int),
+		groups:    make(map[string][]controller.FirewallGroup),
+		rules:     make(map[string][]controller.FirewallRule),
+		policies:  make(map[string][]controller.ZonePolicy),
+		zones:     make(map[string][]controller.Zone),
+		tmls:      make(map[string][]controller.TrafficMatchingList),
+		orderings: make(map[string]controller.PolicyOrdering),
+		siteIDs:   make(map[string]string),
+		features:  make(map[string]map[string]bool),
+		errors:    make(map[string]error),
+		calls:     make(map[string]int),
 	}
 }
 
@@ -362,6 +366,34 @@ func (m *MockController) GetSiteID(ctx context.Context, siteName string) (string
 	}
 	// Passthrough: return siteName as its own ID (useful for tests that use UUID-like names directly).
 	return siteName, nil
+}
+
+// GetLastOrdering returns the ordering last set for the given zone pair.
+func (m *MockController) GetLastOrdering(site, srcZoneID, dstZoneID string) controller.PolicyOrdering {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.orderings[site+":"+srcZoneID+":"+dstZoneID]
+}
+
+func (m *MockController) GetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string) (controller.PolicyOrdering, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls["GetPolicyOrdering"]++
+	if err := m.popError("GetPolicyOrdering"); err != nil {
+		return controller.PolicyOrdering{}, err
+	}
+	return m.orderings[site+":"+srcZoneID+":"+dstZoneID], nil
+}
+
+func (m *MockController) SetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string, ordering controller.PolicyOrdering) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls["SetPolicyOrdering"]++
+	if err := m.popError("SetPolicyOrdering"); err != nil {
+		return err
+	}
+	m.orderings[site+":"+srcZoneID+":"+dstZoneID] = ordering
+	return nil
 }
 
 func (m *MockController) DiscoverZones(ctx context.Context, site string) ([]controller.Zone, error) {

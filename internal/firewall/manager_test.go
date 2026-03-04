@@ -678,3 +678,11 @@ func (pc *PanicController) Close() error {
 }
 
 func (pc *PanicController) InvalidateZoneCache(site string) {}
+
+func (pc *PanicController) GetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string) (controller.PolicyOrdering, error) {
+	return controller.PolicyOrdering{}, nil
+}
+
+func (pc *PanicController) SetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string, ordering controller.PolicyOrdering) error {
+	return nil
+}
