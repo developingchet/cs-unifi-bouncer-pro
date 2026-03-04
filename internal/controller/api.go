@@ -670,11 +670,7 @@ func getPolicyOrderingV1(ctx context.Context, c *unifiClient, siteID, srcZoneID,
 	if err != nil {
 		return PolicyOrdering{}, err
 	}
-	ids := body.OrderedFirewallPolicyIDs
-	return PolicyOrdering{
-		BeforeSystemDefined: ids.BeforeSystemDefined,
-		AfterSystemDefined:  ids.AfterSystemDefined,
-	}, nil
+	return PolicyOrdering(body.OrderedFirewallPolicyIDs), nil
 }
 
 func setPolicyOrderingV1(ctx context.Context, c *unifiClient, siteID, srcZoneID, dstZoneID string, ordering PolicyOrdering) error {
@@ -688,12 +684,7 @@ func setPolicyOrderingV1(ctx context.Context, c *unifiClient, siteID, srcZoneID,
 	q.Set("destinationFirewallZoneId", dstZoneID)
 	u.RawQuery = q.Encode()
 
-	body := apiOrderingBody{
-		OrderedFirewallPolicyIDs: apiOrderedPolicyIDs{
-			BeforeSystemDefined: ordering.BeforeSystemDefined,
-			AfterSystemDefined:  ordering.AfterSystemDefined,
-		},
-	}
+	body := apiOrderingBody{OrderedFirewallPolicyIDs: apiOrderedPolicyIDs(ordering)}
 	return doPUT(ctx, c, u.String(), "set-policy-ordering", body)
 }
 
