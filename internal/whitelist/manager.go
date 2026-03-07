@@ -86,8 +86,11 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 	}
 
 	// Ensure ALLOW policies for each zone pair, creating port TMLs as needed.
-	// Track expected policy and TML names for the orphan sweep below.
-	expectedPolicyNames := make(map[string]bool)
+	// Track managed policy IDs (exact IDs returned by ensureAllowPolicy) and
+	// managed base names (forward policy names, for Return mirror matching).
+	// Using ID-based tracking ensures duplicate-named stale policies are cleaned up.
+	managedPolicyIDs := make(map[string]bool)
+	managedBaseNames := make(map[string]bool)
 	expectedTMLNames := map[string]bool{TMLNameV4: true, TMLNameV6: true}
 
 	for _, pair := range zonePairs {
@@ -118,21 +121,21 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 
 		v4Name := "crowdsec-whitelist-cloudflare-External-" + pair.DstName + "-v4"
 		v6Name := "crowdsec-whitelist-cloudflare-External-" + pair.DstName + "-v6"
-		// Include UniFi's auto-created (Return) mirror policies in the expected set.
-		expectedPolicyNames[v4Name] = true
-		expectedPolicyNames[v4Name+" (Return)"] = true
-		expectedPolicyNames[v6Name] = true
-		expectedPolicyNames[v6Name+" (Return)"] = true
+		// Register base names so their UniFi-managed (Return) mirrors are preserved.
+		managedBaseNames[v4Name] = true
+		managedBaseNames[v6Name] = true
 
 		var pairPolicyIDs []string
 		if p, err := m.ensureAllowPolicy(ctx, site, pair, tmlV4.ID, srcPortTMLID, dstPortTMLID, "IPV4", v4Name, existingPolicies); err != nil {
 			m.log.Error().Err(err).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure v4 allow policy failed")
 		} else {
+			managedPolicyIDs[p.ID] = true
 			pairPolicyIDs = append(pairPolicyIDs, p.ID)
 		}
 		if p, err := m.ensureAllowPolicy(ctx, site, pair, tmlV6.ID, srcPortTMLID, dstPortTMLID, "IPV6", v6Name, existingPolicies); err != nil {
 			m.log.Error().Err(err).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure v6 allow policy failed")
 		} else {
+			managedPolicyIDs[p.ID] = true
 			pairPolicyIDs = append(pairPolicyIDs, p.ID)
 		}
 
@@ -152,19 +155,23 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 		if !strings.HasPrefix(p.Name, whitelistPolicyPrefix) {
 			continue
 		}
-		if expectedPolicyNames[p.Name] {
-			continue
-		}
 		// UniFi auto-creates a "(Return)" mirror for every ALLOW policy with
-		// AllowReturnTraffic=true. Keep Return mirrors of managed policies and
-		// delete Return mirrors of orphaned policies.
+		// AllowReturnTraffic=true. Handle Return mirrors and forward policies separately.
 		baseName := strings.TrimSuffix(p.Name, " (Return)")
 		if baseName != p.Name {
-			// This is a (Return) policy — already handled via expectedPolicyNames
-			// above; reaching here means the base policy is orphaned, so delete.
+			// Return mirror: keep if its base forward policy is currently managed.
+			if managedBaseNames[baseName] {
+				continue
+			}
 		} else {
-			// Non-Return: only consider it a bouncer-managed orphan if it carries
-			// our description or was created before description support (empty desc).
+			// Forward policy: keep only if this exact ID is actively managed.
+			// ID-based tracking correctly handles duplicate-named policies — only
+			// the specific policy returned by ensureAllowPolicy is protected.
+			if managedPolicyIDs[p.ID] {
+				continue
+			}
+			// Not actively managed by ID — only delete if it's ours to clean up
+			// (our description, or empty description from before description support).
 			if p.Description != whitelistDesc && p.Description != "" {
 				continue
 			}

@@ -485,6 +485,196 @@ func TestEnsureAllowPolicy_WithPorts_NoOpWhenCurrent(t *testing.T) {
 	}
 }
 
+// TestSyncSite_OrphanPolicy_IsDeleted verifies that a bouncer-managed policy whose
+// zone pair has been removed from config is deleted during the orphan sweep.
+func TestSyncSite_OrphanPolicy_IsDeleted(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	log := zerolog.Nop()
+	provider := NewCloudflareProvider("", "")
+	mgr := NewManager(ctrl, []string{"test-site"}, provider, log)
+	ctx := context.Background()
+
+	// Pre-populate IP TMLs so ensureTML finds them without creating new ones.
+	ctrl.SetTMLs("test-site", []controller.TrafficMatchingList{
+		{ID: "tml-v4", Name: TMLNameV4, Type: "IPV4_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Value: "1.1.1.0/24"}}},
+		{ID: "tml-v6", Name: TMLNameV6, Type: "IPV6_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Value: "2606:4700::/32"}}},
+	})
+
+	// Orphaned policy: was created when External→Dmz was configured, but that pair is now removed.
+	orphan := controller.ZonePolicy{
+		ID:                     "orphan-v4-id",
+		Name:                   "crowdsec-whitelist-cloudflare-External-Dmz-v4",
+		Description:            "Managed by cs-unifi-bouncer-pro. Cloudflare whitelist. Do not edit manually.",
+		Action:                 "ALLOW",
+		Enabled:                true,
+		SrcZone:                "zone-external",
+		DstZone:                "zone-dmz",
+		IPVersion:              "IPV4",
+		TrafficMatchingListIDs: []string{"tml-v4"},
+	}
+	ctrl.SetPolicies("test-site", []controller.ZonePolicy{orphan})
+
+	// Sync with no zone pairs (zone pair removed from config).
+	err := mgr.syncSite(ctx, "test-site", []string{"1.1.1.0/24"}, []string{"2606:4700::/32"}, nil)
+	if err != nil {
+		t.Fatalf("syncSite failed: %v", err)
+	}
+
+	if got := ctrl.Calls("DeleteZonePolicy"); got != 1 {
+		t.Errorf("DeleteZonePolicy calls: got %d, want 1 (orphan must be deleted)", got)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, "test-site")
+	if err != nil {
+		t.Fatalf("ListZonePolicies failed: %v", err)
+	}
+	if len(policies) != 0 {
+		t.Errorf("expected 0 policies after orphan sweep, got %d", len(policies))
+	}
+}
+
+// TestSyncSite_DuplicateNamedPolicy_OldOrphanDeleted verifies that when two policies
+// share the same name but only one is actively managed (by ID), the unmanaged duplicate
+// is deleted. This is the ID-based tracking fix for the orphan cleanup bug.
+func TestSyncSite_DuplicateNamedPolicy_OldOrphanDeleted(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	log := zerolog.Nop()
+	provider := NewCloudflareProvider("", "")
+	mgr := NewManager(ctrl, []string{"test-site"}, provider, log)
+	ctx := context.Background()
+
+	ctrl.SetTMLs("test-site", []controller.TrafficMatchingList{
+		{ID: "tml-v4", Name: TMLNameV4, Type: "IPV4_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Value: "1.1.1.0/24"}}},
+		{ID: "tml-v6", Name: TMLNameV6, Type: "IPV6_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Value: "2606:4700::/32"}}},
+	})
+
+	const policyName = "crowdsec-whitelist-cloudflare-External-Dmz-v4"
+	const managedDesc = "Managed by cs-unifi-bouncer-pro. Cloudflare whitelist. Do not edit manually."
+
+	// Simulate two policies with the same name: the active managed one (found first
+	// by ensureAllowPolicy) and an old stale duplicate with a different ID.
+	active := controller.ZonePolicy{
+		ID:                     "active-id",
+		Name:                   policyName,
+		Description:            managedDesc,
+		Action:                 "ALLOW",
+		AllowReturnTraffic:     true,
+		Enabled:                true,
+		SrcZone:                "zone-external",
+		DstZone:                "zone-dmz",
+		IPVersion:              "IPV4",
+		TrafficMatchingListIDs: []string{"tml-v4"},
+	}
+	stale := controller.ZonePolicy{
+		ID:                     "stale-id",
+		Name:                   policyName,
+		Description:            managedDesc,
+		Action:                 "ALLOW",
+		AllowReturnTraffic:     true,
+		Enabled:                true,
+		SrcZone:                "zone-external",
+		DstZone:                "zone-dmz",
+		IPVersion:              "IPV4",
+		TrafficMatchingListIDs: []string{"tml-v4"},
+	}
+	ctrl.SetPolicies("test-site", []controller.ZonePolicy{active, stale})
+
+	pair := ZonePairConfig{
+		SrcName:   "External",
+		DstName:   "Dmz",
+		SrcZoneID: "zone-external",
+		DstZoneID: "zone-dmz",
+	}
+	err := mgr.syncSite(ctx, "test-site", []string{"1.1.1.0/24"}, []string{"2606:4700::/32"}, []ZonePairConfig{pair})
+	if err != nil {
+		t.Fatalf("syncSite failed: %v", err)
+	}
+
+	// The stale duplicate must be deleted; the active policy must be kept.
+	if got := ctrl.Calls("DeleteZonePolicy"); got != 1 {
+		t.Errorf("DeleteZonePolicy calls: got %d, want 1 (stale duplicate must be deleted)", got)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, "test-site")
+	if err != nil {
+		t.Fatalf("ListZonePolicies failed: %v", err)
+	}
+	// After orphan sweep, only one policy (the active one) should remain.
+	// The mock's DeleteZonePolicy removes by ID, so active-id should still be present.
+	found := false
+	for _, p := range policies {
+		if p.ID == "active-id" {
+			found = true
+		}
+		if p.ID == "stale-id" {
+			t.Errorf("stale policy (stale-id) was not deleted by orphan sweep")
+		}
+	}
+	if !found {
+		t.Errorf("active policy (active-id) was incorrectly deleted")
+	}
+}
+
+// TestSyncSite_ReturnMirror_KeptForManagedPolicy verifies that (Return) mirror policies
+// auto-created by UniFi are preserved for managed forward policies and deleted for orphans.
+func TestSyncSite_ReturnMirror_KeptForManagedPolicy(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	log := zerolog.Nop()
+	provider := NewCloudflareProvider("", "")
+	mgr := NewManager(ctrl, []string{"test-site"}, provider, log)
+	ctx := context.Background()
+
+	ctrl.SetTMLs("test-site", []controller.TrafficMatchingList{
+		{ID: "tml-v4", Name: TMLNameV4, Type: "IPV4_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Value: "1.1.1.0/24"}}},
+		{ID: "tml-v6", Name: TMLNameV6, Type: "IPV6_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Value: "2606:4700::/32"}}},
+	})
+
+	const managedDesc = "Managed by cs-unifi-bouncer-pro. Cloudflare whitelist. Do not edit manually."
+
+	// Active managed policy + its UniFi-auto-created Return mirror.
+	active := controller.ZonePolicy{
+		ID: "active-id", Name: "crowdsec-whitelist-cloudflare-External-Dmz-v4",
+		Description: managedDesc, Action: "ALLOW", AllowReturnTraffic: true, Enabled: true,
+		SrcZone: "zone-external", DstZone: "zone-dmz", IPVersion: "IPV4",
+		TrafficMatchingListIDs: []string{"tml-v4"},
+	}
+	activeReturn := controller.ZonePolicy{
+		ID: "active-return-id", Name: "crowdsec-whitelist-cloudflare-External-Dmz-v4 (Return)",
+		Action: "ALLOW", Enabled: true, Predefined: true,
+		SrcZone: "zone-dmz", DstZone: "zone-external", IPVersion: "IPV4",
+	}
+	// Orphaned Return mirror for a policy that is no longer in config.
+	orphanReturn := controller.ZonePolicy{
+		ID: "orphan-return-id", Name: "crowdsec-whitelist-cloudflare-External-Old-v4 (Return)",
+		Action: "ALLOW", Enabled: true, Predefined: true,
+		SrcZone: "zone-old", DstZone: "zone-external", IPVersion: "IPV4",
+	}
+	ctrl.SetPolicies("test-site", []controller.ZonePolicy{active, activeReturn, orphanReturn})
+
+	pair := ZonePairConfig{SrcName: "External", DstName: "Dmz", SrcZoneID: "zone-external", DstZoneID: "zone-dmz"}
+	err := mgr.syncSite(ctx, "test-site", []string{"1.1.1.0/24"}, []string{"2606:4700::/32"}, []ZonePairConfig{pair})
+	if err != nil {
+		t.Fatalf("syncSite failed: %v", err)
+	}
+
+	// Only the orphaned Return mirror should be deleted; the active Return mirror kept.
+	if got := ctrl.Calls("DeleteZonePolicy"); got != 1 {
+		t.Errorf("DeleteZonePolicy calls: got %d, want 1 (only orphan Return mirror deleted)", got)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, "test-site")
+	if err != nil {
+		t.Fatalf("ListZonePolicies failed: %v", err)
+	}
+	ids := make(map[string]bool)
+	for _, p := range policies {
+		ids[p.ID] = true
+	}
+	if !ids["active-return-id"] {
+		t.Error("active Return mirror was incorrectly deleted")
+	}
+	if ids["orphan-return-id"] {
+		t.Error("orphaned Return mirror was not deleted")
+	}
+}
+
 // TestEnsureAllowPolicy_WithPorts_UpdatesWhenChanged verifies that when portFilter
 // IDs change on an existing policy, the policy is deleted and recreated (not PUT),
 // because the UniFi PUT endpoint does not accept portFilter in the request body.

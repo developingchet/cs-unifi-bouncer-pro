@@ -495,7 +495,7 @@ The reconcile command compares bbolt state with the current UniFi firewall state
 **Cause:** In versions before v1.1.2 the bouncer did not sweep for orphaned managed objects. Starting with v1.1.2, orphan cleanup runs automatically:
 
 - **Block policies** (`ZONE_PAIRS`): at every `EnsurePolicies` call, policies tracked in bbolt for the site but no longer produced by the current config are deleted from UniFi and removed from bbolt.
-- **Cloudflare ALLOW policies** (`CLOUDFLARE_ZONE_PAIRS`): at every Cloudflare sync, policies with the managed description and naming prefix (`crowdsec-whitelist-cloudflare-`) that are no longer in `CLOUDFLARE_ZONE_PAIRS` are deleted.
+- **Cloudflare ALLOW policies** (`CLOUDFLARE_ZONE_PAIRS`): at every Cloudflare sync, policies with the managed description and naming prefix (`crowdsec-whitelist-cloudflare-`) that are no longer in `CLOUDFLARE_ZONE_PAIRS` are deleted. Since v1.1.8, orphan detection is ID-based: only the exact policy returned by the ensure call is protected, so stale duplicate-named policies are also correctly removed.
 - **Port-filter TMLs** (both `ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS`): TMLs named `crowdsec-ports-src-*`, `crowdsec-ports-dst-*`, `crowdsec-whitelist-cloudflare-srcports-*`, and `crowdsec-whitelist-cloudflare-dstports-*` that no longer correspond to a configured zone pair are deleted.
 
 The cleanup only targets objects that bear the bouncer's managed description — user-created policies are never touched.
