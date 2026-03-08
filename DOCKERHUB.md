@@ -26,7 +26,7 @@ services:
       UNIFI_API_KEY: your-api-key
       CROWDSEC_LAPI_URL: http://crowdsec:8080
       CROWDSEC_LAPI_KEY: your-bouncer-key
-      ZONE_PAIRS: External->Internal
+      ZONE_PAIRS: External->Dmz
     volumes:
       - bouncer-data:/data
 volumes:
@@ -71,7 +71,7 @@ For full setup including CrowdSec registration, TLS, multi-site, and Docker Secr
 | `UNIFI_API_KEY` | `your-api-key` | API key (Settings → Control Plane → API Keys); or use `UNIFI_USERNAME` + `UNIFI_PASSWORD` |
 | `CROWDSEC_LAPI_URL` | `http://crowdsec:8080` | CrowdSec LAPI URL (default assumes a Docker service named `crowdsec`) |
 | `CROWDSEC_LAPI_KEY` | `your-bouncer-key` | Bouncer key from `cscli bouncers add unifi-bouncer` |
-| `ZONE_PAIRS` | `External->Internal` | Zone pair(s) for block policies; comma-separated `src[:sport,...]->dst[:dport,...]` (port lists are optional) |
+| `ZONE_PAIRS` | `External->Dmz` | Zone pair(s) for block policies; comma-separated `src[:sport,...]->dst[:dport,...]` (port lists are optional) |
 
 Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) accept a `_FILE` suffix for Docker secrets and Kubernetes secret mounts. For the full variable reference see the [Configuration Reference](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/CONFIGURATION.md).
 

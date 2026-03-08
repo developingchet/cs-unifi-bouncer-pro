@@ -169,7 +169,7 @@ These settings apply only when `FIREWALL_MODE=zone` or when `auto` detects a zon
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ZONE_PAIRS` | `External->Internal` | Comma-separated zone pairs in `src[:sport,...]->dst[:dport,...]` format. A block policy is created for each pair and each shard. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. `External` and `Internal` are the default zone names in UniFi Network 8.x — check Settings → Firewall → Zones if you have renamed them. Standard UUIDs (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) and MongoDB ObjectIDs (24-char hex) are also accepted and passed through without a lookup. Optional colon-separated port lists after a zone name restrict which source or destination ports the block policies match (empty = any port). |
+| `ZONE_PAIRS` | `External->Dmz` | Comma-separated zone pairs in `src[:sport,...]->dst[:dport,...]` format. A block policy is created for each pair and each shard. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. `External` and `Internal` are the default zone names in UniFi Network 8.x — check Settings → Firewall → Zones if you have renamed them. Standard UUIDs (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) and MongoDB ObjectIDs (24-char hex) are also accepted and passed through without a lookup. Optional colon-separated port lists after a zone name restrict which source or destination ports the block policies match (empty = any port). |
 
 ```bash
 # Named zones (auto-resolved at startup) — no port filter (any port)

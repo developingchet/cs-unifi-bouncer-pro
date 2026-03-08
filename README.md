@@ -148,7 +148,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ZONE_PAIRS` | `External->Internal` | Comma-separated zone pairs in `src[:sport,...]->dst[:dport,...]` format. Zone names are auto-resolved to UUIDs at startup; standard UUIDs and MongoDB ObjectIDs are accepted directly. `External`/`Internal` are the default UniFi 8.x names — check Settings → Firewall → Zones if you renamed them. Optional colon-separated port lists restrict which source or destination ports the block policies match (empty = any). |
+| `ZONE_PAIRS` | `External->Dmz` | Comma-separated zone pairs in `src[:sport,...]->dst[:dport,...]` format. Zone names are auto-resolved to UUIDs at startup; standard UUIDs and MongoDB ObjectIDs are accepted directly. `External`/`Internal` are the default UniFi 8.x names — check Settings → Firewall → Zones if you renamed them. Optional colon-separated port lists restrict which source or destination ports the block policies match (empty = any). |
 | `ZONE_PAIRS_SCENARIO_MAP` | — | Per-scenario zone pair overrides. Semicolon-separated `key=pairs` entries where `key` matches as a substring of the scenario name. Overrides `ZONE_PAIRS` for matching bans. Example: `ssh-bf=External:22->Internal:22;http-probing=External->Internal:80,443` |
 
 ### Cloudflare whitelist

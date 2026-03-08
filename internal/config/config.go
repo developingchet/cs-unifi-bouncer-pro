@@ -289,7 +289,7 @@ func defaults() map[string]interface{} {
 		"legacy_rule_index_start_v6":  27000,
 		"legacy_ruleset_v4":           "WAN_IN",
 		"legacy_ruleset_v6":           "WANv6_IN",
-		"zone_pairs":                    "External->Internal",
+		"zone_pairs":                    "External->Dmz",
 		"circuit_breaker_threshold":     5,
 		"circuit_breaker_reset_interval": "60s",
 		"cloudflare_whitelist_enabled": false,
