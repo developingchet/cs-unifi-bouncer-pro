@@ -774,38 +774,68 @@ func (zm *ZoneManager) cleanupOrphanedPortTMLs(ctx context.Context, site string,
 	}
 }
 
-// cleanupOrphanedBlockPolicies deletes block zone policies that are tracked in
-// bbolt (mode "zone") for the given site but whose names are no longer in
-// expectedNames — meaning the zone pair they belong to was removed from config.
+// cleanupOrphanedBlockPolicies deletes block zone policies whose names are no
+// longer in expectedNames — meaning the zone pair they belong to was removed
+// from config. Two complementary sweeps are performed:
 //
-// A policy is only deleted if it also bears the managed description, confirming
-// it was created by this bouncer and not by the user.
+//   - bbolt sweep: removes policies tracked in bbolt (mode "zone") that are no
+//     longer expected. Cleans both the API object and the bbolt record.
+//   - API sweep: removes any API policy bearing the managed description that is
+//     not in expectedNames, even if bbolt has no record of it (e.g. bbolt was
+//     wiped, or a policy was left by a previous bouncer installation).
 func (zm *ZoneManager) cleanupOrphanedBlockPolicies(ctx context.Context, site string, expectedNames map[string]bool, existingByID map[string]controller.ZonePolicy) {
+	deletedIDs := make(map[string]bool)
+
+	// Pass 1 — bbolt-based: handles the normal case where bbolt tracks the policy.
 	allBbolt, err := zm.store.ListPolicies()
 	if err != nil {
 		zm.log.Warn().Err(err).Str("site", site).Msg("orphan cleanup: failed to list bbolt policies")
-		return
-	}
-	for name, rec := range allBbolt {
-		if rec.Site != site || rec.Mode != "zone" {
-			continue
-		}
-		if expectedNames[name] {
-			continue
-		}
-		// Orphan: in bbolt for this site but not expected by current config.
-		if p, exists := existingByID[rec.UnifiID]; exists && p.Description == zm.cfg.Description {
-			if delErr := zm.ctrl.DeleteZonePolicy(ctx, site, rec.UnifiID); delErr != nil {
-				zm.log.Warn().Err(delErr).Str("policy", name).Msg("failed to delete orphaned zone policy")
-			} else {
-				zm.log.Info().Str("policy", name).Str("site", site).
-					Msg("deleted orphaned zone policy (zone pair removed from config)")
+	} else {
+		for name, rec := range allBbolt {
+			if rec.Site != site || rec.Mode != "zone" {
+				continue
+			}
+			if expectedNames[name] {
+				continue
+			}
+			// Orphan: in bbolt for this site but not expected by current config.
+			if p, exists := existingByID[rec.UnifiID]; exists && p.Description == zm.cfg.Description {
+				if delErr := zm.ctrl.DeleteZonePolicy(ctx, site, rec.UnifiID); delErr != nil {
+					zm.log.Warn().Err(delErr).Str("policy", name).Msg("failed to delete orphaned zone policy")
+				} else {
+					zm.log.Info().Str("policy", name).Str("site", site).
+						Msg("deleted orphaned zone policy (zone pair removed from config)")
+					deletedIDs[rec.UnifiID] = true
+				}
+			}
+			// Remove from bbolt regardless — it no longer belongs to any active zone pair.
+			if delErr := zm.store.DeletePolicy(name); delErr != nil {
+				zm.log.Warn().Err(delErr).Str("policy", name).Msg("failed to remove orphaned policy from bbolt")
 			}
 		}
-		// Remove from bbolt regardless — it no longer belongs to any active zone pair.
-		if delErr := zm.store.DeletePolicy(name); delErr != nil {
-			zm.log.Warn().Err(delErr).Str("policy", name).Msg("failed to remove orphaned policy from bbolt")
+	}
+
+	// Pass 2 — API-based: catches orphans that have no bbolt record (wiped bbolt,
+	// prior bouncer version, or leftover from a mode switch).
+	for id, p := range existingByID {
+		if deletedIDs[id] {
+			continue // already handled in pass 1
 		}
+		if p.Description != zm.cfg.Description {
+			continue
+		}
+		if expectedNames[p.Name] {
+			continue
+		}
+		if delErr := zm.ctrl.DeleteZonePolicy(ctx, site, id); delErr != nil {
+			zm.log.Warn().Err(delErr).Str("policy", p.Name).Str("site", site).
+				Msg("failed to delete API-orphaned zone policy")
+		} else {
+			zm.log.Info().Str("policy", p.Name).Str("site", site).
+				Msg("deleted API-orphaned zone policy (matches managed description, not in current config)")
+		}
+		// Clean up any stale bbolt entry that may exist under this name.
+		_ = zm.store.DeletePolicy(p.Name)
 	}
 }
 

@@ -288,6 +288,77 @@ func TestLegacyManager_DeleteRuleForShard_NoOp(t *testing.T) {
 	}
 }
 
+// TestLegacyManager_EnsureRules_OrphanedAPIRule_Deleted verifies that EnsureRules
+// removes a pre-existing legacy rule bearing the managed description that is no
+// longer for any active shard — covering mode-switch leftovers, wiped bbolt, or
+// stale rules from a prior shard count.
+func TestLegacyManager_EnsureRules_OrphanedAPIRule_Deleted(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	namer := testNamer(t)
+
+	v4 := ensuredV4Shard(t, ctrl, store)
+	lm := newTestLegacyManager(ctrl, store, namer)
+
+	// Pre-populate the API with a rule that has our description but is for shard
+	// index 9 — far beyond any active shard. bbolt has no record of it.
+	orphan := controller.FirewallRule{
+		ID:          "orphan-rule-id",
+		Name:        "crowdsec-drop-v4-9",
+		Description: "test", // matches lm.cfg.Description
+		Ruleset:     "WAN_IN",
+		Action:      "drop",
+	}
+	ctrl.SetRules(testSite, []controller.FirewallRule{orphan})
+
+	if err := lm.EnsureRules(context.Background(), testSite, v4, nil); err != nil {
+		t.Fatalf("EnsureRules: %v", err)
+	}
+
+	// The orphaned rule must be deleted; the active shard rule must be created.
+	if got := ctrl.Calls("DeleteFirewallRule"); got != 1 {
+		t.Errorf("DeleteFirewallRule calls: got %d, want 1 (orphan must be deleted)", got)
+	}
+	rules, err := ctrl.ListFirewallRules(context.Background(), testSite)
+	if err != nil {
+		t.Fatalf("ListFirewallRules: %v", err)
+	}
+	for _, r := range rules {
+		if r.ID == "orphan-rule-id" {
+			t.Error("orphaned rule was not removed from the API")
+		}
+	}
+}
+
+// TestLegacyManager_EnsureRules_UnmanagedAPIRule_Preserved verifies that a
+// pre-existing rule with a different description is left alone by the orphan sweep.
+func TestLegacyManager_EnsureRules_UnmanagedAPIRule_Preserved(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	namer := testNamer(t)
+
+	v4 := ensuredV4Shard(t, ctrl, store)
+	lm := newTestLegacyManager(ctrl, store, namer)
+
+	// A rule that looks like ours by name but carries a user-defined description.
+	userRule := controller.FirewallRule{
+		ID:          "user-rule-id",
+		Name:        "crowdsec-drop-v4-9",
+		Description: "created by hand",
+		Ruleset:     "WAN_IN",
+		Action:      "drop",
+	}
+	ctrl.SetRules(testSite, []controller.FirewallRule{userRule})
+
+	if err := lm.EnsureRules(context.Background(), testSite, v4, nil); err != nil {
+		t.Fatalf("EnsureRules: %v", err)
+	}
+
+	if got := ctrl.Calls("DeleteFirewallRule"); got != 0 {
+		t.Errorf("DeleteFirewallRule calls: got %d, want 0 (unmanaged rule must be preserved)", got)
+	}
+}
+
 // TestLegacyManager_EnsureRules_ListsOnce verifies that EnsureRules calls
 // ListFirewallRules exactly once even when both v4 and v6 shards are present.
 func TestLegacyManager_EnsureRules_ListsOnce(t *testing.T) {

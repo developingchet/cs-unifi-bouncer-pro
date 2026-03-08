@@ -579,3 +579,89 @@ func TestZoneManager_EnsurePolicies_ReconcileFixesMissingTML(t *testing.T) {
 		t.Error("updated policy: TrafficMatchingListIDs[0] is empty, want non-empty TML ID")
 	}
 }
+
+// TestZoneManager_EnsurePolicies_APIOrphan_DeletedWithoutBboltRecord verifies that
+// EnsurePolicies removes a block policy that bears the managed description and is
+// not in the expected set, even when bbolt has no record of it. This covers the
+// "wiped bbolt", "mode switch", and "prior installation" scenarios.
+func TestZoneManager_EnsurePolicies_APIOrphan_DeletedWithoutBboltRecord(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore() // empty bbolt — no record of the orphan
+	namer := zoneTestNamer(t)
+
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	zm := newTestZoneManager(ctrl, store, namer) // wan→lan only
+
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	// Pre-populate the API with an orphaned policy for a zone pair (wan→dmz) that
+	// is NOT in the current config, bearing our managed description. bbolt has no
+	// record of it — simulating a wiped db or a prior install's leftover.
+	orphan := controller.ZonePolicy{
+		ID:                     "orphan-api-id",
+		Name:                   "crowdsec-policy-wan-dmz-v4-0",
+		Description:            "test", // matches zm.cfg.Description
+		Action:                 "BLOCK",
+		Enabled:                true,
+		SrcZone:                "wan",
+		DstZone:                "dmz",
+		IPVersion:              "IPV4",
+		TrafficMatchingListIDs: []string{"some-group-id"},
+	}
+	ctrl.SetPolicies(testSite, []controller.ZonePolicy{orphan})
+
+	if err := zm.EnsurePolicies(context.Background(), testSite, v4, nil); err != nil {
+		t.Fatalf("EnsurePolicies: %v", err)
+	}
+
+	// The orphaned policy must have been deleted by the API-level sweep.
+	if got := ctrl.Calls("DeleteZonePolicy"); got != 1 {
+		t.Errorf("DeleteZonePolicy calls: got %d, want 1 (API orphan must be deleted)", got)
+	}
+	policies, err := ctrl.ListZonePolicies(context.Background(), testSite)
+	if err != nil {
+		t.Fatalf("ListZonePolicies: %v", err)
+	}
+	for _, p := range policies {
+		if p.ID == "orphan-api-id" {
+			t.Error("orphaned policy was not removed from the API")
+		}
+	}
+}
+
+// TestZoneManager_EnsurePolicies_UnmanagedAPIPolicy_Preserved verifies that a
+// policy with a description that does NOT match the managed description is left
+// alone by the API-level orphan sweep.
+func TestZoneManager_EnsurePolicies_UnmanagedAPIPolicy_Preserved(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore()
+	namer := zoneTestNamer(t)
+
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	zm := newTestZoneManager(ctrl, store, namer)
+
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	// A policy that looks like it could be ours by name but has a different
+	// description — must not be touched.
+	userPolicy := controller.ZonePolicy{
+		ID:          "user-policy-id",
+		Name:        "crowdsec-policy-wan-dmz-v4-0",
+		Description: "created by hand",
+		Action:      "BLOCK",
+		Enabled:     true,
+	}
+	ctrl.SetPolicies(testSite, []controller.ZonePolicy{userPolicy})
+
+	if err := zm.EnsurePolicies(context.Background(), testSite, v4, nil); err != nil {
+		t.Fatalf("EnsurePolicies: %v", err)
+	}
+
+	if got := ctrl.Calls("DeleteZonePolicy"); got != 0 {
+		t.Errorf("DeleteZonePolicy calls: got %d, want 0 (unmanaged policy must be preserved)", got)
+	}
+}

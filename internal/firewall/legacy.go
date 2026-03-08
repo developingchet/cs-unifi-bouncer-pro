@@ -39,6 +39,9 @@ func NewLegacyManager(cfg LegacyConfig, namer *Namer, ctrl controller.Controller
 
 // EnsureRules idempotently creates drop rules for each group shard.
 // If the rule already exists (from bbolt policy cache), it verifies and updates it.
+// After ensuring active shards, it sweeps for orphaned rules: any rule bearing
+// the managed description that is no longer for a current shard is deleted.
+// This catches rules left by removed shards, mode switches, or a wiped bbolt.
 func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards, v6Shards *ShardManager) error {
 	// Fetch ALL existing rules once for all families (avoids one GET per family).
 	existingRules, err := lm.ctrl.ListFirewallRules(ctx, site)
@@ -50,6 +53,24 @@ func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards,
 		existingByID[r.ID] = true
 	}
 
+	// Build the set of rule names expected by the current config before ensuring,
+	// so the orphan sweep below can compare against a stable snapshot.
+	expectedRuleNames := make(map[string]bool)
+	for _, entry := range []struct {
+		sm   *ShardManager
+		ipv6 bool
+	}{{v4Shards, false}, {v6Shards, true}} {
+		if entry.sm == nil {
+			continue
+		}
+		for i := range entry.sm.GroupIDs() {
+			name, nameErr := lm.namer.RuleName(NameData{Family: Family(entry.ipv6), Index: i, Site: site})
+			if nameErr == nil {
+				expectedRuleNames[name] = true
+			}
+		}
+	}
+
 	if err := lm.ensureRulesForFamily(ctx, site, false, existingByID, v4Shards); err != nil {
 		return err
 	}
@@ -57,6 +78,26 @@ func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards,
 		if err := lm.ensureRulesForFamily(ctx, site, true, existingByID, v6Shards); err != nil {
 			return err
 		}
+	}
+
+	// API-level orphan sweep: delete any pre-existing rule with our description
+	// that isn't for a currently-active shard. Uses existingRules (the snapshot
+	// taken before any creates above) so newly-created rules are never swept.
+	for _, r := range existingRules {
+		if r.Description != lm.cfg.Description {
+			continue
+		}
+		if expectedRuleNames[r.Name] {
+			continue
+		}
+		if delErr := lm.ctrl.DeleteFirewallRule(ctx, site, r.ID); delErr != nil {
+			lm.log.Warn().Err(delErr).Str("rule", r.Name).Str("site", site).
+				Msg("failed to delete API-orphaned legacy rule")
+		} else {
+			lm.log.Info().Str("rule", r.Name).Str("site", site).
+				Msg("deleted API-orphaned legacy rule (matches managed description, not in current config)")
+		}
+		_ = lm.store.DeletePolicy(r.Name)
 	}
 	return nil
 }
