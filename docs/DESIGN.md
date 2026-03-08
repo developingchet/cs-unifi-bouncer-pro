@@ -131,12 +131,13 @@ The UniFi zone policy API has two portFilter constraints:
 
 When a zone pair is removed from `ZONE_PAIRS` or `CLOUDFLARE_ZONE_PAIRS`, previously managed firewall objects are automatically cleaned up:
 
-- **Block policies**: at `EnsurePolicies` time, any policy recorded in bbolt for the site under mode `zone` whose name is no longer produced by the current config is deleted from UniFi and removed from bbolt — but only if it bears the managed description (`cfg.Description`).
-- **Block port TMLs**: at `Bootstrap` time, Traffic Matching Lists named `crowdsec-ports-src-*` or `crowdsec-ports-dst-*` not required by any current zone pair are deleted.
-- **Cloudflare ALLOW policies**: at each Cloudflare sync, policies with the `crowdsec-whitelist-cloudflare-` prefix not in the current `CLOUDFLARE_ZONE_PAIRS` set are deleted. Policies with our managed description or an empty description (old policies created before description support) are considered bouncer-owned. UniFi's auto-created `(Return)` mirror policies are cleaned up when their corresponding forward policy is orphaned.
-- **Cloudflare port TMLs**: at each Cloudflare sync, TMLs named `crowdsec-whitelist-cloudflare-srcports-*` or `crowdsec-whitelist-cloudflare-dstports-*` not required by any current Cloudflare zone pair are deleted.
+- **Block policies**: at `EnsurePolicies` time, two complementary sweeps run. Pass 1 (bbolt-based): any policy recorded in bbolt for the site under mode `zone` whose name is no longer produced by the current config is deleted from UniFi and removed from bbolt — but only if it bears the managed description and `Action == "BLOCK"`. Pass 2 (API-based): any API policy with the managed description and `Action == "BLOCK"` that is not in the expected name set is deleted, even if bbolt has no record of it (wiped database, mode switch, prior installation).
+- **Legacy rules**: at `EnsureRules` time, the API-level orphan sweep deletes any pre-existing rule whose `Description`, `Action`, `Ruleset`, and non-empty `SrcFirewallGroupIDs` all match what the bouncer creates, but whose name is not in the currently-expected shard name set.
+- **Block port TMLs**: at `Bootstrap` time, Traffic Matching Lists named `crowdsec-ports-src-*`, `crowdsec-ports-dst-*`, `crowdsec-dstips-v4-*`, and `crowdsec-dstips-v6-*` not required by any current zone pair are deleted.
+- **Cloudflare ALLOW policies**: at each Cloudflare sync, policies with the `crowdsec-whitelist-cloudflare-` prefix not in the current `CLOUDFLARE_ZONE_PAIRS` set are deleted. Policies with our managed description or an empty description (old policies created before description support) are considered bouncer-owned. UniFi's auto-created `(Return)` mirror policies are cleaned up when their corresponding forward policy is orphaned. When `CLOUDFLARE_WHITELIST_ENABLED=false`, `Manager.Drain()` removes all `crowdsec-whitelist-cloudflare-*` policies and TMLs at startup.
+- **Cloudflare port TMLs**: at each Cloudflare sync, TMLs named `crowdsec-whitelist-cloudflare-srcports-*`, `crowdsec-whitelist-cloudflare-dstports-*`, and `crowdsec-whitelist-cloudflare-dstips-*` not required by any current Cloudflare zone pair are deleted.
 
-User-created policies and TMLs are never touched — the description check is the guard.
+User-created policies and TMLs are never touched — ownership requires matching both the managed description **and** the structural signature of objects the bouncer creates (action, ruleset, source group).
 
 ### Shard managers
 

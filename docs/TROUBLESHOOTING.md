@@ -496,13 +496,14 @@ The reconcile command compares bbolt state with the current UniFi firewall state
 
 **Symptom:** After removing an entry from `ZONE_PAIRS` or `CLOUDFLARE_ZONE_PAIRS` and restarting, the old block or ALLOW policies (and any associated port-filter Traffic Matching Lists) remain visible in the UniFi console.
 
-**Cause:** In versions before v1.1.2 the bouncer did not sweep for orphaned managed objects. Starting with v1.1.2, orphan cleanup runs automatically:
+**Cause:** In versions before v1.1.2 the bouncer did not sweep for orphaned managed objects. Starting with v1.1.2, orphan cleanup runs automatically. v1.2.2 extends this with API-level sweeps that work even when the bbolt database has no record of the object.
 
-- **Block policies** (`ZONE_PAIRS`): at every `EnsurePolicies` call, policies tracked in bbolt for the site but no longer produced by the current config are deleted from UniFi and removed from bbolt.
-- **Cloudflare ALLOW policies** (`CLOUDFLARE_ZONE_PAIRS`): at every Cloudflare sync, policies with the managed description and naming prefix (`crowdsec-whitelist-cloudflare-`) that are no longer in `CLOUDFLARE_ZONE_PAIRS` are deleted. Since v1.1.8, orphan detection is ID-based: only the exact policy returned by the ensure call is protected, so stale duplicate-named policies are also correctly removed.
+- **Block policies** (`ZONE_PAIRS`): at every `EnsurePolicies` call, policies tracked in bbolt for the site but no longer produced by the current config are deleted from UniFi and removed from bbolt. Since v1.2.2, a second API-level pass also sweeps any policy bearing the managed description and `BLOCK` action that is not in the expected set — catching orphans from a wiped database, a mode switch (zone→legacy or back), or a prior installation.
+- **Legacy rules**: since v1.2.2, `EnsureRules` sweeps for orphaned rules with the managed description, the configured block action (drop/reject), a ruleset in `WAN_IN`/`WANv6_IN`, and a non-empty source group — the combination of fields the bouncer always sets when creating a rule.
+- **Cloudflare ALLOW policies** (`CLOUDFLARE_ZONE_PAIRS`): at every Cloudflare sync, policies with the managed description and naming prefix (`crowdsec-whitelist-cloudflare-`) that are no longer in `CLOUDFLARE_ZONE_PAIRS` are deleted. Since v1.1.8, orphan detection is ID-based: only the exact policy returned by the ensure call is protected, so stale duplicate-named policies are also correctly removed. Since v1.2.2, setting `CLOUDFLARE_WHITELIST_ENABLED=false` automatically drains **all** Cloudflare whitelist policies and TMLs on startup — no manual cleanup needed when disabling the feature.
 - **Port-filter TMLs** (both `ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS`): TMLs named `crowdsec-ports-src-*`, `crowdsec-ports-dst-*`, `crowdsec-whitelist-cloudflare-srcports-*`, and `crowdsec-whitelist-cloudflare-dstports-*` that no longer correspond to a configured zone pair are deleted.
 
-The cleanup only targets objects that bear the bouncer's managed description — user-created policies are never touched.
+The cleanup only targets objects that bear the bouncer's managed description **and** match the structural signature of what the bouncer creates (action, ruleset, source group). User-created policies are never touched.
 
 **Action (upgrade from < v1.1.2):** Restart the bouncer after upgrading. The orphan sweep runs at startup and will remove the stale objects automatically. No manual deletion is needed.
 
