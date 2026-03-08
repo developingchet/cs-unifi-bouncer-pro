@@ -665,3 +665,39 @@ func TestZoneManager_EnsurePolicies_UnmanagedAPIPolicy_Preserved(t *testing.T) {
 		t.Errorf("DeleteZonePolicy calls: got %d, want 0 (unmanaged policy must be preserved)", got)
 	}
 }
+
+// TestZoneManager_EnsurePolicies_AllowPolicy_Preserved verifies that an ALLOW
+// policy (e.g. a Cloudflare whitelist policy) bearing our description is never
+// deleted by the block-policy orphan sweep, even if it carries our description.
+// The bouncer's block manager only creates BLOCK actions; ALLOW is out of scope.
+func TestZoneManager_EnsurePolicies_AllowPolicy_Preserved(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore()
+	namer := zoneTestNamer(t)
+
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	zm := newTestZoneManager(ctrl, store, namer)
+
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	// An ALLOW policy with our block description — must never be touched.
+	// (In practice this shouldn't exist, but if it does, we must not delete it.)
+	allowPolicy := controller.ZonePolicy{
+		ID:          "allow-policy-id",
+		Name:        "crowdsec-policy-wan-dmz-v4-0",
+		Description: "test", // matches zm.cfg.Description
+		Action:      "ALLOW",
+		Enabled:     true,
+	}
+	ctrl.SetPolicies(testSite, []controller.ZonePolicy{allowPolicy})
+
+	if err := zm.EnsurePolicies(context.Background(), testSite, v4, nil); err != nil {
+		t.Fatalf("EnsurePolicies: %v", err)
+	}
+
+	if got := ctrl.Calls("DeleteZonePolicy"); got != 0 {
+		t.Errorf("DeleteZonePolicy calls: got %d, want 0 (ALLOW policy must never be deleted by block sweep)", got)
+	}
+}

@@ -83,9 +83,21 @@ func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards,
 	// API-level orphan sweep: delete any pre-existing rule with our description
 	// that isn't for a currently-active shard. Uses existingRules (the snapshot
 	// taken before any creates above) so newly-created rules are never swept.
+	// Guards: description, action, ruleset, and non-empty source group must all
+	// match what the bouncer creates — a rule the bouncer couldn't have made is
+	// never touched even if its description coincidentally matches.
 	for _, r := range existingRules {
 		if r.Description != lm.cfg.Description {
 			continue
+		}
+		if r.Action != lm.cfg.BlockAction {
+			continue // the bouncer only creates rules with the configured block action
+		}
+		if r.Ruleset != lm.cfg.RulesetV4 && r.Ruleset != lm.cfg.RulesetV6 {
+			continue // the bouncer only creates rules in the configured rulesets
+		}
+		if len(r.SrcFirewallGroupIDs) == 0 {
+			continue // every bouncer rule has exactly one source group
 		}
 		if expectedRuleNames[r.Name] {
 			continue

@@ -302,12 +302,14 @@ func TestLegacyManager_EnsureRules_OrphanedAPIRule_Deleted(t *testing.T) {
 
 	// Pre-populate the API with a rule that has our description but is for shard
 	// index 9 — far beyond any active shard. bbolt has no record of it.
+	// The rule matches all structural guards the bouncer applies when creating rules.
 	orphan := controller.FirewallRule{
-		ID:          "orphan-rule-id",
-		Name:        "crowdsec-drop-v4-9",
-		Description: "test", // matches lm.cfg.Description
-		Ruleset:     "WAN_IN",
-		Action:      "drop",
+		ID:                  "orphan-rule-id",
+		Name:                "crowdsec-drop-v4-9",
+		Description:         "test", // matches lm.cfg.Description
+		Ruleset:             "WAN_IN",
+		Action:              "drop",
+		SrcFirewallGroupIDs: []string{"some-group-id"},
 	}
 	ctrl.SetRules(testSite, []controller.FirewallRule{orphan})
 
@@ -356,6 +358,66 @@ func TestLegacyManager_EnsureRules_UnmanagedAPIRule_Preserved(t *testing.T) {
 
 	if got := ctrl.Calls("DeleteFirewallRule"); got != 0 {
 		t.Errorf("DeleteFirewallRule calls: got %d, want 0 (unmanaged rule must be preserved)", got)
+	}
+}
+
+// TestLegacyManager_EnsureRules_WrongRuleset_Preserved verifies that a rule
+// with our description but in a ruleset the bouncer never writes to is not deleted.
+func TestLegacyManager_EnsureRules_WrongRuleset_Preserved(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	namer := testNamer(t)
+
+	v4 := ensuredV4Shard(t, ctrl, store)
+	lm := newTestLegacyManager(ctrl, store, namer)
+
+	// Rule has our description and action but lives in a ruleset we don't manage.
+	wrongRulesetRule := controller.FirewallRule{
+		ID:                  "wrong-ruleset-id",
+		Name:                "crowdsec-drop-v4-9",
+		Description:         "test",
+		Action:              "drop",
+		Ruleset:             "LAN_IN", // not WAN_IN or WANv6_IN
+		SrcFirewallGroupIDs: []string{"some-group"},
+	}
+	ctrl.SetRules(testSite, []controller.FirewallRule{wrongRulesetRule})
+
+	if err := lm.EnsureRules(context.Background(), testSite, v4, nil); err != nil {
+		t.Fatalf("EnsureRules: %v", err)
+	}
+
+	if got := ctrl.Calls("DeleteFirewallRule"); got != 0 {
+		t.Errorf("DeleteFirewallRule calls: got %d, want 0 (wrong-ruleset rule must be preserved)", got)
+	}
+}
+
+// TestLegacyManager_EnsureRules_NoSrcGroup_Preserved verifies that a rule with
+// our description but no SrcFirewallGroupIDs (which the bouncer always sets) is
+// not deleted — it could not have been created by the bouncer.
+func TestLegacyManager_EnsureRules_NoSrcGroup_Preserved(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	namer := testNamer(t)
+
+	v4 := ensuredV4Shard(t, ctrl, store)
+	lm := newTestLegacyManager(ctrl, store, namer)
+
+	noSrcGroupRule := controller.FirewallRule{
+		ID:                  "no-src-group-id",
+		Name:                "crowdsec-drop-v4-9",
+		Description:         "test",
+		Action:              "drop",
+		Ruleset:             "WAN_IN",
+		SrcFirewallGroupIDs: nil, // the bouncer always sets at least one group
+	}
+	ctrl.SetRules(testSite, []controller.FirewallRule{noSrcGroupRule})
+
+	if err := lm.EnsureRules(context.Background(), testSite, v4, nil); err != nil {
+		t.Fatalf("EnsureRules: %v", err)
+	}
+
+	if got := ctrl.Calls("DeleteFirewallRule"); got != 0 {
+		t.Errorf("DeleteFirewallRule calls: got %d, want 0 (no-src-group rule must be preserved)", got)
 	}
 }
 

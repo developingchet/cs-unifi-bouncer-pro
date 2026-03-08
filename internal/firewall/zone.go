@@ -799,7 +799,7 @@ func (zm *ZoneManager) cleanupOrphanedBlockPolicies(ctx context.Context, site st
 				continue
 			}
 			// Orphan: in bbolt for this site but not expected by current config.
-			if p, exists := existingByID[rec.UnifiID]; exists && p.Description == zm.cfg.Description {
+			if p, exists := existingByID[rec.UnifiID]; exists && p.Description == zm.cfg.Description && p.Action == "BLOCK" {
 				if delErr := zm.ctrl.DeleteZonePolicy(ctx, site, rec.UnifiID); delErr != nil {
 					zm.log.Warn().Err(delErr).Str("policy", name).Msg("failed to delete orphaned zone policy")
 				} else {
@@ -817,12 +817,17 @@ func (zm *ZoneManager) cleanupOrphanedBlockPolicies(ctx context.Context, site st
 
 	// Pass 2 — API-based: catches orphans that have no bbolt record (wiped bbolt,
 	// prior bouncer version, or leftover from a mode switch).
+	// Guards: description AND action must match what the bouncer creates — this
+	// ensures a user-created ALLOW/REJECT policy with our description is never touched.
 	for id, p := range existingByID {
 		if deletedIDs[id] {
 			continue // already handled in pass 1
 		}
 		if p.Description != zm.cfg.Description {
 			continue
+		}
+		if p.Action != "BLOCK" {
+			continue // the block manager only ever creates BLOCK zone policies
 		}
 		if expectedNames[p.Name] {
 			continue
