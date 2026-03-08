@@ -217,6 +217,87 @@ func TestParseCloudflareZonePairs(t *testing.T) {
 	}
 }
 
+// TestParseCloudflareZonePairs_DstIPs verifies that the @IP suffix is parsed
+// into DstIPs for CLOUDFLARE_ZONE_PAIRS — the same path used by ZONE_PAIRS.
+// This is the coverage gap that allowed the DstIPs-not-applied bug to ship.
+func TestParseCloudflareZonePairs_DstIPs(t *testing.T) {
+	cases := []struct {
+		name       string
+		input      string
+		wantSrc    string
+		wantDst    string
+		wantDstIPs []string
+		wantDstPorts []int
+	}{
+		{
+			name:       "plain IP",
+			input:      "External->Dmz@10.0.5.251",
+			wantSrc:    "External",
+			wantDst:    "Dmz",
+			wantDstIPs: []string{"10.0.5.251"},
+		},
+		{
+			name:         "dst port + dst IP",
+			input:        "External->Dmz:443@10.0.5.251",
+			wantSrc:      "External",
+			wantDst:      "Dmz",
+			wantDstPorts: []int{443},
+			wantDstIPs:   []string{"10.0.5.251"},
+		},
+		{
+			name:       "CIDR",
+			input:      "External->Dmz@10.0.1.0/24",
+			wantSrc:    "External",
+			wantDst:    "Dmz",
+			wantDstIPs: []string{"10.0.1.0/24"},
+		},
+		{
+			name:       "multiple IPs",
+			input:      "External->Dmz@10.0.5.251,10.0.5.252",
+			wantSrc:    "External",
+			wantDst:    "Dmz",
+			wantDstIPs: []string{"10.0.5.251", "10.0.5.252"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{CloudflareZonePairs: []string{tc.input}}
+			pairs, err := cfg.ParseCloudflareZonePairs()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(pairs) != 1 {
+				t.Fatalf("expected 1 pair, got %d", len(pairs))
+			}
+			p := pairs[0]
+			if p.Src != tc.wantSrc {
+				t.Errorf("Src: got %q, want %q", p.Src, tc.wantSrc)
+			}
+			if p.Dst != tc.wantDst {
+				t.Errorf("Dst: got %q, want %q", p.Dst, tc.wantDst)
+			}
+			if len(p.DstIPs) != len(tc.wantDstIPs) {
+				t.Errorf("DstIPs len: got %d, want %d (%v)", len(p.DstIPs), len(tc.wantDstIPs), p.DstIPs)
+			} else {
+				for i, ip := range tc.wantDstIPs {
+					if p.DstIPs[i] != ip {
+						t.Errorf("DstIPs[%d]: got %q, want %q", i, p.DstIPs[i], ip)
+					}
+				}
+			}
+			if len(p.DstPorts) != len(tc.wantDstPorts) {
+				t.Errorf("DstPorts len: got %d, want %d", len(p.DstPorts), len(tc.wantDstPorts))
+			} else {
+				for i, port := range tc.wantDstPorts {
+					if p.DstPorts[i] != port {
+						t.Errorf("DstPorts[%d]: got %d, want %d", i, p.DstPorts[i], port)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestSplitZonePairList(t *testing.T) {
 	cases := []struct {
 		name  string

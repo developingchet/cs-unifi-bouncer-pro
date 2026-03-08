@@ -219,7 +219,7 @@ func TestEnsureAllowPolicy_Creates(t *testing.T) {
 	}
 
 	// No policies exist initially
-	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "", "", "IPV4", "test-allow-policy", nil)
+	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "", "", "", "IPV4", "test-allow-policy", nil)
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestEnsureAllowPolicy_TMLIDPopulated(t *testing.T) {
 
 	// Get the created policy from mock's policies list after CreateZonePolicy
 	// We need to verify the policy struct passed to CreateZonePolicy has correct TML ID
-	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "", "", "IPV4", "test-allow-policy", nil)
+	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "", "", "", "IPV4", "test-allow-policy", nil)
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestEnsureAllowPolicy_NoOpWhenCurrent(t *testing.T) {
 	}
 	ctrl.SetPolicies("test-site", []controller.ZonePolicy{existingPolicy})
 
-	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "", "", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
+	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-123", "", "", "", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestEnsureAllowPolicy_UpdatesWhenTMLChanged(t *testing.T) {
 	}
 	ctrl.SetPolicies("test-site", []controller.ZonePolicy{existingPolicy})
 
-	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "new-tml-id", "", "", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
+	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "new-tml-id", "", "", "", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestEnsureAllowPolicy_WithSrcDstPorts_Creates(t *testing.T) {
 		DstZoneID: "zone-internal",
 	}
 
-	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "tml-src-port-1", "tml-dst-port-2", "IPV4", "test-allow-policy", nil)
+	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "tml-src-port-1", "tml-dst-port-2", "", "IPV4", "test-allow-policy", nil)
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -475,7 +475,7 @@ func TestEnsureAllowPolicy_WithPorts_NoOpWhenCurrent(t *testing.T) {
 	}
 	ctrl.SetPolicies("test-site", []controller.ZonePolicy{existingPolicy})
 
-	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "tml-src-port-1", "tml-dst-port-2", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
+	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "tml-src-port-1", "tml-dst-port-2", "", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -707,7 +707,7 @@ func TestEnsureAllowPolicy_WithPorts_UpdatesWhenChanged(t *testing.T) {
 	}
 	ctrl.SetPolicies("test-site", []controller.ZonePolicy{existingPolicy})
 
-	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "new-src-port-tml", "new-dst-port-tml", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
+	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "new-src-port-tml", "new-dst-port-tml", "", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
 	if err != nil {
 		t.Fatalf("ensureAllowPolicy failed: %v", err)
 	}
@@ -734,5 +734,150 @@ func TestEnsureAllowPolicy_WithPorts_UpdatesWhenChanged(t *testing.T) {
 	}
 	if policies[0].DstPortTMLID != "new-dst-port-tml" {
 		t.Errorf("recreated DstPortTMLID: got %q, want %q", policies[0].DstPortTMLID, "new-dst-port-tml")
+	}
+}
+
+// TestSyncSite_DstIPs_CreatesDstIPTML verifies the end-to-end path that was
+// broken by the DstIPs bug: when a ZonePairConfig has DstIPs, syncSite must
+// create a destination IP TML and set DstIPTMLID on the resulting ALLOW policy.
+// This is the integration coverage gap that allowed the bug to ship undetected.
+func TestSyncSite_DstIPs_CreatesDstIPTML(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	log := zerolog.Nop()
+	provider := NewCloudflareProvider("", "")
+	mgr := NewManager(ctrl, []string{"test-site"}, provider, log)
+	ctx := context.Background()
+
+	// Pre-populate the shared Cloudflare IP TMLs.
+	ctrl.SetTMLs("test-site", []controller.TrafficMatchingList{
+		{ID: "tml-v4", Name: TMLNameV4, Type: "IPV4_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Type: "SUBNET", Value: "1.1.1.0/24"}}},
+		{ID: "tml-v6", Name: TMLNameV6, Type: "IPV6_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Type: "SUBNET", Value: "2606:4700::/32"}}},
+	})
+
+	pair := ZonePairConfig{
+		SrcName:   "External",
+		DstName:   "Dmz",
+		SrcZoneID: "zone-external",
+		DstZoneID: "zone-dmz",
+		DstPorts:  []int{443},
+		DstIPs:    []string{"10.0.5.251"}, // IPv4 only
+	}
+
+	err := mgr.syncSite(ctx, "test-site", []string{"1.1.1.0/24"}, []string{"2606:4700::/32"}, []ZonePairConfig{pair})
+	if err != nil {
+		t.Fatalf("syncSite failed: %v", err)
+	}
+
+	// A destination IP TML must have been created for the IPv4 address.
+	tmls, err := ctrl.ListTrafficMatchingLists(ctx, "test-site")
+	if err != nil {
+		t.Fatalf("ListTrafficMatchingLists failed: %v", err)
+	}
+	var dstIPTML *controller.TrafficMatchingList
+	for i := range tmls {
+		if tmls[i].Name == "crowdsec-whitelist-cloudflare-dstips-External-Dmz-v4" {
+			dstIPTML = &tmls[i]
+			break
+		}
+	}
+	if dstIPTML == nil {
+		t.Fatal("expected dstips-External-Dmz-v4 TML to be created, but it was not found")
+	}
+	if len(dstIPTML.Items) != 1 || dstIPTML.Items[0].Value != "10.0.5.251" {
+		t.Errorf("dstips TML items: got %v, want [{10.0.5.251}]", dstIPTML.Items)
+	}
+
+	// The v4 ALLOW policy must have DstIPTMLID set to the destination IP TML.
+	policies, err := ctrl.ListZonePolicies(ctx, "test-site")
+	if err != nil {
+		t.Fatalf("ListZonePolicies failed: %v", err)
+	}
+	var v4Policy *controller.ZonePolicy
+	for i := range policies {
+		if policies[i].Name == "crowdsec-whitelist-cloudflare-External-Dmz-v4" {
+			v4Policy = &policies[i]
+			break
+		}
+	}
+	if v4Policy == nil {
+		t.Fatal("expected v4 ALLOW policy to be created")
+	}
+	if v4Policy.DstIPTMLID == "" {
+		t.Error("v4 ALLOW policy DstIPTMLID is empty — destination IP filter was not applied")
+	}
+	if v4Policy.DstIPTMLID != dstIPTML.ID {
+		t.Errorf("v4 policy DstIPTMLID: got %q, want %q", v4Policy.DstIPTMLID, dstIPTML.ID)
+	}
+
+	// The v6 ALLOW policy must NOT have a DstIPTMLID (no IPv6 addresses configured).
+	var v6Policy *controller.ZonePolicy
+	for i := range policies {
+		if policies[i].Name == "crowdsec-whitelist-cloudflare-External-Dmz-v6" {
+			v6Policy = &policies[i]
+			break
+		}
+	}
+	if v6Policy == nil {
+		t.Fatal("expected v6 ALLOW policy to be created")
+	}
+	if v6Policy.DstIPTMLID != "" {
+		t.Errorf("v6 ALLOW policy DstIPTMLID should be empty (no IPv6 dst IPs), got %q", v6Policy.DstIPTMLID)
+	}
+}
+
+// TestEnsureAllowPolicy_DstIPTMLID_ChangeTriggerRecreate verifies that changing
+// DstIPTMLID on an existing policy triggers delete+recreate (not PUT), because
+// the UniFi PUT endpoint does not accept destination trafficFilter changes.
+func TestEnsureAllowPolicy_DstIPTMLID_ChangeTriggerRecreate(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	log := zerolog.Nop()
+	provider := NewCloudflareProvider("", "")
+	mgr := NewManager(ctrl, []string{"test-site"}, provider, log)
+	ctx := context.Background()
+
+	pair := ZonePairConfig{
+		SrcName:   "External",
+		DstName:   "Dmz",
+		SrcZoneID: "zone-external",
+		DstZoneID: "zone-dmz",
+	}
+
+	existingPolicy := controller.ZonePolicy{
+		ID:                     "policy-123",
+		Name:                   "test-allow-policy",
+		Enabled:                true,
+		Action:                 "ALLOW",
+		SrcZone:                "zone-external",
+		DstZone:                "zone-dmz",
+		IPVersion:              "IPV4",
+		TrafficMatchingListIDs: []string{"tml-ip-123"},
+		DstIPTMLID:             "old-dst-ip-tml",
+	}
+	ctrl.SetPolicies("test-site", []controller.ZonePolicy{existingPolicy})
+
+	_, err := mgr.ensureAllowPolicy(ctx, "test-site", pair, "tml-ip-123", "", "", "new-dst-ip-tml", "IPV4", "test-allow-policy", []controller.ZonePolicy{existingPolicy})
+	if err != nil {
+		t.Fatalf("ensureAllowPolicy failed: %v", err)
+	}
+
+	// DstIPTMLID changed → must use delete+recreate, not PUT.
+	if got := ctrl.Calls("UpdateZonePolicy"); got != 0 {
+		t.Errorf("UpdateZonePolicy calls: got %d, want 0 (DstIPTMLID change requires delete+recreate)", got)
+	}
+	if got := ctrl.Calls("DeleteZonePolicy"); got != 1 {
+		t.Errorf("DeleteZonePolicy calls: got %d, want 1", got)
+	}
+	if got := ctrl.Calls("CreateZonePolicy"); got != 1 {
+		t.Errorf("CreateZonePolicy calls: got %d, want 1", got)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, "test-site")
+	if err != nil {
+		t.Fatalf("ListZonePolicies failed: %v", err)
+	}
+	if len(policies) != 1 {
+		t.Fatalf("expected 1 policy after recreate, got %d", len(policies))
+	}
+	if policies[0].DstIPTMLID != "new-dst-ip-tml" {
+		t.Errorf("recreated DstIPTMLID: got %q, want %q", policies[0].DstIPTMLID, "new-dst-ip-tml")
 	}
 }

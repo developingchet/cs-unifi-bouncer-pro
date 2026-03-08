@@ -257,7 +257,7 @@ When enabled, the bouncer periodically fetches current Cloudflare IP ranges and 
 | `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | No | How often to re-fetch Cloudflare IP ranges and update the IP TMLs (default: weekly). |
 | `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | No | URL to fetch the current Cloudflare IPv4 CIDR list. |
 | `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | No | URL to fetch the current Cloudflare IPv6 CIDR list. |
-| `CLOUDFLARE_ZONE_PAIRS` | — | If enabled | Comma-separated zone pairs in `src[:sport,...]->dst[:dport,...]` format. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. Determines which zone pair(s) the Cloudflare ALLOW policies are created for. Supports the same port filter syntax as `ZONE_PAIRS`. |
+| `CLOUDFLARE_ZONE_PAIRS` | — | If enabled | Comma-separated zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]` format. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. Determines which zone pair(s) the Cloudflare ALLOW policies are created for. Supports the same port filter and destination IP filter syntax as `ZONE_PAIRS`. |
 
 ```bash
 # Minimal — ALLOW Cloudflare traffic from External to Internal on any port
@@ -270,11 +270,14 @@ CLOUDFLARE_ZONE_PAIRS=External->Internal:80,443
 # Full control — restrict both source and destination ports
 CLOUDFLARE_ZONE_PAIRS=External:80,443->Internal:8080,8443
 
+# Scope ALLOW to a specific destination host (e.g. a reverse proxy at 10.0.5.251)
+CLOUDFLARE_ZONE_PAIRS=External->Dmz:80,443@10.0.5.251
+
 # Multiple zone pairs
 CLOUDFLARE_ZONE_PAIRS=External->Internal,External->DMZ
 ```
 
-The IPv4 and IPv6 TMLs are named `crowdsec-whitelist-cloudflare-v4` and `crowdsec-whitelist-cloudflare-v6`. ALLOW policies are named `crowdsec-whitelist-cloudflare-External-{DstName}-v4` and `crowdsec-whitelist-cloudflare-External-{DstName}-v6`.
+The shared IPv4 and IPv6 source IP TMLs are named `crowdsec-whitelist-cloudflare-v4` and `crowdsec-whitelist-cloudflare-v6`. ALLOW policies are named `crowdsec-whitelist-cloudflare-External-{DstName}-v4` and `crowdsec-whitelist-cloudflare-External-{DstName}-v6`. When destination IP filtering is configured via `@IP`, per-pair destination IP TMLs are also created: `crowdsec-whitelist-cloudflare-dstips-{Src}-{Dst}-v4` and `crowdsec-whitelist-cloudflare-dstips-{Src}-{Dst}-v6`.
 
 Zone names in `CLOUDFLARE_ZONE_PAIRS` are resolved independently of `ZONE_PAIRS` — they do not need to be the same pairs.
 

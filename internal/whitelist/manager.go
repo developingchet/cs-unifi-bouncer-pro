@@ -3,6 +3,7 @@ package whitelist
 import (
 	"context"
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,14 +30,15 @@ func NewManager(ctrl controller.Controller, sites []string, provider *Cloudflare
 	return &Manager{ctrl: ctrl, sites: sites, provider: provider, log: log}
 }
 
-// ZonePairConfig holds zone IDs for a source/destination pair, with optional port filters.
+// ZonePairConfig holds zone IDs for a source/destination pair, with optional port and IP filters.
 type ZonePairConfig struct {
 	SrcName   string
 	DstName   string
 	SrcZoneID string
 	DstZoneID string
-	SrcPorts  []int // empty = any source ports
-	DstPorts  []int // empty = any destination ports
+	SrcPorts  []int    // empty = any source ports
+	DstPorts  []int    // empty = any destination ports
+	DstIPs    []string // empty = any destination IPs; CIDRs or plain IPs, IPv4 or IPv6
 }
 
 // Sync fetches current Cloudflare IPs and ensures TMLs are up to date.
@@ -119,6 +121,32 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 			}
 		}
 
+		// Create/ensure destination IP TMLs (one per IP family) when DstIPs are configured.
+		var dstIPTMLIDv4, dstIPTMLIDv6 string
+		if len(pair.DstIPs) > 0 {
+			v4IPs, v6IPs := splitByFamily(pair.DstIPs)
+			if len(v4IPs) > 0 {
+				dstIPv4TMLName := "crowdsec-whitelist-cloudflare-dstips-" + pair.SrcName + "-" + pair.DstName + "-v4"
+				t, ipErr := m.ensureTML(ctx, site, dstIPv4TMLName, "IPV4_ADDRESSES", ipsToItems(v4IPs))
+				if ipErr != nil {
+					m.log.Error().Err(ipErr).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure dst IP v4 TML failed")
+				} else {
+					dstIPTMLIDv4 = t.ID
+					expectedTMLNames[dstIPv4TMLName] = true
+				}
+			}
+			if len(v6IPs) > 0 {
+				dstIPv6TMLName := "crowdsec-whitelist-cloudflare-dstips-" + pair.SrcName + "-" + pair.DstName + "-v6"
+				t, ipErr := m.ensureTML(ctx, site, dstIPv6TMLName, "IPV6_ADDRESSES", ipsToItems(v6IPs))
+				if ipErr != nil {
+					m.log.Error().Err(ipErr).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure dst IP v6 TML failed")
+				} else {
+					dstIPTMLIDv6 = t.ID
+					expectedTMLNames[dstIPv6TMLName] = true
+				}
+			}
+		}
+
 		v4Name := "crowdsec-whitelist-cloudflare-External-" + pair.DstName + "-v4"
 		v6Name := "crowdsec-whitelist-cloudflare-External-" + pair.DstName + "-v6"
 		// Register base names so their UniFi-managed (Return) mirrors are preserved.
@@ -126,13 +154,13 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 		managedBaseNames[v6Name] = true
 
 		var pairPolicyIDs []string
-		if p, err := m.ensureAllowPolicy(ctx, site, pair, tmlV4.ID, srcPortTMLID, dstPortTMLID, "IPV4", v4Name, existingPolicies); err != nil {
+		if p, err := m.ensureAllowPolicy(ctx, site, pair, tmlV4.ID, srcPortTMLID, dstPortTMLID, dstIPTMLIDv4, "IPV4", v4Name, existingPolicies); err != nil {
 			m.log.Error().Err(err).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure v4 allow policy failed")
 		} else {
 			managedPolicyIDs[p.ID] = true
 			pairPolicyIDs = append(pairPolicyIDs, p.ID)
 		}
-		if p, err := m.ensureAllowPolicy(ctx, site, pair, tmlV6.ID, srcPortTMLID, dstPortTMLID, "IPV6", v6Name, existingPolicies); err != nil {
+		if p, err := m.ensureAllowPolicy(ctx, site, pair, tmlV6.ID, srcPortTMLID, dstPortTMLID, dstIPTMLIDv6, "IPV6", v6Name, existingPolicies); err != nil {
 			m.log.Error().Err(err).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure v6 allow policy failed")
 		} else {
 			managedPolicyIDs[p.ID] = true
@@ -195,8 +223,8 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 			if !strings.HasPrefix(t.Name, portTMLPrefix) {
 				continue
 			}
-			// Only target port-filter TMLs (srcports / dstports), not the IP TMLs.
-			if !strings.Contains(t.Name, "srcports-") && !strings.Contains(t.Name, "dstports-") {
+			// Only target per-pair filter TMLs (srcports / dstports / dstips), not the IP TMLs.
+			if !strings.Contains(t.Name, "srcports-") && !strings.Contains(t.Name, "dstports-") && !strings.Contains(t.Name, "dstips-") {
 				continue
 			}
 			if expectedTMLNames[t.Name] {
@@ -212,6 +240,39 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 	}
 
 	return nil
+}
+
+// splitByFamily splits a slice of IPs/CIDRs into IPv4 and IPv6 buckets.
+func splitByFamily(ips []string) (v4, v6 []string) {
+	for _, ip := range ips {
+		addr := ip
+		if idx := strings.Index(ip, "/"); idx != -1 {
+			addr = ip[:idx]
+		}
+		parsed := net.ParseIP(addr)
+		if parsed == nil {
+			continue
+		}
+		if parsed.To4() != nil {
+			v4 = append(v4, ip)
+		} else {
+			v6 = append(v6, ip)
+		}
+	}
+	return
+}
+
+// ipsToItems converts a slice of IP/CIDR strings to TrafficMatchingListItems.
+func ipsToItems(ips []string) []controller.TrafficMatchingListItem {
+	items := make([]controller.TrafficMatchingListItem, 0, len(ips))
+	for _, ip := range ips {
+		t := "IP_ADDRESS"
+		if strings.Contains(ip, "/") {
+			t = "SUBNET"
+		}
+		items = append(items, controller.TrafficMatchingListItem{Type: t, Value: ip})
+	}
+	return items
 }
 
 // portsToItems converts a slice of port integers to TrafficMatchingListItems.
@@ -263,7 +324,7 @@ func (m *Manager) ensureTML(ctx context.Context, site, name, tmlType string, ite
 	return *found, nil
 }
 
-func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZonePairConfig, ipTMLID, srcPortTMLID, dstPortTMLID, ipVersion, policyName string, existingPolicies []controller.ZonePolicy) (controller.ZonePolicy, error) {
+func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZonePairConfig, ipTMLID, srcPortTMLID, dstPortTMLID, dstIPTMLID, ipVersion, policyName string, existingPolicies []controller.ZonePolicy) (controller.ZonePolicy, error) {
 	// Guard against empty TML ID - Cloudflare ALLOW policies MUST have a source filter
 	if ipTMLID == "" {
 		return controller.ZonePolicy{}, fmt.Errorf("Cloudflare TML ID is empty for policy %s in site %s — cannot create ALLOW policy without source filter", policyName, site)
@@ -271,27 +332,27 @@ func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZoneP
 
 	for _, p := range existingPolicies {
 		if p.Name == policyName {
-			// Already exists; check if IP TML ID and port TML IDs all match.
+			// Already exists; check if IP TML ID, port TML IDs, and dst IP TML ID all match.
 			if len(p.TrafficMatchingListIDs) > 0 && p.TrafficMatchingListIDs[0] == ipTMLID &&
-				p.SrcPortTMLID == srcPortTMLID && p.DstPortTMLID == dstPortTMLID {
+				p.SrcPortTMLID == srcPortTMLID && p.DstPortTMLID == dstPortTMLID && p.DstIPTMLID == dstIPTMLID {
 				return p, nil // up to date
 			}
 
-			// If portFilter is changing, the UniFi PUT endpoint rejects portFilter
-			// in the request body. Delete and recreate so portFilter takes effect via POST.
-			portFilterChanging := p.SrcPortTMLID != srcPortTMLID || p.DstPortTMLID != dstPortTMLID
-			if portFilterChanging {
+			// If portFilter or dstIPTMLID is changing, the UniFi PUT endpoint rejects
+			// these fields in the request body. Delete and recreate so they take effect via POST.
+			filterChanging := p.SrcPortTMLID != srcPortTMLID || p.DstPortTMLID != dstPortTMLID || p.DstIPTMLID != dstIPTMLID
+			if filterChanging {
 				m.log.Info().Str("policy", policyName).Str("site", site).
-					Msg("portFilter changed on existing policy — deleting for recreation with new portFilter")
+					Msg("filter changed on existing policy — deleting for recreation with new filter")
 				if delErr := m.ctrl.DeleteZonePolicy(ctx, site, p.ID); delErr != nil {
-					return controller.ZonePolicy{}, fmt.Errorf("delete policy %s before portFilter recreation: %w", policyName, delErr)
+					return controller.ZonePolicy{}, fmt.Errorf("delete policy %s before filter recreation: %w", policyName, delErr)
 				}
 				// Fall through to the creation path below.
 				break
 			}
 
-			// portFilter is unchanged; only the IP TML changed. Use PUT (portFilter
-			// is not in the PUT body, server preserves the existing value).
+			// port and dst IP filters are unchanged; only the source IP TML changed. Use PUT
+			// (portFilter and dstIPTMLID are not in the PUT body, server preserves them).
 			p.TrafficMatchingListIDs = []string{ipTMLID}
 			p.ConnectionStateFilter = nil
 			p.AllowReturnTraffic = true
@@ -312,6 +373,7 @@ func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZoneP
 		ConnectionStateFilter:  nil, // All
 		SrcPortTMLID:           srcPortTMLID,
 		DstPortTMLID:           dstPortTMLID,
+		DstIPTMLID:             dstIPTMLID,
 	})
 	if err != nil {
 		return controller.ZonePolicy{}, fmt.Errorf("create allow policy %s: %w", policyName, err)

@@ -149,6 +149,7 @@ func runDaemon() error {
 				DstZoneID: dstID,
 				SrcPorts:  pair.SrcPorts,
 				DstPorts:  pair.DstPorts,
+				DstIPs:    pair.DstIPs,
 			})
 		}
 	}
