@@ -139,12 +139,13 @@ type Config struct {
 	DeprecationWarnings []string `koanf:"-"`
 }
 
-// ZonePair represents a parsed src->dst zone pair, optionally with port filters.
+// ZonePair represents a parsed src->dst zone pair, optionally with port and IP filters.
 type ZonePair struct {
 	Src      string
 	Dst      string
-	SrcPorts []int // empty = any source ports
-	DstPorts []int // empty = any destination ports
+	SrcPorts []int    // empty = any source ports
+	DstPorts []int    // empty = any destination ports
+	DstIPs   []string // empty = any destination IPs; CIDRs or plain IPs, IPv4 or IPv6
 }
 
 // parseZoneSide parses "zoneName[:port1,port2,...]" and returns the zone name
@@ -184,7 +185,7 @@ func parseZoneSide(side string) (zoneName string, ports []int, err error) {
 	return zoneName, ports, nil
 }
 
-// parseZonePairList parses zone pair strings in "src[:port,...]->dst[:port,...]" format.
+// parseZonePairList parses zone pair strings in "src[:port,...]->dst[:port,...][@ip1,ip2,...]" format.
 func parseZonePairList(pairs []string) ([]ZonePair, error) {
 	result := make([]ZonePair, 0, len(pairs))
 	for _, p := range pairs {
@@ -196,11 +197,36 @@ func parseZonePairList(pairs []string) ([]ZonePair, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid zone pair %q src: %w", p, err)
 		}
-		dst, dstPorts, err := parseZoneSide(strings.TrimSpace(parts[1]))
+
+		// Split dst on '@' to extract optional destination IP list.
+		dstRaw := strings.TrimSpace(parts[1])
+		var dstIPs []string
+		if idx := strings.Index(dstRaw, "@"); idx != -1 {
+			ipPart := strings.TrimSpace(dstRaw[idx+1:])
+			dstRaw = dstRaw[:idx]
+			for _, ip := range strings.Split(ipPart, ",") {
+				ip = strings.TrimSpace(ip)
+				if ip == "" {
+					continue
+				}
+				if strings.Contains(ip, "/") {
+					if _, _, cidrErr := net.ParseCIDR(ip); cidrErr != nil {
+						return nil, fmt.Errorf("invalid zone pair %q: invalid dst CIDR %q: %w", p, ip, cidrErr)
+					}
+				} else {
+					if net.ParseIP(ip) == nil {
+						return nil, fmt.Errorf("invalid zone pair %q: invalid dst IP %q", p, ip)
+					}
+				}
+				dstIPs = append(dstIPs, ip)
+			}
+		}
+
+		dst, dstPorts, err := parseZoneSide(dstRaw)
 		if err != nil {
 			return nil, fmt.Errorf("invalid zone pair %q dst: %w", p, err)
 		}
-		result = append(result, ZonePair{Src: src, Dst: dst, SrcPorts: srcPorts, DstPorts: dstPorts})
+		result = append(result, ZonePair{Src: src, Dst: dst, SrcPorts: srcPorts, DstPorts: dstPorts, DstIPs: dstIPs})
 	}
 	return result, nil
 }

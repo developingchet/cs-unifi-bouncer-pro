@@ -169,7 +169,7 @@ These settings apply only when `FIREWALL_MODE=zone` or when `auto` detects a zon
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ZONE_PAIRS` | `External->Dmz` | Comma-separated zone pairs in `src[:sport,...]->dst[:dport,...]` format. A block policy is created for each pair and each shard. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. `External` and `Internal` are the default zone names in UniFi Network 8.x — check Settings → Firewall → Zones if you have renamed them. Standard UUIDs (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) and MongoDB ObjectIDs (24-char hex) are also accepted and passed through without a lookup. Optional colon-separated port lists after a zone name restrict which source or destination ports the block policies match (empty = any port). |
+| `ZONE_PAIRS` | `External->Dmz` | Comma-separated zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. A block policy is created for each pair and each shard. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. `External` and `Internal` are the default zone names in UniFi Network 8.x — check Settings → Firewall → Zones if you have renamed them. Standard UUIDs (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) and MongoDB ObjectIDs (24-char hex) are also accepted and passed through without a lookup. Optional colon-separated port lists after a zone name restrict which source or destination ports the block policies match (empty = any port). Optional `@ip1,ip2,...` suffix on the destination side restricts the block policy to specific destination hosts or subnets (IPv4 or IPv6 CIDRs accepted; empty = any destination). |
 
 ```bash
 # Named zones (auto-resolved at startup) — no port filter (any port)
@@ -183,6 +183,15 @@ ZONE_PAIRS=External->Internal:80,443
 
 # Separate source and destination port filters
 ZONE_PAIRS=External:81,8443->Internal:80,443
+
+# Scope to a specific destination subnet (any port)
+ZONE_PAIRS=External->Dmz@10.0.1.0/24
+
+# Destination port + destination IP filter combined
+ZONE_PAIRS=External->Internal:443@10.0.0.5,10.0.0.6
+
+# Multiple pairs — second scoped to a destination subnet
+ZONE_PAIRS=External->Dmz;External->Internal@10.0.0.0/24
 
 # Pass through UUIDs directly (standard 8-4-4-4-12 format)
 ZONE_PAIRS=aaaaaaaa-0000-4000-8000-aaaaaaaaaaaa->bbbbbbbb-0000-4000-8000-bbbbbbbbbbbb
@@ -216,6 +225,25 @@ When a port list is provided, the bouncer creates a separate PORTS Traffic Match
 | `External:81,8443->Internal:80,443` | Match source ports 81/8443 **and** destination ports 80/443 |
 
 Port TMLs are named `crowdsec-ports-src-{Src}-{Dst}` and `crowdsec-ports-dst-{Src}-{Dst}` (block policies) or `crowdsec-whitelist-cloudflare-srcports-{Src}-{Dst}` and `crowdsec-whitelist-cloudflare-dstports-{Src}-{Dst}` (Cloudflare ALLOW policies). They are created or updated at startup alongside the zone cache.
+
+### Destination IP filtering for zone pairs
+
+An optional `@ip1,ip2,...` suffix on the **destination side** of a zone pair scopes the block policy to specific destination hosts or subnets:
+
+```
+src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]
+```
+
+`@` may only appear once per pair and must follow the optional port list. Each entry is an IPv4 or IPv6 address or CIDR (`10.0.0.5`, `10.0.1.0/24`, `2001:db8::/32`). An invalid IP or CIDR is rejected at startup.
+
+| Example | Effect |
+|---------|--------|
+| `External->Dmz@10.0.1.0/24` | Block traffic destined for `10.0.1.0/24` only |
+| `External->Internal:443@10.0.0.5` | Block only destination port 443 **and** destination host `10.0.0.5` |
+| `External:80->Internal@10.0.0.0/24` | Match source port 80, block only traffic destined for `10.0.0.0/24` |
+| `External->Dmz;External->Internal@10.0.0.0/24` | First pair unrestricted; second scoped to subnet |
+
+IPv4 and IPv6 destination IPs are split into separate Traffic Matching Lists (`crowdsec-dstips-v4-{Src}-{Dst}` and `crowdsec-dstips-v6-{Src}-{Dst}`) and attached to the corresponding v4/v6 block policies at creation time. Because the UniFi PUT endpoint does not accept destination `trafficFilter` changes, any modification to destination IPs triggers a delete-and-recreate of the affected policies (same behaviour as port filter changes).
 
 ---
 

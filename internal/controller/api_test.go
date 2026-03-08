@@ -630,6 +630,97 @@ func TestListFirewallGroups_VerifiesFields(t *testing.T) {
 	}
 }
 
+// --- modelToV1Policy / v1PolicyToModel round-trip ---------------------------
+
+// TestV1PolicyRoundTrip_DstIPTMLID verifies that DstIPTMLID survives a
+// modelToV1Policy → v1PolicyToModel round-trip.
+func TestV1PolicyRoundTrip_DstIPTMLID(t *testing.T) {
+	const dstIPTMLID = "aaaa0000-0000-4000-8000-aaaaaaaaaaaa"
+	const srcTMLID = "bbbb0000-0000-4000-8000-bbbbbbbbbbbb"
+
+	input := ZonePolicy{
+		ID:                     "pol-1",
+		Name:                   "block-test",
+		Enabled:                true,
+		Action:                 "BLOCK",
+		SrcZone:                testZoneExternal,
+		DstZone:                testZoneInternal,
+		IPVersion:              "IPV4",
+		TrafficMatchingListIDs: []string{srcTMLID},
+		DstIPTMLID:             dstIPTMLID,
+	}
+
+	wire := modelToV1Policy(input)
+
+	// Destination TrafficFilter must carry the IP address filter.
+	if wire.Destination.TrafficFilter == nil {
+		t.Fatal("expected Destination.TrafficFilter to be set")
+	}
+	if wire.Destination.TrafficFilter.IPAddressFilter == nil {
+		t.Fatal("expected Destination.TrafficFilter.IPAddressFilter to be set")
+	}
+	if got := wire.Destination.TrafficFilter.IPAddressFilter.TrafficMatchingListID; got != dstIPTMLID {
+		t.Errorf("wire IPAddressFilter.TrafficMatchingListID = %q, want %q", got, dstIPTMLID)
+	}
+
+	// Round-trip back to model.
+	model := v1PolicyToModel(wire)
+	if model.DstIPTMLID != dstIPTMLID {
+		t.Errorf("model.DstIPTMLID = %q, want %q", model.DstIPTMLID, dstIPTMLID)
+	}
+	if len(model.TrafficMatchingListIDs) != 1 || model.TrafficMatchingListIDs[0] != srcTMLID {
+		t.Errorf("model.TrafficMatchingListIDs = %v, want [%s]", model.TrafficMatchingListIDs, srcTMLID)
+	}
+}
+
+// TestV1PolicyRoundTrip_DstIPAndPort verifies that both DstIPTMLID and
+// DstPortTMLID survive a modelToV1Policy → v1PolicyToModel round-trip.
+func TestV1PolicyRoundTrip_DstIPAndPort(t *testing.T) {
+	const dstIPTMLID = "aaaa0000-0000-4000-8000-aaaaaaaaaaaa"
+	const dstPortTMLID = "cccc0000-0000-4000-8000-cccccccccccc"
+	const srcTMLID = "bbbb0000-0000-4000-8000-bbbbbbbbbbbb"
+
+	input := ZonePolicy{
+		ID:                     "pol-2",
+		Name:                   "block-test-2",
+		Enabled:                true,
+		Action:                 "BLOCK",
+		SrcZone:                testZoneExternal,
+		DstZone:                testZoneInternal,
+		IPVersion:              "IPV4",
+		TrafficMatchingListIDs: []string{srcTMLID},
+		DstIPTMLID:             dstIPTMLID,
+		DstPortTMLID:           dstPortTMLID,
+	}
+
+	wire := modelToV1Policy(input)
+
+	// Destination TrafficFilter must carry both IP address and port filters.
+	if wire.Destination.TrafficFilter == nil {
+		t.Fatal("expected Destination.TrafficFilter to be set")
+	}
+	if wire.Destination.TrafficFilter.IPAddressFilter == nil {
+		t.Fatal("expected Destination.TrafficFilter.IPAddressFilter to be set")
+	}
+	if wire.Destination.TrafficFilter.PortFilter == nil {
+		t.Fatal("expected Destination.TrafficFilter.PortFilter to be set")
+	}
+	if got := wire.Destination.TrafficFilter.IPAddressFilter.TrafficMatchingListID; got != dstIPTMLID {
+		t.Errorf("IPAddressFilter TML ID = %q, want %q", got, dstIPTMLID)
+	}
+	if got := wire.Destination.TrafficFilter.PortFilter.TrafficMatchingListID; got != dstPortTMLID {
+		t.Errorf("PortFilter TML ID = %q, want %q", got, dstPortTMLID)
+	}
+
+	model := v1PolicyToModel(wire)
+	if model.DstIPTMLID != dstIPTMLID {
+		t.Errorf("model.DstIPTMLID = %q, want %q", model.DstIPTMLID, dstIPTMLID)
+	}
+	if model.DstPortTMLID != dstPortTMLID {
+		t.Errorf("model.DstPortTMLID = %q, want %q", model.DstPortTMLID, dstPortTMLID)
+	}
+}
+
 // --- ignoreNotFound -----------------------------------------------------------
 
 func TestIgnoreNotFound(t *testing.T) {

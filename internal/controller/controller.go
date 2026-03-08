@@ -46,6 +46,7 @@ type ZonePolicy struct {
 	LoggingEnabled         bool
 	SrcPortTMLID           string // TML of type "PORTS" for source port filter (empty = any)
 	DstPortTMLID           string // TML of type "PORTS" for destination port filter (empty = any)
+	DstIPTMLID             string // TML of type IPV4_ADDRESSES or IPV6_ADDRESSES for dst IP filter (empty = any)
 }
 
 // Zone represents a UniFi network zone (topology discovery).

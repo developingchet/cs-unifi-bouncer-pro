@@ -4,13 +4,13 @@
 
 # cs-unifi-bouncer-pro
 
-[![Build](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml/badge.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml) [![Version](https://img.shields.io/badge/version-v1.2.0-blue)](https://github.com/developingchet/cs-unifi-bouncer-pro/releases/tag/v1.2.0) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/LICENSE) [![Docker Pulls](https://img.shields.io/docker/pulls/developingchet/cs-unifi-bouncer-pro)](https://hub.docker.com/r/developingchet/cs-unifi-bouncer-pro)
+[![Build](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml/badge.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml) [![Version](https://img.shields.io/badge/version-v1.2.1-blue)](https://github.com/developingchet/cs-unifi-bouncer-pro/releases/tag/v1.2.1) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/LICENSE) [![Docker Pulls](https://img.shields.io/docker/pulls/developingchet/cs-unifi-bouncer-pro)](https://hub.docker.com/r/developingchet/cs-unifi-bouncer-pro)
 
 ---
 
 ## Summary
 
-cs-unifi-bouncer-pro is a production-grade [CrowdSec](https://crowdsec.net) bouncer for self-hosted [UniFi](https://ui.com) network controllers that automatically translates ban decisions into firewall rules, blocking malicious IPs at the network edge in real time. It auto-detects zone-based (UniFi Network ≥ 8.x) or legacy WAN_IN firewall modes, applies bans across multiple sites simultaneously, and manages multi-shard Traffic Matching Lists with bin-packing and automatic rebalance. Bans are persisted in a crash-safe bbolt database with bbolt-first write ordering, and a configurable three-state circuit breaker handles controller outages gracefully. v1.2.0 adds a ban history audit trail with ring-buffer event log, external blocklist import from plain-text URL feeds, webhook notifications for circuit-breaker and reconcile drift events, per-scenario ban duration overrides, per-scenario zone pair routing, and a token-bucket decision rate limiter. Cloudflare IP whitelist sync, 20 Prometheus metrics with decision latency histograms, and `validate`/`diagnose`/`status` subcommands complete the production hardening. The image is distroless, under 20 MB, runs as nonroot (UID 65532), and is Cosign-signed with a CycloneDX SBOM attached to every release.
+cs-unifi-bouncer-pro is a production-grade [CrowdSec](https://crowdsec.net) bouncer for self-hosted [UniFi](https://ui.com) network controllers that automatically translates ban decisions into firewall rules, blocking malicious IPs at the network edge in real time. It auto-detects zone-based (UniFi Network ≥ 8.x) or legacy WAN_IN firewall modes, applies bans across multiple sites simultaneously, and manages multi-shard Traffic Matching Lists with bin-packing and automatic rebalance. Bans are persisted in a crash-safe bbolt database with bbolt-first write ordering, and a configurable three-state circuit breaker handles controller outages gracefully. v1.2.0 adds a ban history audit trail with ring-buffer event log, external blocklist import from plain-text URL feeds, webhook notifications for circuit-breaker and reconcile drift events, per-scenario ban duration overrides, per-scenario zone pair routing, and a token-bucket decision rate limiter. v1.2.1 adds destination IP filtering for zone pairs: append `@ip1,ip2,...` to the destination side of `ZONE_PAIRS` to scope block policies to specific destination hosts or subnets. Cloudflare IP whitelist sync, 20 Prometheus metrics with decision latency histograms, and `validate`/`diagnose`/`status` subcommands complete the production hardening. The image is distroless, under 20 MB, runs as nonroot (UID 65532), and is Cosign-signed with a CycloneDX SBOM attached to every release.
 
 ---
 
@@ -54,6 +54,7 @@ For full setup including CrowdSec registration, TLS, multi-site, and Docker Secr
 - **Webhook notifications** — POST JSON alerts when the circuit breaker trips or reconcile drift is detected
 - **Per-scenario duration overrides** — override `BAN_TTL` per CrowdSec scenario via `BLOCK_SCENARIO_DURATION_MAP`
 - **Per-scenario zone routing** — route bans from specific scenarios to different zone pairs via `ZONE_PAIRS_SCENARIO_MAP`
+- **Destination IP filtering** — scope block policies to specific destination hosts or subnets via `@ip1,ip2,...` suffix on zone pairs
 - **Decision rate limiter** — token-bucket throttle for ban waves (`DECISION_RATE_LIMIT`)
 - **Validate and diagnose subcommands** — CI-safe config validation; three-phase connectivity check with zone discovery
 - **Log redaction** — RedactWriter masks passwords, API keys, and Bearer tokens before they reach stdout
@@ -71,7 +72,7 @@ For full setup including CrowdSec registration, TLS, multi-site, and Docker Secr
 | `UNIFI_API_KEY` | `your-api-key` | API key (Settings → Control Plane → API Keys); or use `UNIFI_USERNAME` + `UNIFI_PASSWORD` |
 | `CROWDSEC_LAPI_URL` | `http://crowdsec:8080` | CrowdSec LAPI URL (default assumes a Docker service named `crowdsec`) |
 | `CROWDSEC_LAPI_KEY` | `your-bouncer-key` | Bouncer key from `cscli bouncers add unifi-bouncer` |
-| `ZONE_PAIRS` | `External->Dmz` | Zone pair(s) for block policies; comma-separated `src[:sport,...]->dst[:dport,...]` (port lists are optional) |
+| `ZONE_PAIRS` | `External->Dmz` | Zone pair(s) for block policies; `src[:sport,...]->dst[:dport,...][@dstIP,...]` — port and destination IP filters are optional |
 
 Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) accept a `_FILE` suffix for Docker secrets and Kubernetes secret mounts. For the full variable reference see the [Configuration Reference](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/CONFIGURATION.md).
 
@@ -82,7 +83,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) acc
 | Tag | When to use |
 |-----|-------------|
 | `latest` | stable, always points to the newest release |
-| `v1.2.0` | exact version, recommended for production |
+| `v1.2.1` | exact version, recommended for production |
 | `1.0` | minor-pinned |
 | `1` | major-pinned |
 
@@ -93,7 +94,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) acc
 This image is signed with [Cosign](https://docs.sigstore.dev/cosign/overview/) (keyless OIDC). Verify with:
 
 ```bash
-cosign verify developingchet/cs-unifi-bouncer-pro:v1.2.0 \
+cosign verify developingchet/cs-unifi-bouncer-pro:v1.2.1 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 ```

@@ -30,6 +30,7 @@ Automatically translates CrowdSec ban decisions into UniFi firewall rules — bl
 - **Webhook notifications** — POST JSON alerts to a webhook URL when the circuit breaker opens/closes or reconcile drift is detected
 - **Per-scenario duration overrides** — Override `BAN_TTL` for specific CrowdSec scenarios via `BLOCK_SCENARIO_DURATION_MAP`
 - **Per-scenario zone routing** — Route bans from specific scenarios to different zone pairs via `ZONE_PAIRS_SCENARIO_MAP`
+- **Destination IP filtering** — Scope block policies to specific destination hosts or subnets via `@ip` suffix on zone pairs (`External->Dmz@10.0.1.0/24`)
 - **Decision rate limiter** — Token-bucket rate limiter (`DECISION_RATE_LIMIT`) to throttle decision processing during ban waves
 - **RedactWriter** — Automatically masks passwords, API keys, and Bearer tokens from all log output
 - **Dry-run mode** — Process decisions and log intended actions without modifying the UniFi controller
@@ -148,7 +149,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ZONE_PAIRS` | `External->Dmz` | Comma-separated zone pairs in `src[:sport,...]->dst[:dport,...]` format. Zone names are auto-resolved to UUIDs at startup; standard UUIDs and MongoDB ObjectIDs are accepted directly. `External`/`Internal` are the default UniFi 8.x names — check Settings → Firewall → Zones if you renamed them. Optional colon-separated port lists restrict which source or destination ports the block policies match (empty = any). |
+| `ZONE_PAIRS` | `External->Dmz` | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. Zone names are auto-resolved to UUIDs at startup; standard UUIDs and MongoDB ObjectIDs are accepted directly. `External`/`Internal` are the default UniFi 8.x names — check Settings → Firewall → Zones if you renamed them. Optional colon-separated port lists restrict which ports the block policies match (empty = any). Optional `@ip1,ip2,...` suffix on the destination side scopes the policy to specific destination hosts or subnets. |
 | `ZONE_PAIRS_SCENARIO_MAP` | — | Per-scenario zone pair overrides. Semicolon-separated `key=pairs` entries where `key` matches as a substring of the scenario name. Overrides `ZONE_PAIRS` for matching bans. Example: `ssh-bf=External:22->Internal:22;http-probing=External->Internal:80,443` |
 
 ### Cloudflare whitelist
@@ -159,7 +160,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | How often to re-fetch Cloudflare IP ranges and update the Traffic Matching Lists (default: weekly). |
 | `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | Source URL for Cloudflare IPv4 ranges. |
 | `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | Source URL for Cloudflare IPv6 ranges. |
-| `CLOUDFLARE_ZONE_PAIRS` | — | Comma-separated zone pairs (same `src[:sport,...]->dst[:dport,...]` syntax as `ZONE_PAIRS`) that ALLOW policies are applied to. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. |
+| `CLOUDFLARE_ZONE_PAIRS` | — | Zone pairs (same `src[:sport,...]->dst[:dport,...]` syntax as `ZONE_PAIRS`) that ALLOW policies are applied to. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. |
 
 ### Object naming
 
@@ -269,6 +270,12 @@ ZONE_PAIRS=External->Internal:80,443
 
 # Separate source and destination port filters
 ZONE_PAIRS=External:81,8443->Internal:80,443
+
+# Destination IP filter — scope to a specific subnet
+ZONE_PAIRS=External->Dmz@10.0.1.0/24
+
+# Combine port and destination IP filters
+ZONE_PAIRS=External->Internal:443@10.0.0.5,10.0.0.6
 ```
 
 ### Policy Ordering

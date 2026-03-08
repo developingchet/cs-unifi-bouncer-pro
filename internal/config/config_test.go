@@ -624,3 +624,117 @@ func TestInsecureLAPIURLWarning(t *testing.T) {
 		})
 	}
 }
+
+func TestParseZonePairs_DstIPs(t *testing.T) {
+	cases := []struct {
+		name      string
+		pair      string
+		wantSrc   string
+		wantDst   string
+		wantDstPs []int
+		wantIPs   []string
+		wantErr   bool
+	}{
+		{
+			name:    "cidr only",
+			pair:    "External->Internal@10.0.0.0/24",
+			wantSrc: "External",
+			wantDst: "Internal",
+			wantIPs: []string{"10.0.0.0/24"},
+		},
+		{
+			name:    "dst port plus dst IP",
+			pair:    "External->Internal:443@10.0.0.5,10.0.0.6",
+			wantSrc: "External",
+			wantDst: "Internal",
+			wantDstPs: []int{443},
+			wantIPs: []string{"10.0.0.5", "10.0.0.6"},
+		},
+		{
+			name:    "src port plus dst port plus dst IP",
+			pair:    "External:80->Internal:443@10.0.0.0/24",
+			wantSrc: "External",
+			wantDst: "Internal",
+			wantDstPs: []int{443},
+			wantIPs: []string{"10.0.0.0/24"},
+		},
+		{
+			name:    "multiple IPs no port",
+			pair:    "External->Internal@192.168.1.10,192.168.1.11",
+			wantSrc: "External",
+			wantDst: "Internal",
+			wantIPs: []string{"192.168.1.10", "192.168.1.11"},
+		},
+		{
+			name:    "no dst IPs (backward compat)",
+			pair:    "External->Internal",
+			wantSrc: "External",
+			wantDst: "Internal",
+			wantIPs: nil,
+		},
+		{
+			name:    "invalid IP",
+			pair:    "External->Internal@not-an-ip",
+			wantErr: true,
+		},
+		{
+			name:    "invalid CIDR",
+			pair:    "External->Internal@10.0.0.0/99",
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{ZonePairs: []string{tc.pair}}
+			pairs, err := cfg.ParseZonePairs()
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(pairs) != 1 {
+				t.Fatalf("expected 1 pair, got %d", len(pairs))
+			}
+			p := pairs[0]
+			if p.Src != tc.wantSrc {
+				t.Errorf("Src: got %q, want %q", p.Src, tc.wantSrc)
+			}
+			if p.Dst != tc.wantDst {
+				t.Errorf("Dst: got %q, want %q", p.Dst, tc.wantDst)
+			}
+			if len(p.DstPorts) != len(tc.wantDstPs) {
+				t.Errorf("DstPorts: got %v, want %v", p.DstPorts, tc.wantDstPs)
+			}
+			if len(p.DstIPs) != len(tc.wantIPs) {
+				t.Fatalf("DstIPs: got %v, want %v", p.DstIPs, tc.wantIPs)
+			}
+			for i, ip := range tc.wantIPs {
+				if p.DstIPs[i] != ip {
+					t.Errorf("DstIPs[%d]: got %q, want %q", i, p.DstIPs[i], ip)
+				}
+			}
+		})
+	}
+}
+
+func TestParseZonePairs_DstIPs_MultiPair(t *testing.T) {
+	// First pair has no IPs; second pair has IPs.
+	cfg := &Config{ZonePairs: []string{"External->Dmz", "External->Internal@10.0.0.0/24"}}
+	pairs, err := cfg.ParseZonePairs()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pairs) != 2 {
+		t.Fatalf("expected 2 pairs, got %d", len(pairs))
+	}
+	if len(pairs[0].DstIPs) != 0 {
+		t.Errorf("first pair: expected no DstIPs, got %v", pairs[0].DstIPs)
+	}
+	if len(pairs[1].DstIPs) != 1 || pairs[1].DstIPs[0] != "10.0.0.0/24" {
+		t.Errorf("second pair: DstIPs = %v, want [10.0.0.0/24]", pairs[1].DstIPs)
+	}
+}

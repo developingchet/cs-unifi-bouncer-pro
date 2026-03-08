@@ -2,6 +2,7 @@ package firewall
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
@@ -401,6 +402,69 @@ func TestZoneManager_Bootstrap_FailsWhenZonesFail(t *testing.T) {
 	err := zm.Bootstrap(context.Background(), []string{testSite})
 	if err == nil {
 		t.Fatal("Bootstrap: expected error when DiscoverZones fails, got nil")
+	}
+}
+
+// TestZoneManager_EnsurePolicies_DstIPTML verifies that when a zone pair has
+// DstIPs configured, the correct IP TML is created and referenced in the policy.
+func TestZoneManager_EnsurePolicies_DstIPTML(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore()
+	namer := zoneTestNamer(t)
+
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+
+	zm := NewZoneManager(ZoneConfig{
+		ZonePairs: []config.ZonePair{
+			{Src: "wan", Dst: "lan", DstIPs: []string{"10.0.1.0/24", "10.0.2.0/24"}},
+		},
+		Description: "test",
+	}, namer, ctrl, store, zerolog.Nop())
+
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if err := zm.EnsurePolicies(context.Background(), testSite, v4, nil); err != nil {
+		t.Fatalf("EnsurePolicies: %v", err)
+	}
+
+	// A dst IP TML should have been created.
+	if got := ctrl.Calls("CreateTrafficMatchingList"); got < 1 {
+		t.Errorf("CreateTrafficMatchingList calls: got %d, want >= 1", got)
+	}
+
+	// The created TML should be of type IPV4_ADDRESSES.
+	tmls, err := ctrl.ListTrafficMatchingLists(context.Background(), testSite)
+	if err != nil {
+		t.Fatalf("ListTrafficMatchingLists: %v", err)
+	}
+	var dstIPTML *controller.TrafficMatchingList
+	for i := range tmls {
+		if strings.HasPrefix(tmls[i].Name, "crowdsec-dstips-v4-") {
+			dstIPTML = &tmls[i]
+			break
+		}
+	}
+	if dstIPTML == nil {
+		t.Fatal("expected a crowdsec-dstips-v4-* TML to be created")
+	}
+	if dstIPTML.Type != "IPV4_ADDRESSES" {
+		t.Errorf("TML type = %q, want IPV4_ADDRESSES", dstIPTML.Type)
+	}
+	if len(dstIPTML.Items) != 2 {
+		t.Errorf("TML items count = %d, want 2", len(dstIPTML.Items))
+	}
+
+	// The created zone policy should reference the dst IP TML.
+	policies, err := ctrl.ListZonePolicies(context.Background(), testSite)
+	if err != nil {
+		t.Fatalf("ListZonePolicies: %v", err)
+	}
+	if len(policies) == 0 {
+		t.Fatal("no policies created")
+	}
+	if policies[0].DstIPTMLID != dstIPTML.ID {
+		t.Errorf("policy DstIPTMLID = %q, want %q", policies[0].DstIPTMLID, dstIPTML.ID)
 	}
 }
 

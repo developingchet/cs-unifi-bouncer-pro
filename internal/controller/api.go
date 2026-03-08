@@ -719,12 +719,15 @@ func v1PolicyToModel(p apiV1Policy) ZonePolicy {
 		p.Source.TrafficFilter.IPAddressFilter.TrafficMatchingListID != "" {
 		tmlIDs = []string{p.Source.TrafficFilter.IPAddressFilter.TrafficMatchingListID}
 	}
-	var srcPortTMLID, dstPortTMLID string
+	var srcPortTMLID, dstPortTMLID, dstIPTMLID string
 	if p.Source.TrafficFilter != nil && p.Source.TrafficFilter.PortFilter != nil {
 		srcPortTMLID = p.Source.TrafficFilter.PortFilter.TrafficMatchingListID
 	}
 	if p.Destination.TrafficFilter != nil && p.Destination.TrafficFilter.PortFilter != nil {
 		dstPortTMLID = p.Destination.TrafficFilter.PortFilter.TrafficMatchingListID
+	}
+	if p.Destination.TrafficFilter != nil && p.Destination.TrafficFilter.IPAddressFilter != nil {
+		dstIPTMLID = p.Destination.TrafficFilter.IPAddressFilter.TrafficMatchingListID
 	}
 	ipVersion := p.IPProtocolScope.IPVersion
 	if ipVersion == "IPV4_AND_IPV6" {
@@ -745,6 +748,7 @@ func v1PolicyToModel(p apiV1Policy) ZonePolicy {
 		TrafficMatchingListIDs: tmlIDs,
 		SrcPortTMLID:           srcPortTMLID,
 		DstPortTMLID:           dstPortTMLID,
+		DstIPTMLID:             dstIPTMLID,
 	}
 }
 
@@ -781,13 +785,24 @@ func modelToV1Policy(p ZonePolicy) apiV1Policy {
 	}
 	src.TrafficFilter = srcTF
 	dst := apiV1PolicyDst{ZoneID: p.DstZone}
-	if p.DstPortTMLID != "" {
-		// PORT type: dedicated port-only filter, no ipAddressFilter or networkFilter required.
-		dst.TrafficFilter = &apiV1TrafficFilter{
-			Type:       "PORT",
-			PortFilter: buildPortFilter(p.DstPortTMLID),
+	var dstTF *apiV1TrafficFilter
+	if p.DstIPTMLID != "" {
+		dstTF = &apiV1TrafficFilter{
+			Type: "IP_ADDRESS",
+			IPAddressFilter: &apiV1IPAddressFilter{
+				Type:                  "TRAFFIC_MATCHING_LIST",
+				MatchOpposite:         false,
+				TrafficMatchingListID: p.DstIPTMLID,
+			},
 		}
 	}
+	if p.DstPortTMLID != "" {
+		if dstTF == nil {
+			dstTF = &apiV1TrafficFilter{Type: "PORT"}
+		}
+		dstTF.PortFilter = buildPortFilter(p.DstPortTMLID)
+	}
+	dst.TrafficFilter = dstTF
 	ipVersion := p.IPVersion
 	switch ipVersion {
 	case "BOTH":
