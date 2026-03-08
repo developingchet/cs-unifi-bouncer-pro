@@ -242,6 +242,71 @@ func TestApiDo_RetryAfterHeader(t *testing.T) {
 	}
 }
 
+// TestRateLimitMinFloor_ZeroRetryAfter verifies that Retry-After: 0 is floored to 1s.
+func TestRateLimitMinFloor_ZeroRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/test", nil)
+	_, err := c.apiDo(context.Background(), req, "test")
+
+	var e *ErrRateLimit
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *ErrRateLimit, got %T", err)
+	}
+	if e.RetryAfter < time.Second {
+		t.Errorf("RetryAfter %s should be >= 1s (minimum floor)", e.RetryAfter)
+	}
+}
+
+// TestRateLimitMinFloor_NegativeRetryAfter verifies the floor also applies to negative values.
+func TestRateLimitMinFloor_NegativeRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Retry-After: -5 → "-5s" parses to -5s
+		w.Header().Set("Retry-After", "-5")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/test", nil)
+	_, err := c.apiDo(context.Background(), req, "test")
+
+	var e *ErrRateLimit
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *ErrRateLimit, got %T", err)
+	}
+	if e.RetryAfter < time.Second {
+		t.Errorf("RetryAfter %s should be >= 1s (minimum floor)", e.RetryAfter)
+	}
+}
+
+// TestRateLimitMinFloor_NormalValue verifies that a normal Retry-After value is not floored.
+func TestRateLimitMinFloor_NormalValue(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/test", nil)
+	_, err := c.apiDo(context.Background(), req, "test")
+
+	var e *ErrRateLimit
+	if !errors.As(err, &e) {
+		t.Fatalf("expected *ErrRateLimit, got %T", err)
+	}
+	want := 30 * time.Second
+	if e.RetryAfter != want {
+		t.Errorf("expected RetryAfter=%s, got %s", want, e.RetryAfter)
+	}
+}
+
 // TestWithReauth_RetriesOnce verifies that withReauth retries exactly once on
 // ErrUnauthorized and succeeds on the second attempt.
 func TestWithReauth_RetriesOnce(t *testing.T) {

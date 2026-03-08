@@ -686,3 +686,7 @@ func (pc *PanicController) GetPolicyOrdering(ctx context.Context, site, srcZoneI
 func (pc *PanicController) SetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string, ordering controller.PolicyOrdering) error {
 	return nil
 }
+
+func (pc *PanicController) DiscoverSites(ctx context.Context) ([]string, error) {
+	return nil, nil
+}

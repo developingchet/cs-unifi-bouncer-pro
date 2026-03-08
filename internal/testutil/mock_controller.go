@@ -26,6 +26,9 @@ type MockController struct {
 	// Preset site ID mappings: internalReference -> UUID
 	siteIDs map[string]string
 
+	// discoveredSites preset for DiscoverSites
+	discoveredSites []string
+
 	// Preset feature detection results per site
 	features map[string]map[string]bool
 
@@ -442,6 +445,23 @@ func (m *MockController) UpdateTrafficMatchingList(ctx context.Context, site str
 		}
 	}
 	return nil
+}
+
+// SetDiscoveredSites presets the sites returned by DiscoverSites.
+func (m *MockController) SetDiscoveredSites(sites []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.discoveredSites = append([]string{}, sites...)
+}
+
+func (m *MockController) DiscoverSites(ctx context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls["DiscoverSites"]++
+	if err := m.popError("DiscoverSites"); err != nil {
+		return nil, err
+	}
+	return append([]string{}, m.discoveredSites...), nil
 }
 
 func (m *MockController) DeleteTrafficMatchingList(ctx context.Context, site string, id string) error {

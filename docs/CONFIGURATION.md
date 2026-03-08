@@ -27,6 +27,9 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 - [Decision Filtering](#decision-filtering)
 - [Session Management](#session-management)
 - [Storage](#storage)
+- [Ban History](#ban-history)
+- [External Blocklists](#external-blocklists)
+- [Webhook Notifications](#webhook-notifications)
 - [Operational](#operational)
 
 ---
@@ -187,6 +190,14 @@ ZONE_PAIRS=aaaaaaaa-0000-4000-8000-aaaaaaaaaaaa->bbbbbbbb-0000-4000-8000-bbbbbbb
 
 Zone names are case-sensitive and must match the names shown in Settings → Firewall → Zones. If a zone name cannot be found at startup the bouncer exits with an error listing the available zones.
 
+### Per-scenario zone routing
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ZONE_PAIRS_SCENARIO_MAP` | — | Per-scenario zone pair overrides. Semicolon-separated `key=pairs` entries where `key` is matched as a substring of the CrowdSec scenario name and `pairs` uses the same `src[:sport,...]->dst[:dport,...]` format as `ZONE_PAIRS`. When a ban's scenario matches a key, the override pairs are used instead of the default `ZONE_PAIRS`. Example: `ssh-bf=External:22->Internal:22;http-probing=External->Internal:80,443` |
+
+In Phase 1, the override zone pairs are logged with each matching ban for audit purposes; full per-scenario shard provisioning (separate firewall groups per scenario) is reserved for a future release.
+
 ### Port filtering for zone pairs
 
 Both `ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS` support an optional port list appended to either zone name using a colon separator:
@@ -263,6 +274,7 @@ Decisions from CrowdSec pass through an 8-stage filter pipeline before being enq
 | `BLOCK_SCENARIO_EXCLUDE` | — | Comma-separated scenario substrings to skip. Example: `impossible-travel,test` |
 | `BLOCK_WHITELIST` | — | Comma-separated IP addresses or CIDR ranges that are never blocked. Example: `10.0.0.0/8,192.168.0.0/16` |
 | `BLOCK_MIN_DURATION` | — | Ignore ban decisions shorter than this duration. Example: `1h`. Useful to filter out short test decisions. |
+| `BLOCK_SCENARIO_DURATION_MAP` | — | Per-scenario ban duration overrides. Semicolon-separated `key=duration` pairs where `key` is matched as a substring of the scenario name. Overrides `BAN_TTL` for matching bans. Example: `ssh-bf=168h;http-probing=24h` |
 
 ### Filter pipeline stages
 
@@ -297,13 +309,103 @@ When the UniFi controller returns a 401 Unauthorized, only one goroutine perform
 | `DATA_DIR` | `/data` | Directory for the bbolt database file (`bouncer.db`). Mount as a named Docker volume for persistence. |
 | `BAN_TTL` | `168h` | Maximum age of a ban record in bbolt. Records older than this are pruned by the janitor even if CrowdSec has not sent a delete decision. Default is 7 days. |
 
-The database contains three bbolt buckets:
+The database contains four bbolt buckets:
 
 | Bucket | Contents |
 |--------|---------|
 | `bans` | IP → BanEntry (recorded at, expires at, IPv6 flag) |
 | `groups` | Firewall group shard cache (UniFi ID, members, dirty flag) |
 | `policies` | Zone policy / legacy rule cache |
+| `events` | Ban audit trail ring buffer (see [Ban History](#ban-history)) |
+
+---
+
+## Ban History
+
+The bouncer keeps an audit trail of every ban, unban, and expiry event in the `events` bbolt bucket using a ring buffer.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HISTORY_MAX_EVENTS` | `10000` | Maximum number of audit trail events retained in the ring buffer. Once the limit is reached, the oldest entry is dropped for each new entry written. Set to `0` to use the default. |
+
+Events are written after each successful ban (`action=ban`), unban (`action=unban`), and janitor expiry (`action=expire`). Each event records: action, origin, scenario, IP address, and timestamp.
+
+### Querying the audit trail
+
+Use the `status` subcommands to inspect the running state:
+
+```bash
+# Show currently active bans (paginated, sortable)
+cs-unifi-bouncer-pro status bans --top 20 --sort ip
+cs-unifi-bouncer-pro status bans --expiring 1h    # expiring within 1h
+cs-unifi-bouncer-pro status bans --expired         # already expired in bbolt
+
+# Show details + history for a specific IP
+cs-unifi-bouncer-pro status ip 198.51.100.1
+
+# Show recent audit trail events
+cs-unifi-bouncer-pro status history --limit 50
+```
+
+All `status` subcommands accept `--data-dir` to point at a non-default database directory.
+
+---
+
+## External Blocklists
+
+The bouncer can periodically fetch plain-text IP/CIDR blocklists from external URLs and apply them as bans. This is useful for integrating threat intelligence feeds that are not distributed via the CrowdSec LAPI.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BLOCKLIST_URLS` | — | Comma-separated list of URLs to fetch. Each URL must return a plain-text list with one IP address or CIDR per line. Lines beginning with `#` and blank lines are ignored. |
+| `BLOCKLIST_REFRESH_INTERVAL` | `24h` | How often to re-fetch and re-apply each URL. Bans applied from external blocklists have their expiry set to `now + 2×BLOCKLIST_REFRESH_INTERVAL`, so they auto-expire if the URL becomes unreachable. |
+| `BLOCKLIST_NAME_PREFIX` | `ext-blocklist` | Scenario name prefix used when recording blocklist bans in the audit trail. |
+
+```bash
+# Fetch two external threat intelligence feeds every 12 hours
+BLOCKLIST_URLS=https://example.com/badips.txt,https://example.net/threatlist.txt
+BLOCKLIST_REFRESH_INTERVAL=12h
+BLOCKLIST_NAME_PREFIX=ext-threatintel
+```
+
+Blocklist bans go through the same `BanRecord` + `ApplyBan` path as CrowdSec decisions and are therefore subject to the same idempotency checks. They are also recorded in the audit trail.
+
+---
+
+## Webhook Notifications
+
+The bouncer can POST a JSON notification to a webhook URL when significant events occur.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WEBHOOK_URL` | — | URL to POST notifications to. Leave empty to disable. |
+| `WEBHOOK_EVENTS` | — | Comma-separated list of event names to send. If empty (and `WEBHOOK_URL` is set), no events are sent. |
+
+### Supported event names
+
+| Event | Fired when |
+|-------|-----------|
+| `circuit_breaker_open` | The circuit breaker opens after consecutive sync failures |
+| `circuit_breaker_close` | The circuit breaker resets to closed after a successful probe |
+| `reconcile_drift` | A periodic reconcile finds ≥ 100 IPs that were added or removed |
+
+### Notification payload
+
+```json
+{
+  "event": "circuit_breaker_open",
+  "detail": "consecutive failures exceeded threshold",
+  "timestamp": "2026-03-07T12:00:00Z"
+}
+```
+
+Webhook errors are logged at `warn` level and never cause the bouncer to exit or retry. The HTTP timeout for webhook POSTs is 5 seconds.
+
+```bash
+# Fire a notification when the circuit breaker trips or resets
+WEBHOOK_URL=https://hooks.example.com/bouncer-alerts
+WEBHOOK_EVENTS=circuit_breaker_open,circuit_breaker_close,reconcile_drift
+```
 
 ---
 

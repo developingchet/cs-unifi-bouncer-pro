@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,15 +16,20 @@ const (
 	bucketBans     = "bans"
 	bucketGroups   = "groups"
 	bucketPolicies = "policies"
+	bucketEvents   = "events"
+
+	defaultMaxEvents = 10000
 )
 
 type bboltStore struct {
-	db  *bolt.DB
-	log zerolog.Logger
+	db        *bolt.DB
+	log       zerolog.Logger
+	maxEvents int // ring-buffer cap for the events bucket; 0 = defaultMaxEvents
 }
 
 // NewBboltStore opens (or creates) a bbolt database at dataDir/bouncer.db.
-func NewBboltStore(dataDir string, log zerolog.Logger) (Store, error) {
+// maxEvents controls the event audit-trail ring-buffer size (0 = default 10000).
+func NewBboltStore(dataDir string, log zerolog.Logger, maxEvents int) (Store, error) {
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
@@ -33,7 +39,7 @@ func NewBboltStore(dataDir string, log zerolog.Logger) (Store, error) {
 		return nil, fmt.Errorf("open bbolt at %s: %w", path, err)
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
-		for _, name := range []string{bucketBans, bucketGroups, bucketPolicies} {
+		for _, name := range []string{bucketBans, bucketGroups, bucketPolicies, bucketEvents} {
 			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return fmt.Errorf("create bucket %s: %w", name, err)
 			}
@@ -43,7 +49,10 @@ func NewBboltStore(dataDir string, log zerolog.Logger) (Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &bboltStore{db: db, log: log}, nil
+	if maxEvents <= 0 {
+		maxEvents = defaultMaxEvents
+	}
+	return &bboltStore{db: db, log: log, maxEvents: maxEvents}, nil
 }
 
 // NewBboltStoreReadOnly opens an existing bbolt database in read-only mode.
@@ -247,6 +256,99 @@ func (s *bboltStore) ListPolicies() (map[string]PolicyRecord, error) {
 		})
 	})
 	return result, err
+}
+
+// ---- Event history (audit trail) -------------------------------------------
+
+// encodeSeq converts a uint64 sequence to a big-endian 8-byte key.
+// bbolt stores keys in byte-sorted order, so this gives chronological iteration.
+func encodeSeq(seq uint64) []byte {
+	key := make([]byte, 8)
+	binary.BigEndian.PutUint64(key, seq)
+	return key
+}
+
+// RecordEvent appends an audit event to the events ring buffer.
+// Oldest entries are pruned when the count exceeds s.maxEvents.
+func (s *bboltStore) RecordEvent(e EventEntry) error {
+	data, err := msgpack.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("marshal EventEntry: %w", err)
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(bucketEvents))
+		seq, err := b.NextSequence()
+		if err != nil {
+			return err
+		}
+		if err := b.Put(encodeSeq(seq), data); err != nil {
+			return err
+		}
+		// Count current keys via cursor (Stats().KeyN is stale mid-transaction).
+		n := 0
+		cc := b.Cursor()
+		for k, _ := cc.First(); k != nil; k, _ = cc.Next() {
+			n++
+		}
+		// Prune oldest entries to keep within the ring-buffer cap.
+		if n > s.maxEvents {
+			toDelete := n - s.maxEvents
+			cc2 := b.Cursor()
+			k, _ := cc2.First()
+			for i := 0; i < toDelete && k != nil; i++ {
+				nextK, _ := cc2.Next()
+				if err := b.Delete(k); err != nil {
+					return err
+				}
+				k = nextK
+			}
+		}
+		return nil
+	})
+}
+
+// ListEvents returns up to limit events newest-first (limit=0 = all).
+func (s *bboltStore) ListEvents(limit int) ([]EventEntry, error) {
+	var events []EventEntry
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(bucketEvents))
+		c := b.Cursor()
+		for k, v := c.Last(); k != nil; k, v = c.Prev() {
+			var e EventEntry
+			if err := msgpack.Unmarshal(v, &e); err != nil {
+				continue
+			}
+			events = append(events, e)
+			if limit > 0 && len(events) >= limit {
+				break
+			}
+		}
+		return nil
+	})
+	return events, err
+}
+
+// ListEventsForIP returns up to limit events for a specific IP, newest-first (limit=0 = all).
+func (s *bboltStore) ListEventsForIP(ip string, limit int) ([]EventEntry, error) {
+	var events []EventEntry
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(bucketEvents))
+		c := b.Cursor()
+		for k, v := c.Last(); k != nil; k, v = c.Prev() {
+			var e EventEntry
+			if err := msgpack.Unmarshal(v, &e); err != nil {
+				continue
+			}
+			if e.IP == ip {
+				events = append(events, e)
+				if limit > 0 && len(events) >= limit {
+					break
+				}
+			}
+		}
+		return nil
+	})
+	return events, err
 }
 
 // ---- Utility ---------------------------------------------------------------

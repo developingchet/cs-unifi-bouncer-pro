@@ -5,11 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 )
+
+// maxResponseBodyBytes caps the response body read to prevent runaway allocations.
+const maxResponseBodyBytes = 32 * 1024 * 1024 // 32 MB
 
 // --- Legacy REST wire types -------------------------------------------------
 
@@ -193,7 +197,7 @@ func doGET(ctx context.Context, c *unifiClient, url, endpoint string) ([]json.Ra
 		}
 		defer resp.Body.Close()
 		var body apiResponse
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodyBytes)).Decode(&body); err != nil {
 			return fmt.Errorf("decode response: %w", err)
 		}
 		result = body.Data
@@ -219,7 +223,7 @@ func doPOST(ctx context.Context, c *unifiClient, url, endpoint string, payload i
 		}
 		defer resp.Body.Close()
 		var body apiResponse
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodyBytes)).Decode(&body); err != nil {
 			return fmt.Errorf("decode response: %w", err)
 		}
 		if len(body.Data) > 0 {
@@ -247,7 +251,7 @@ func doPOSTv2(ctx context.Context, c *unifiClient, url, endpoint string, payload
 			return err
 		}
 		defer resp.Body.Close()
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodyBytes)).Decode(&result); err != nil {
 			return fmt.Errorf("decode response: %w", err)
 		}
 		return nil
@@ -423,7 +427,7 @@ func listAllV1Pages(ctx context.Context, c *unifiClient, endpointURL, metricEndp
 				return err
 			}
 			defer resp.Body.Close()
-			return json.NewDecoder(resp.Body).Decode(&page)
+			return json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodyBytes)).Decode(&page)
 		})
 		if err != nil {
 			return nil, err
@@ -469,6 +473,26 @@ func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, er
 		return id, nil
 	}
 	return "", fmt.Errorf("site %q not found in integration v1 sites list", siteName)
+}
+
+// discoverSites fetches all integration v1 site internalReferences.
+func discoverSites(ctx context.Context, c *unifiClient) ([]string, error) {
+	endpointURL := c.cfg.BaseURL + "/proxy/network/integration/v1/sites"
+	data, err := listAllV1Pages(ctx, c, endpointURL, "list-sites")
+	if err != nil {
+		return nil, fmt.Errorf("fetch integration v1 sites: %w", err)
+	}
+	var sites []string
+	for _, raw := range data {
+		var s apiSiteV1
+		if err := json.Unmarshal(raw, &s); err != nil {
+			continue
+		}
+		if s.InternalReference != "" {
+			sites = append(sites, s.InternalReference)
+		}
+	}
+	return sites, nil
 }
 
 // --- Firewall Zones (integration v1) ----------------------------------------
@@ -665,7 +689,7 @@ func getPolicyOrderingV1(ctx context.Context, c *unifiClient, siteID, srcZoneID,
 			return err
 		}
 		defer resp.Body.Close()
-		return json.NewDecoder(resp.Body).Decode(&body)
+		return json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodyBytes)).Decode(&body)
 	})
 	if err != nil {
 		return PolicyOrdering{}, err

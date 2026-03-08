@@ -29,6 +29,11 @@ type FilterConfig struct {
 
 	// Stage 8: minimum ban duration (0 = disabled)
 	MinBanDuration time.Duration
+
+	// Per-scenario duration overrides: substring -> override duration.
+	// When a ban decision's scenario contains the key as a substring,
+	// the duration is replaced with the mapped value.
+	ScenarioDurationMap map[string]time.Duration
 }
 
 // NewFilterConfig returns a FilterConfig with sensible defaults.
@@ -141,6 +146,17 @@ func Filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger) FilterResu
 		metrics.DecisionsFiltered.WithLabelValues(stageMinDur, "too_short").Inc()
 		log.Trace().Str("ip", sanitized).Dur("duration", dur).Dur("min", cfg.MinBanDuration).Msg("filtered: ban duration too short")
 		return FilterResult{}
+	}
+
+	// Per-scenario duration override: if the scenario contains any configured key
+	// as a substring, replace the duration with the mapped value.
+	if action == "ban" {
+		for prefix, overrideDur := range cfg.ScenarioDurationMap {
+			if prefix != "" && strings.Contains(scenario, prefix) {
+				dur = overrideDur
+				break
+			}
+		}
 	}
 
 	return FilterResult{

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/crowdsecurity/crowdsec/pkg/models"
@@ -17,6 +18,7 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/time/rate"
 )
 
 // BinaryVersion is set at startup from the -X main.Version ldflags value.
@@ -33,6 +35,7 @@ type Bouncer struct {
 	log       zerolog.Logger
 	streamBnc *csbouncer.StreamBouncer
 	recorder  MetricsRecorder
+	limiter   *rate.Limiter // nil when rate limiting is disabled
 }
 
 // New constructs a fully wired Bouncer.
@@ -49,6 +52,7 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 	filterCfg.AllowedOrigins = cfg.CrowdSecOrigins
 	filterCfg.Whitelist = whitelist
 	filterCfg.MinBanDuration = cfg.BlockMinDuration
+	filterCfg.ScenarioDurationMap = cfg.BlockScenarioDurationMap
 
 	handler := makeJobHandler(ctrl, store, fwMgr, cfg, recorder, log)
 
@@ -64,7 +68,7 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 		RetryInitialConnect: true,
 	}
 
-	return &Bouncer{
+	b := &Bouncer{
 		cfg:       cfg,
 		ctrl:      ctrl,
 		store:     store,
@@ -74,7 +78,11 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 		log:       log,
 		streamBnc: streamBnc,
 		recorder:  recorder,
-	}, nil
+	}
+	if cfg.DecisionRateLimit > 0 {
+		b.limiter = rate.NewLimiter(rate.Limit(cfg.DecisionRateLimit), cfg.DecisionBurstSize)
+	}
+	return b, nil
 }
 
 // Run starts all goroutines and blocks until ctx is cancelled or a fatal error occurs.
@@ -171,6 +179,13 @@ func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.Dec
 		}
 		metrics.DecisionsProcessed.WithLabelValues("ban", source).Inc()
 
+		// Apply rate limiter if configured.
+		if b.limiter != nil {
+			if err := b.limiter.Wait(ctx); err != nil {
+				return // ctx cancelled
+			}
+		}
+
 		origin := ""
 		if d.Origin != nil {
 			origin = *d.Origin
@@ -179,16 +194,24 @@ func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.Dec
 		if d.Type != nil {
 			remType = *d.Type
 		}
+		scenario := ""
+		if d.Scenario != nil {
+			scenario = *d.Scenario
+		}
 
-		if err := b.handler(ctx, SyncJob{
+		metrics.DecisionsInFlight.Inc()
+		err := b.handler(ctx, SyncJob{
 			Action:          "ban",
 			IP:              result.Value,
 			IPv6:            result.IPv6,
 			ExpiresAt:       expiresAt(result.Duration),
 			Origin:          origin,
 			RemediationType: remType,
+			Scenario:        scenario,
 			ReceivedAt:      time.Now(),
-		}); err != nil {
+		})
+		metrics.DecisionsInFlight.Dec()
+		if err != nil {
 			b.log.Error().Err(err).Str("ip", result.Value).Msg("failed to apply ban")
 		}
 	}
@@ -200,11 +223,27 @@ func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.Dec
 		}
 		metrics.DecisionsProcessed.WithLabelValues("unban", source).Inc()
 
-		if err := b.handler(ctx, SyncJob{
-			Action: "delete",
-			IP:     result.Value,
-			IPv6:   result.IPv6,
-		}); err != nil {
+		// Apply rate limiter if configured.
+		if b.limiter != nil {
+			if err := b.limiter.Wait(ctx); err != nil {
+				return // ctx cancelled
+			}
+		}
+
+		scenario := ""
+		if d.Scenario != nil {
+			scenario = *d.Scenario
+		}
+
+		metrics.DecisionsInFlight.Inc()
+		err := b.handler(ctx, SyncJob{
+			Action:   "delete",
+			IP:       result.Value,
+			IPv6:     result.IPv6,
+			Scenario: scenario,
+		})
+		metrics.DecisionsInFlight.Dec()
+		if err != nil {
 			b.log.Error().Err(err).Str("ip", result.Value).Msg("failed to apply unban")
 		}
 	}
@@ -243,6 +282,23 @@ func (b *Bouncer) serveHealth(ctx context.Context) error {
 			b.log.Warn().Err(err).Msg("readyz: controller ping failed")
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
+		}
+		if b.cfg.HealthCheckLAPI {
+			lapiURL := strings.TrimRight(b.cfg.CrowdSecLAPIURL, "/") + "/v1/ping"
+			lapiReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, lapiURL, nil)
+			if err == nil {
+				lapiReq.Header.Set("X-Api-Key", b.cfg.CrowdSecLAPIKey)
+				lapiClient := &http.Client{Timeout: 5 * time.Second}
+				lapiResp, lapiErr := lapiClient.Do(lapiReq)
+				if lapiErr != nil || lapiResp.StatusCode >= 500 {
+					if lapiResp != nil {
+						lapiResp.Body.Close()
+					}
+					http.Error(w, "lapi: unreachable", http.StatusServiceUnavailable)
+					return
+				}
+				lapiResp.Body.Close()
+			}
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready"))

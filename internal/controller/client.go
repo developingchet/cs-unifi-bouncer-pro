@@ -213,11 +213,15 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 		_ = resp.Body.Close()
 		return nil, &ErrNotFound{URL: req.URL.Path}
 	case http.StatusTooManyRequests:
+		const minRateLimitBackoff = 1 * time.Second
 		retryAfter := 10 * time.Second
 		if ra := resp.Header.Get("Retry-After"); ra != "" {
 			if d, err := time.ParseDuration(ra + "s"); err == nil {
 				retryAfter = d
 			}
+		}
+		if retryAfter < minRateLimitBackoff {
+			retryAfter = minRateLimitBackoff
 		}
 		_ = resp.Body.Close()
 		return nil, &ErrRateLimit{RetryAfter: retryAfter}
@@ -330,6 +334,10 @@ func (c *unifiClient) DiscoverZones(ctx context.Context, site string) ([]Zone, e
 		return nil, err
 	}
 	return listFirewallZones(ctx, c, siteID)
+}
+
+func (c *unifiClient) DiscoverSites(ctx context.Context) ([]string, error) {
+	return discoverSites(ctx, c)
 }
 
 // ---- Zone Policies (integration v1) ----------------------------------------

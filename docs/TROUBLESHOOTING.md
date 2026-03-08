@@ -33,6 +33,10 @@ Common issues and solutions for cs-unifi-bouncer-pro.
 - [Performance Issues](#performance-issues)
   - [API rate gate triggered](#api-rate-gate-triggered)
   - [Worker queue full — jobs dropped](#worker-queue-full--jobs-dropped)
+- [External Blocklist Issues](#external-blocklist-issues)
+  - [Blocklist bans not being applied](#blocklist-bans-not-being-applied)
+- [Webhook Issues](#webhook-issues)
+  - [Webhook not firing](#webhook-not-firing)
 - [Network Connectivity](#network-connectivity)
 - [Debug Procedure](#debug-procedure)
 
@@ -580,6 +584,54 @@ curl http://localhost:8080/v1/decisions/stream?startup=true \
 ```
 
 Expected: `200` (stream starts) or `401` (wrong key).
+
+---
+
+## External Blocklist Issues
+
+### Blocklist bans not being applied
+
+**Symptom:** `BLOCKLIST_URLS` is set but no bans from the feed appear.
+
+**Check:**
+
+```bash
+docker logs cs-unifi-bouncer-pro | grep -E "blocklist|ext-blocklist"
+```
+
+Common causes:
+
+| Log message | Cause | Fix |
+|-------------|-------|-----|
+| `fetch ... connection refused` | URL unreachable from container | Verify outbound internet access; check the URL manually with `curl` |
+| `unexpected status 404` | URL returns non-200 | Verify the URL is correct |
+| `0 valid entries` | All lines are invalid or commented | Check the feed format (one IP or CIDR per line; `#` comments are skipped) |
+
+Blocklist bans are applied on startup and then every `BLOCKLIST_REFRESH_INTERVAL`. To force an immediate refresh, restart the container.
+
+---
+
+## Webhook Issues
+
+### Webhook not firing
+
+**Symptom:** `WEBHOOK_URL` and `WEBHOOK_EVENTS` are set but no POSTs are received.
+
+**Check:**
+
+```bash
+docker logs cs-unifi-bouncer-pro | grep -E "webhook|circuit_breaker"
+```
+
+Common causes:
+
+| Log message | Cause | Fix |
+|-------------|-------|-----|
+| `webhook: skipping unregistered event` | Event name not in `WEBHOOK_EVENTS` | Add the event to `WEBHOOK_EVENTS` |
+| `webhook: POST failed` (warn) | Network error or non-2xx response | Verify the URL is reachable from the container; webhook errors are non-fatal |
+| No log entries | `WEBHOOK_URL` is empty | Set `WEBHOOK_URL` in your `.env` |
+
+Webhook POSTs use a 5 second timeout and are never retried. The bouncer continues normally if a webhook call fails.
 
 ---
 

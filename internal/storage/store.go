@@ -11,6 +11,15 @@ type BanEntry struct {
 	IPv6       bool
 }
 
+// EventEntry records a single ban/unban audit event.
+type EventEntry struct {
+	Action     string    // "ban" | "unban" | "expire"
+	Origin     string    // e.g. "CAPI", "crowdsec", "manual", "expired"
+	Scenario   string
+	IP         string
+	RecordedAt time.Time
+}
+
 // GroupRecord is the write-through cache of a UniFi firewall group shard.
 type GroupRecord struct {
 	UnifiID   string
@@ -52,6 +61,11 @@ type Store interface {
 	SetPolicy(name string, rec PolicyRecord) error
 	DeletePolicy(name string) error
 	ListPolicies() (map[string]PolicyRecord, error)
+
+	// Event history (audit trail)
+	RecordEvent(e EventEntry) error
+	ListEvents(limit int) ([]EventEntry, error)
+	ListEventsForIP(ip string, limit int) ([]EventEntry, error)
 
 	// Utility
 	SizeBytes() (int64, error)

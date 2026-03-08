@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
@@ -31,6 +32,7 @@ type SyncJob struct {
 	ExpiresAt       time.Time
 	Origin          string    // CrowdSec decision origin (e.g. "CAPI", "crowdsec")
 	RemediationType string    // CrowdSec remediation type (e.g. "ban")
+	Scenario        string    // CrowdSec scenario name, used for per-scenario zone routing
 	ReceivedAt      time.Time // when this decision passed the filter pipeline; zero = unknown
 }
 
@@ -76,18 +78,43 @@ func makeJobHandler(
 		// after the API call but before bbolt cleanup leaves the IP in bbolt (and reconcile
 		// will add it back), which is the safe side.
 		if job.Action == "ban" {
-			if err := store.BanRecord(job.IP, job.ExpiresAt, job.IPv6); err != nil {
+			// Apply BAN_TTL as a safety cap: permanent or very long bans are capped to cfg.BanTTL.
+			// This ensures no IP stays banned permanently due to a missed delete event or a permanent decision.
+			expiresAt := job.ExpiresAt
+			if expiresAt.IsZero() || time.Until(expiresAt) > cfg.BanTTL {
+				expiresAt = time.Now().Add(cfg.BanTTL)
+			}
+			if err := store.BanRecord(job.IP, expiresAt, job.IPv6); err != nil {
 				return fmt.Errorf("record ban in bbolt: %w", err)
 			}
 		}
 
-		// Step 3: Apply to all sites
+		// Step 3: Apply to all sites — continue on per-site transient errors.
+		// Auth/rate-limit errors abort immediately; all other errors are collected
+		// so that remaining sites still receive the decision.
+
+		// Resolve per-scenario zone pair override (N8).
+		var scenarioZonePairs []config.ZonePair
+		if job.Action == "ban" && job.Scenario != "" {
+			for prefix, pairs := range cfg.ZonePairsScenarioMap {
+				if prefix != "" && strings.Contains(job.Scenario, prefix) {
+					scenarioZonePairs = pairs
+					break
+				}
+			}
+		}
+
 		sites := cfg.UnifiSites
+		var siteErrors []error
 		for _, site := range sites {
 			var applyErr error
 			switch job.Action {
 			case "ban":
-				applyErr = fwMgr.ApplyBan(ctx, site, job.IP, job.IPv6)
+				if len(scenarioZonePairs) > 0 {
+					applyErr = fwMgr.ApplyBanWithZones(ctx, site, job.IP, job.IPv6, scenarioZonePairs)
+				} else {
+					applyErr = fwMgr.ApplyBan(ctx, site, job.IP, job.IPv6)
+				}
 			case "delete":
 				applyErr = fwMgr.ApplyUnban(ctx, site, job.IP, job.IPv6)
 			}
@@ -95,14 +122,16 @@ func makeJobHandler(
 			if applyErr != nil {
 				var unauth *controller.ErrUnauthorized
 				var rateLimit *controller.ErrRateLimit
-				if errors.As(applyErr, &unauth) {
+				if errors.As(applyErr, &unauth) || errors.As(applyErr, &rateLimit) {
 					return applyErr
 				}
-				if errors.As(applyErr, &rateLimit) {
-					return applyErr
-				}
-				return fmt.Errorf("apply %s for site %s: %w", job.Action, site, applyErr)
+				log.Warn().Err(applyErr).Str("site", site).Str("action", job.Action).
+					Str("ip", job.IP).Msg("apply failed for site — continuing to remaining sites")
+				siteErrors = append(siteErrors, fmt.Errorf("site %s: %w", site, applyErr))
 			}
+		}
+		if len(siteErrors) > 0 {
+			return errors.Join(siteErrors...)
 		}
 
 		// Step 4: Finalize bbolt state and record LAPI metrics.
@@ -113,11 +142,27 @@ func makeJobHandler(
 				metrics.DecisionLatency.Observe(time.Since(job.ReceivedAt).Seconds())
 			}
 			recorder.RecordBan(job.Origin, job.RemediationType)
+			if err := store.RecordEvent(storage.EventEntry{
+				Action:     "ban",
+				Origin:     job.Origin,
+				Scenario:   job.Scenario,
+				IP:         job.IP,
+				RecordedAt: time.Now(),
+			}); err != nil {
+				log.Warn().Err(err).Str("ip", job.IP).Msg("failed to record ban event")
+			}
 		case "delete":
 			if err := store.BanDelete(job.IP); err != nil {
 				log.Warn().Err(err).Str("ip", job.IP).Msg("failed to delete ban from bbolt")
 			}
 			recorder.RecordDeletion()
+			if err := store.RecordEvent(storage.EventEntry{
+				Action:     "unban",
+				IP:         job.IP,
+				RecordedAt: time.Now(),
+			}); err != nil {
+				log.Warn().Err(err).Str("ip", job.IP).Msg("failed to record unban event")
+			}
 		}
 
 		log.Debug().Str("action", job.Action).Str("ip", job.IP).Bool("ipv6", job.IPv6).

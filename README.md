@@ -25,6 +25,12 @@ Automatically translates CrowdSec ban decisions into UniFi firewall rules — bl
 - **Template-based naming** — Go templates for all managed object names; prevents conflicts in multi-instance deployments
 - **Prometheus metrics** — 20 `crowdsec_unifi_*` metrics covering decisions, jobs, API calls, active bans, shard occupancy, decision latency, and circuit breaker state
 - **CrowdSec usage-metrics** — Pushes decision telemetry to LAPI `/v1/usage-metrics` on a configurable interval (default 30 min); spec-compliant with CrowdSec remediation component requirements
+- **Ban history audit trail** — Ring-buffer event log (up to 10,000 entries) records every ban, unban, and expiry; queryable via `status bans`, `status ip`, and `status history` CLI subcommands
+- **External blocklist import** — Fetch plain-text IP/CIDR lists from external URLs on a configurable interval; bans auto-expire if the URL becomes unreachable
+- **Webhook notifications** — POST JSON alerts to a webhook URL when the circuit breaker opens/closes or reconcile drift is detected
+- **Per-scenario duration overrides** — Override `BAN_TTL` for specific CrowdSec scenarios via `BLOCK_SCENARIO_DURATION_MAP`
+- **Per-scenario zone routing** — Route bans from specific scenarios to different zone pairs via `ZONE_PAIRS_SCENARIO_MAP`
+- **Decision rate limiter** — Token-bucket rate limiter (`DECISION_RATE_LIMIT`) to throttle decision processing during ban waves
 - **RedactWriter** — Automatically masks passwords, API keys, and Bearer tokens from all log output
 - **Dry-run mode** — Process decisions and log intended actions without modifying the UniFi controller
 - **Startup reconcile** — Syncs UniFi firewall state with bbolt on every start to correct drift
@@ -107,6 +113,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `BLOCK_WHITELIST` | — | Comma-separated IPs/CIDRs to never block |
 | `BLOCK_SCENARIO_EXCLUDE` | — | Comma-separated scenario substrings to skip |
 | `BLOCK_MIN_DURATION` | — | Ignore bans shorter than this duration, e.g. `1h` |
+| `BLOCK_SCENARIO_DURATION_MAP` | — | Per-scenario ban duration overrides. Semicolon-separated `key=duration` pairs matched as substrings. Example: `ssh-bf=168h;http-probing=24h` |
 
 ### Firewall
 
@@ -142,6 +149,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ZONE_PAIRS` | `External->Internal` | Comma-separated zone pairs in `src[:sport,...]->dst[:dport,...]` format. Zone names are auto-resolved to UUIDs at startup; standard UUIDs and MongoDB ObjectIDs are accepted directly. `External`/`Internal` are the default UniFi 8.x names — check Settings → Firewall → Zones if you renamed them. Optional colon-separated port lists restrict which source or destination ports the block policies match (empty = any). |
+| `ZONE_PAIRS_SCENARIO_MAP` | — | Per-scenario zone pair overrides. Semicolon-separated `key=pairs` entries where `key` matches as a substring of the scenario name. Overrides `ZONE_PAIRS` for matching bans. Example: `ssh-bf=External:22->Internal:22;http-probing=External->Internal:80,443` |
 
 ### Cloudflare whitelist
 
@@ -183,6 +191,22 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `DATA_DIR` | `/data` | Directory for the bbolt database file |
 | `BAN_TTL` | `168h` | How long to keep a ban record if CrowdSec sends no expiry (7 days) |
 | `JANITOR_INTERVAL` | `1h` | How often the janitor prunes expired bans from bbolt |
+| `HISTORY_MAX_EVENTS` | `10000` | Maximum audit trail events kept in the ring buffer |
+
+### External blocklists
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BLOCKLIST_URLS` | — | Comma-separated URLs of plain-text IP/CIDR blocklists to fetch |
+| `BLOCKLIST_REFRESH_INTERVAL` | `24h` | How often to re-fetch each URL |
+| `BLOCKLIST_NAME_PREFIX` | `ext-blocklist` | Scenario prefix used in the audit trail for blocklist bans |
+
+### Webhook notifications
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WEBHOOK_URL` | — | Webhook POST URL; leave empty to disable |
+| `WEBHOOK_EVENTS` | — | Comma-separated event names: `circuit_breaker_open`, `circuit_breaker_close`, `reconcile_drift` |
 
 ### Session management
 

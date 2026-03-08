@@ -222,6 +222,66 @@ func TestNilScenario_NoAstray(t *testing.T) {
 	}
 }
 
+func TestFilter_ScenarioDurationOverride(t *testing.T) {
+	tests := []struct {
+		name        string
+		scenario    string
+		duration    string
+		overrideMap map[string]time.Duration
+		wantDur     time.Duration
+	}{
+		{
+			name:        "exact match overrides duration",
+			scenario:    "ssh-bf",
+			duration:    "1h",
+			overrideMap: map[string]time.Duration{"ssh-bf": 168 * time.Hour},
+			wantDur:     168 * time.Hour,
+		},
+		{
+			name:        "substring match overrides duration",
+			scenario:    "crowdsec-ssh-bf-rule",
+			duration:    "2h",
+			overrideMap: map[string]time.Duration{"ssh-bf": 168 * time.Hour},
+			wantDur:     168 * time.Hour,
+		},
+		{
+			name:        "no match leaves duration unchanged",
+			scenario:    "http-scan",
+			duration:    "6h",
+			overrideMap: map[string]time.Duration{"ssh-bf": 168 * time.Hour},
+			wantDur:     6 * time.Hour,
+		},
+		{
+			name:        "empty map leaves duration unchanged",
+			scenario:    "ssh-bf",
+			duration:    "1h",
+			overrideMap: map[string]time.Duration{},
+			wantDur:     1 * time.Hour,
+		},
+		{
+			name:        "nil map leaves duration unchanged",
+			scenario:    "ssh-bf",
+			duration:    "3h",
+			overrideMap: nil,
+			wantDur:     3 * time.Hour,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := NewFilterConfig()
+			cfg.ScenarioDurationMap = tc.overrideMap
+			d := makeDecision("ban", "ip", "1.2.3.4", tc.scenario, "crowdsec", tc.duration)
+			r := Filter(d, cfg, zerolog.Nop())
+			if !r.Passed {
+				t.Fatal("expected decision to pass")
+			}
+			if r.Duration != tc.wantDur {
+				t.Errorf("duration: got %v, want %v", r.Duration, tc.wantDur)
+			}
+		})
+	}
+}
+
 func TestNilOrigin_NoAstray(t *testing.T) {
 	cfg := NewFilterConfig()
 	// AllowedOrigins is empty so all origins (including nil) are allowed.

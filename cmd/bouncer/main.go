@@ -11,6 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/blocklist"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/bouncer"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/capabilities"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
@@ -20,6 +21,7 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/webhook"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/whitelist"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
@@ -54,6 +56,8 @@ func main() {
 		drainCmd(),
 		validateCmd(),
 		diagnoseCmd(),
+		banCmd(),
+		unbanCmd(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -95,7 +99,7 @@ func runDaemon() error {
 		Bool("appsec", capabilities.SupportsAppSec).
 		Msg("bouncer capabilities")
 
-	store, err := storage.NewBboltStore(cfg.DataDir, log)
+	store, err := storage.NewBboltStore(cfg.DataDir, log, cfg.HistoryMaxEvents)
 	if err != nil {
 		return fmt.Errorf("open storage: %w", err)
 	}
@@ -149,7 +153,23 @@ func runDaemon() error {
 		}
 	}
 
-	fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log)
+	// Auto-discover UniFi sites if configured.
+	if cfg.UnifiSitesAuto {
+		discovered, err := ctrl.DiscoverSites(ctx)
+		if err != nil {
+			return fmt.Errorf("auto-discover sites: %w", err)
+		}
+		cfg.UnifiSites = filterExcluded(discovered, cfg.UnifiSitesExclude)
+		log.Info().Strs("sites", cfg.UnifiSites).Msg("auto-discovered UniFi sites")
+	}
+
+	// Build webhook notifier (no-op when WEBHOOK_URL is empty).
+	whNotifier := webhook.New(cfg.WebhookURL, cfg.WebhookEvents, log)
+
+	fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log,
+		func() { whNotifier.Fire(ctx, "circuit_breaker_open", nil) },
+		func() { whNotifier.Fire(ctx, "circuit_breaker_close", nil) },
+	)
 	if err != nil {
 		return err
 	}
@@ -201,7 +221,9 @@ func runDaemon() error {
 
 		// cfZonePairs are already resolved above
 		if err := cfManager.Sync(ctx, cfZonePairs); err != nil {
-			log.Warn().Err(err).Msg("initial Cloudflare whitelist sync failed - will retry on next tick")
+			log.Error().Err(err).
+				Msg("initial Cloudflare whitelist sync FAILED — Cloudflare IPs will NOT be whitelisted until next tick; false positives possible")
+			metrics.CloudflareWhitelistSyncErrors.Inc()
 		} else {
 			log.Info().Msg("Cloudflare whitelist initial sync complete")
 		}
@@ -242,6 +264,15 @@ func runDaemon() error {
 		return fmt.Errorf("build bouncer: %w", err)
 	}
 
+	// Start external blocklist manager if configured
+	if len(cfg.BlocklistURLs) > 0 {
+		blMgr := blocklist.NewManager(
+			cfg.BlocklistURLs, cfg.BlocklistRefreshInterval, cfg.BlocklistNamePrefix,
+			fwMgr, store, cfg.UnifiSites, log,
+		)
+		go blMgr.Run(ctx)
+	}
+
 	// Start janitor
 	janitor := bouncer.NewJanitor(store, fwMgr, cfg.UnifiSites, cfg.JanitorInterval, log)
 	go func() {
@@ -252,7 +283,7 @@ func runDaemon() error {
 
 	// Start periodic reconcile if configured
 	if cfg.FirewallReconcileInterval > 0 {
-		go runPeriodicReconcile(ctx, fwMgr, cfg.UnifiSites, cfg.FirewallReconcileInterval, log)
+		go runPeriodicReconcile(ctx, fwMgr, cfg.UnifiSites, cfg.FirewallReconcileInterval, whNotifier, log)
 	}
 
 	// Start periodic Cloudflare whitelist refresh if enabled
@@ -275,10 +306,52 @@ func runDaemon() error {
 		}()
 	}
 
-	return bnc.Run(ctx)
+	// Run bouncer with graceful shutdown support.
+	done := make(chan error, 1)
+	go func() { done <- bnc.Run(ctx) }()
+
+	// Wait for normal completion or signal cancellation.
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+	}
+
+	// Signal received; wait up to ShutdownGracePeriod for clean shutdown.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownGracePeriod)
+	defer shutdownCancel()
+	select {
+	case err := <-done:
+		return err
+	case <-shutdownCtx.Done():
+		log.Warn().Dur("grace_period", cfg.ShutdownGracePeriod).
+			Msg("shutdown grace period exceeded; forcing exit")
+		os.Exit(1)
+		return nil
+	}
 }
 
-func runPeriodicReconcile(ctx context.Context, fwMgr firewall.Manager, sites []string, interval time.Duration, log zerolog.Logger) {
+// filterExcluded removes excluded sites from a site list.
+func filterExcluded(sites, excluded []string) []string {
+	if len(excluded) == 0 {
+		return sites
+	}
+	excludeSet := make(map[string]bool, len(excluded))
+	for _, e := range excluded {
+		excludeSet[e] = true
+	}
+	result := make([]string, 0, len(sites))
+	for _, s := range sites {
+		if !excludeSet[s] {
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+const reconcileDriftThreshold = 100
+
+func runPeriodicReconcile(ctx context.Context, fwMgr firewall.Manager, sites []string, interval time.Duration, notifier *webhook.Notifier, log zerolog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -295,6 +368,12 @@ func runPeriodicReconcile(ctx context.Context, fwMgr firewall.Manager, sites []s
 			} else if result != nil {
 				log.Info().Int("added", result.Added).Int("removed", result.Removed).
 					Dur("elapsed", result.Elapsed).Msg("periodic reconcile complete")
+				if result.Added+result.Removed >= reconcileDriftThreshold {
+					notifier.Fire(ctx, "reconcile_drift", map[string]any{
+						"added":   result.Added,
+						"removed": result.Removed,
+					})
+				}
 			}
 		}
 	}
@@ -359,7 +438,7 @@ func reconcileCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 
-			store, err := storage.NewBboltStore(cfg.DataDir, log)
+			store, err := storage.NewBboltStore(cfg.DataDir, log, cfg.HistoryMaxEvents)
 			if err != nil {
 				return err
 			}
@@ -382,7 +461,7 @@ func reconcileCmd() *cobra.Command {
 			}
 			defer ctrl.Close()
 
-			fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log)
+			fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log, nil, nil)
 			if err != nil {
 				return err
 			}
@@ -421,7 +500,8 @@ Opens the database in read-only mode — safe to run while the daemon is running
 		defaultDataDir = "/data"
 	}
 	var dataDir string
-	cmd.Flags().StringVar(&dataDir, "data-dir", defaultDataDir,
+	// Persistent so subcommands inherit it.
+	cmd.PersistentFlags().StringVar(&dataDir, "data-dir", defaultDataDir,
 		"Path to the data directory containing bouncer.db (env: DATA_DIR)")
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
@@ -480,6 +560,191 @@ Opens the database in read-only mode — safe to run while the daemon is running
 		return w.Flush()
 	}
 
+	// ---- status bans subcommand ----
+	bansCmd := &cobra.Command{
+		Use:   "bans",
+		Short: "List tracked bans from bbolt",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			top, _ := cmd.Flags().GetInt("top")
+			sortBy, _ := cmd.Flags().GetString("sort")
+			expiring, _ := cmd.Flags().GetDuration("expiring")
+			showExpired, _ := cmd.Flags().GetBool("expired")
+
+			store, err := storage.NewBboltStoreReadOnly(dataDir)
+			if err != nil {
+				return fmt.Errorf("open store (read-only): %w", err)
+			}
+			defer store.Close()
+
+			banList, err := store.BanList()
+			if err != nil {
+				return fmt.Errorf("list bans: %w", err)
+			}
+
+			now := time.Now()
+			type row struct {
+				ip         string
+				recordedAt time.Time
+				expiresAt  time.Time
+				ipv6       bool
+				expired    bool
+			}
+			var rows []row
+			for ip, entry := range banList {
+				isExpired := !entry.ExpiresAt.IsZero() && entry.ExpiresAt.Before(now)
+				if showExpired && !isExpired {
+					continue
+				}
+				if !showExpired && isExpired {
+					continue
+				}
+				if expiring > 0 {
+					if entry.ExpiresAt.IsZero() || entry.ExpiresAt.After(now.Add(expiring)) {
+						continue
+					}
+				}
+				rows = append(rows, row{
+					ip:         ip,
+					recordedAt: entry.RecordedAt,
+					expiresAt:  entry.ExpiresAt,
+					ipv6:       entry.IPv6,
+					expired:    isExpired,
+				})
+			}
+
+			// Sort
+			for i := 1; i < len(rows); i++ {
+				for j := i; j > 0; j-- {
+					swap := false
+					switch sortBy {
+					case "ip":
+						swap = rows[j].ip < rows[j-1].ip
+					default: // recorded_at, newest first
+						swap = rows[j].recordedAt.After(rows[j-1].recordedAt)
+					}
+					if swap {
+						rows[j], rows[j-1] = rows[j-1], rows[j]
+					} else {
+						break
+					}
+				}
+			}
+
+			if top > 0 && len(rows) > top {
+				rows = rows[:top]
+			}
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "IP\tIPv6\tRECORDED_AT\tEXPIRES_AT\tEXPIRED")
+			for _, r := range rows {
+				expiresStr := "-"
+				if !r.expiresAt.IsZero() {
+					expiresStr = r.expiresAt.UTC().Format(time.RFC3339)
+				}
+				fmt.Fprintf(w, "%s\t%v\t%s\t%s\t%v\n",
+					r.ip, r.ipv6,
+					r.recordedAt.UTC().Format(time.RFC3339),
+					expiresStr, r.expired)
+			}
+			return w.Flush()
+		},
+	}
+	bansCmd.Flags().Int("top", 0, "Limit output to top N rows (0 = all)")
+	bansCmd.Flags().String("sort", "recorded_at", "Sort by: recorded_at | ip")
+	bansCmd.Flags().Duration("expiring", 0, "Show only bans expiring within this window (e.g. 24h)")
+	bansCmd.Flags().Bool("expired", false, "Show only already-expired bans")
+
+	// ---- status ip subcommand ----
+	ipCmd := &cobra.Command{
+		Use:   "ip <IP>",
+		Short: "Show ban details and event history for a specific IP",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ip := args[0]
+			limit, _ := cmd.Flags().GetInt("limit")
+
+			store, err := storage.NewBboltStoreReadOnly(dataDir)
+			if err != nil {
+				return fmt.Errorf("open store (read-only): %w", err)
+			}
+			defer store.Close()
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+
+			banList, err := store.BanList()
+			if err != nil {
+				return fmt.Errorf("list bans: %w", err)
+			}
+			now := time.Now()
+			if entry, ok := banList[ip]; ok {
+				expired := !entry.ExpiresAt.IsZero() && entry.ExpiresAt.Before(now)
+				expiresStr := "never"
+				if !entry.ExpiresAt.IsZero() {
+					expiresStr = entry.ExpiresAt.UTC().Format(time.RFC3339)
+				}
+				fmt.Fprintln(w, "FIELD\tVALUE")
+				fmt.Fprintf(w, "ip\t%s\n", ip)
+				fmt.Fprintf(w, "ipv6\t%v\n", entry.IPv6)
+				fmt.Fprintf(w, "recorded_at\t%s\n", entry.RecordedAt.UTC().Format(time.RFC3339))
+				fmt.Fprintf(w, "expires_at\t%s\n", expiresStr)
+				fmt.Fprintf(w, "expired\t%v\n", expired)
+			} else {
+				fmt.Fprintf(w, "ip\t%s\n", ip)
+				fmt.Fprintf(w, "status\tnot banned\n")
+			}
+			_ = w.Flush()
+
+			events, err := store.ListEventsForIP(ip, limit)
+			if err != nil {
+				return fmt.Errorf("list events for IP: %w", err)
+			}
+			if len(events) > 0 {
+				fmt.Println()
+				w2 := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(w2, "TIME\tACTION\tORIGIN\tSCENARIO")
+				for _, e := range events {
+					fmt.Fprintf(w2, "%s\t%s\t%s\t%s\n",
+						e.RecordedAt.UTC().Format(time.RFC3339),
+						e.Action, e.Origin, e.Scenario)
+				}
+				_ = w2.Flush()
+			}
+			return nil
+		},
+	}
+	ipCmd.Flags().Int("limit", 50, "Maximum number of history events to show")
+
+	// ---- status history subcommand ----
+	historyCmd := &cobra.Command{
+		Use:   "history",
+		Short: "Show recent ban/unban audit trail events",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			limit, _ := cmd.Flags().GetInt("limit")
+
+			store, err := storage.NewBboltStoreReadOnly(dataDir)
+			if err != nil {
+				return fmt.Errorf("open store (read-only): %w", err)
+			}
+			defer store.Close()
+
+			events, err := store.ListEvents(limit)
+			if err != nil {
+				return fmt.Errorf("list events: %w", err)
+			}
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "TIME\tACTION\tIP\tORIGIN\tSCENARIO")
+			for _, e := range events {
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+					e.RecordedAt.UTC().Format(time.RFC3339),
+					e.Action, e.IP, e.Origin, e.Scenario)
+			}
+			return w.Flush()
+		},
+	}
+	historyCmd.Flags().Int("limit", 50, "Maximum number of events to show")
+
+	cmd.AddCommand(bansCmd, ipCmd, historyCmd)
 	return cmd
 }
 
@@ -520,7 +785,7 @@ Requires either --force or --dry-run for safety.`,
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 
-		store, err := storage.NewBboltStore(cfg.DataDir, log)
+		store, err := storage.NewBboltStore(cfg.DataDir, log, cfg.HistoryMaxEvents)
 		if err != nil {
 			return fmt.Errorf("open storage: %w", err)
 		}
@@ -543,7 +808,7 @@ Requires either --force or --dry-run for safety.`,
 		}
 		defer ctrl.Close()
 
-		fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log)
+		fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log, nil, nil)
 		if err != nil {
 			return err
 		}
@@ -567,10 +832,144 @@ Requires either --force or --dry-run for safety.`,
 	return cmd
 }
 
+// banCmd manually bans an IP across all configured UniFi sites.
+func banCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "ban <IP>",
+		Short: "Manually ban an IP across all configured UniFi sites",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dur, _ := cmd.Flags().GetDuration("duration")
+			return runManualBan(args[0], dur)
+		},
+	}
+	cmd.Flags().Duration("duration", 24*time.Hour, "Ban duration (0 = permanent/BAN_TTL cap applies)")
+	return cmd
+}
+
+// unbanCmd manually unbans an IP from all configured UniFi sites.
+func unbanCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unban <IP>",
+		Short: "Manually unban an IP from all configured UniFi sites",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runManualUnban(args[0])
+		},
+	}
+}
+
+func runManualBan(ip string, dur time.Duration) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	log := buildLogger(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store, err := storage.NewBboltStore(cfg.DataDir, log, cfg.HistoryMaxEvents)
+	if err != nil {
+		return fmt.Errorf("open storage: %w", err)
+	}
+	defer store.Close()
+
+	ctrl, err := controller.NewClient(ctx, controller.ClientConfig{
+		BaseURL: cfg.UnifiURL, Username: cfg.UnifiUsername, Password: cfg.UnifiPassword,
+		APIKey: cfg.UnifiAPIKey, VerifyTLS: cfg.UnifiVerifyTLS, CACertPath: cfg.UnifiCACert,
+		Timeout: cfg.UnifiHTTPTimeout, ReauthMinGap: cfg.SessionReauthMinGap, EnableIPv6: cfg.EnableIPv6,
+	}, log)
+	if err != nil {
+		return fmt.Errorf("init UniFi client: %w", err)
+	}
+	defer ctrl.Close()
+
+	fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log, nil, nil)
+	if err != nil {
+		return err
+	}
+	if err := fwMgr.EnsureInfrastructure(ctx, cfg.UnifiSites); err != nil {
+		return fmt.Errorf("ensure infrastructure: %w", err)
+	}
+
+	var expiresAt time.Time
+	if dur > 0 {
+		expiresAt = time.Now().Add(dur)
+	}
+	isIPv6 := strings.Contains(ip, ":")
+
+	for _, site := range cfg.UnifiSites {
+		if err := fwMgr.ApplyBan(ctx, site, ip, isIPv6); err != nil {
+			return fmt.Errorf("ban %s on site %s: %w", ip, site, err)
+		}
+	}
+	if err := store.BanRecord(ip, expiresAt, isIPv6); err != nil {
+		return fmt.Errorf("record ban in storage: %w", err)
+	}
+	fmt.Printf("banned %s across %d site(s) (expires: %s)\n", ip, len(cfg.UnifiSites),
+		func() string {
+			if expiresAt.IsZero() {
+				return "never (BAN_TTL cap applies)"
+			}
+			return expiresAt.Format(time.RFC3339)
+		}())
+	return nil
+}
+
+func runManualUnban(ip string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	log := buildLogger(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	store, err := storage.NewBboltStore(cfg.DataDir, log, cfg.HistoryMaxEvents)
+	if err != nil {
+		return fmt.Errorf("open storage: %w", err)
+	}
+	defer store.Close()
+
+	ctrl, err := controller.NewClient(ctx, controller.ClientConfig{
+		BaseURL: cfg.UnifiURL, Username: cfg.UnifiUsername, Password: cfg.UnifiPassword,
+		APIKey: cfg.UnifiAPIKey, VerifyTLS: cfg.UnifiVerifyTLS, CACertPath: cfg.UnifiCACert,
+		Timeout: cfg.UnifiHTTPTimeout, ReauthMinGap: cfg.SessionReauthMinGap, EnableIPv6: cfg.EnableIPv6,
+	}, log)
+	if err != nil {
+		return fmt.Errorf("init UniFi client: %w", err)
+	}
+	defer ctrl.Close()
+
+	fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log, nil, nil)
+	if err != nil {
+		return err
+	}
+	if err := fwMgr.EnsureInfrastructure(ctx, cfg.UnifiSites); err != nil {
+		return fmt.Errorf("ensure infrastructure: %w", err)
+	}
+
+	isIPv6 := strings.Contains(ip, ":")
+	for _, site := range cfg.UnifiSites {
+		if err := fwMgr.ApplyUnban(ctx, site, ip, isIPv6); err != nil {
+			return fmt.Errorf("unban %s on site %s: %w", ip, site, err)
+		}
+	}
+	if err := store.BanDelete(ip); err != nil {
+		return fmt.Errorf("remove ban from storage: %w", err)
+	}
+	fmt.Printf("unbanned %s from %d site(s)\n", ip, len(cfg.UnifiSites))
+	return nil
+}
+
 // buildFWManager constructs a firewall.Manager from config, controller, store, and logger.
 // It does NOT call EnsureInfrastructure — callers do that themselves when needed.
+// cbOpen and cbClose are optional callbacks fired when the circuit breaker opens/closes; pass nil for no-op.
 func buildFWManager(ctx context.Context, cfg *config.Config,
 	ctrl controller.Controller, store storage.Store, log zerolog.Logger,
+	cbOpen, cbClose func(),
 ) (firewall.Manager, error) {
 	namer, err := firewall.NewNamer(
 		cfg.GroupNameTemplate,
@@ -600,6 +999,8 @@ func buildFWManager(ctx context.Context, cfg *config.Config,
 		CircuitBreakerThreshold:     cfg.CircuitBreakerThreshold,
 		CircuitBreakerResetInterval: cfg.CircuitBreakerResetInterval,
 		ShardMergeThreshold:         cfg.ShardMergeThreshold,
+		OnCircuitBreakerOpen:        cbOpen,
+		OnCircuitBreakerClose:       cbClose,
 		LegacyCfg: firewall.LegacyConfig{
 			RuleIndexStartV4: cfg.LegacyRuleIndexStartV4,
 			RuleIndexStartV6: cfg.LegacyRuleIndexStartV6,

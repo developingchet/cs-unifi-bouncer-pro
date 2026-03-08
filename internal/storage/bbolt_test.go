@@ -12,7 +12,7 @@ import (
 func newTestStore(t *testing.T) Store {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := NewBboltStore(dir, zerolog.Nop())
+	s, err := NewBboltStore(dir, zerolog.Nop(), 0)
 	if err != nil {
 		t.Fatalf("NewBboltStore: %v", err)
 	}
@@ -240,10 +240,106 @@ func TestListPolicies(t *testing.T) {
 	}
 }
 
+// ---- Event history tests ---------------------------------------------------
+
+func TestBbolt_RecordEvent_And_ListEvents(t *testing.T) {
+	s := newTestStore(t)
+	events := []EventEntry{
+		{Action: "ban", Origin: "crowdsec", Scenario: "ssh-bf", IP: "1.1.1.1", RecordedAt: time.Now()},
+		{Action: "ban", Origin: "CAPI", Scenario: "http-scan", IP: "2.2.2.2", RecordedAt: time.Now()},
+		{Action: "unban", IP: "1.1.1.1", RecordedAt: time.Now()},
+	}
+	for _, e := range events {
+		if err := s.RecordEvent(e); err != nil {
+			t.Fatalf("RecordEvent: %v", err)
+		}
+	}
+	got, err := s.ListEvents(0)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(got))
+	}
+	// ListEvents returns newest first
+	if got[0].Action != "unban" {
+		t.Errorf("first (newest) event should be unban, got %q", got[0].Action)
+	}
+	if got[2].Action != "ban" || got[2].IP != "1.1.1.1" {
+		t.Errorf("last (oldest) event should be ban for 1.1.1.1, got action=%q ip=%q", got[2].Action, got[2].IP)
+	}
+}
+
+func TestBbolt_ListEventsForIP(t *testing.T) {
+	s := newTestStore(t)
+	_ = s.RecordEvent(EventEntry{Action: "ban", IP: "1.1.1.1", RecordedAt: time.Now()})
+	_ = s.RecordEvent(EventEntry{Action: "ban", IP: "2.2.2.2", RecordedAt: time.Now()})
+	_ = s.RecordEvent(EventEntry{Action: "unban", IP: "1.1.1.1", RecordedAt: time.Now()})
+
+	got, err := s.ListEventsForIP("1.1.1.1", 0)
+	if err != nil {
+		t.Fatalf("ListEventsForIP: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 events for 1.1.1.1, got %d", len(got))
+	}
+	// newest first
+	if got[0].Action != "unban" {
+		t.Errorf("first event should be unban, got %q", got[0].Action)
+	}
+
+	got2, err := s.ListEventsForIP("2.2.2.2", 0)
+	if err != nil {
+		t.Fatalf("ListEventsForIP 2.2.2.2: %v", err)
+	}
+	if len(got2) != 1 {
+		t.Fatalf("expected 1 event for 2.2.2.2, got %d", len(got2))
+	}
+}
+
+func TestBbolt_EventRingBuffer(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewBboltStore(dir, zerolog.Nop(), 5) // tiny cap of 5
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// Insert 10 events — only the last 5 should remain
+	for i := 0; i < 10; i++ {
+		_ = s.RecordEvent(EventEntry{
+			Action:     "ban",
+			IP:         "1.2.3.4",
+			RecordedAt: time.Now(),
+		})
+	}
+	got, err := s.ListEvents(0)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(got) != 5 {
+		t.Errorf("ring buffer: expected 5 events, got %d", len(got))
+	}
+}
+
+func TestBbolt_ListEvents_Limit(t *testing.T) {
+	s := newTestStore(t)
+	for i := 0; i < 10; i++ {
+		_ = s.RecordEvent(EventEntry{Action: "ban", IP: "1.2.3.4", RecordedAt: time.Now()})
+	}
+	got, err := s.ListEvents(3)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(got) != 3 {
+		t.Errorf("expected 3 events with limit=3, got %d", len(got))
+	}
+}
+
 // Ensure bbolt file is actually created on disk.
 func TestFileCreated(t *testing.T) {
 	dir := t.TempDir()
-	s, err := NewBboltStore(dir, zerolog.Nop())
+	s, err := NewBboltStore(dir, zerolog.Nop(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

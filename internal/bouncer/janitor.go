@@ -69,23 +69,39 @@ func (j *Janitor) tick(ctx context.Context) {
 		}
 		if len(expired) > 0 {
 			j.log.Info().Int("count", len(expired)).Msg("expiry reaper: unbanning expired IPs")
+			successfullyUnbanned := make([]string, 0, len(expired))
 			for _, e := range expired {
+				allOK := true
 				for _, site := range j.sites {
 					if err := j.fwMgr.ApplyUnban(ctx, site, e.ip, e.ipv6); err != nil {
 						j.log.Warn().Err(err).Str("ip", e.ip).Str("site", site).
-							Msg("expiry reaper: unban failed")
+							Msg("expiry reaper: unban failed — skipping bbolt prune for this IP")
+						allOK = false
+					}
+				}
+				if allOK {
+					successfullyUnbanned = append(successfullyUnbanned, e.ip)
+				}
+			}
+			var pruned int
+			for _, ip := range successfullyUnbanned {
+				if err := j.store.BanDelete(ip); err != nil {
+					j.log.Warn().Err(err).Str("ip", ip).Msg("expiry reaper: bbolt delete failed")
+				} else {
+					pruned++
+					if err := j.store.RecordEvent(storage.EventEntry{
+						Action:     "expire",
+						Origin:     "expired",
+						IP:         ip,
+						RecordedAt: time.Now(),
+					}); err != nil {
+						j.log.Warn().Err(err).Str("ip", ip).Msg("expiry reaper: failed to record expire event")
 					}
 				}
 			}
+			j.log.Info().Int("pruned", pruned).Int("skipped", len(expired)-pruned).
+				Msg("janitor: pruned successfully-unbanned IPs from bbolt")
 		}
-	}
-
-	// Prune expired bans from bbolt.
-	pruned, err := j.store.PruneExpiredBans()
-	if err != nil {
-		j.log.Warn().Err(err).Msg("janitor: prune expired bans failed")
-	} else {
-		j.log.Info().Int("pruned", pruned).Msg("janitor: pruned expired bans from bbolt")
 	}
 
 	// Update DB size gauge.

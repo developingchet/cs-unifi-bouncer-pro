@@ -153,4 +153,25 @@ var (
 		Name:      "shards_rebalanced_total",
 		Help:      "Number of shards drained by the rebalance pass, by family and site.",
 	}, []string{"family", "site"})
+
+	// DecisionsInFlight tracks decisions currently being processed by the job handler.
+	DecisionsInFlight = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "decisions_in_flight",
+		Help:      "Decisions currently being processed by the job handler.",
+	})
+
+	// CloudflareWhitelistSyncErrors counts Cloudflare whitelist sync failures.
+	CloudflareWhitelistSyncErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "cloudflare_whitelist_sync_errors_total",
+		Help:      "Total Cloudflare whitelist sync failures.",
+	})
+
+	// DecisionQueueDepth tracks decision rate limiter backpressure.
+	DecisionQueueDepth = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "decision_queue_depth",
+		Help:      "Tracks decision rate limiter backpressure.",
+	})
 )

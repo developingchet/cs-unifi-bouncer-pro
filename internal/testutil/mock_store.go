@@ -14,6 +14,7 @@ type MockStore struct {
 	bans     map[string]storage.BanEntry
 	groups   map[string]storage.GroupRecord
 	policies map[string]storage.PolicyRecord
+	events   []storage.EventEntry
 
 	// Error injection: method -> next error (consumed on first call)
 	errors map[string]error
@@ -208,6 +209,53 @@ func (m *MockStore) ListPolicies() (map[string]storage.PolicyRecord, error) {
 	result := make(map[string]storage.PolicyRecord, len(m.policies))
 	for k, v := range m.policies {
 		result[k] = v
+	}
+	return result, nil
+}
+
+// --- Event history ----------------------------------------------------------
+
+func (m *MockStore) RecordEvent(e storage.EventEntry) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.popError("RecordEvent"); err != nil {
+		return err
+	}
+	m.events = append(m.events, e)
+	return nil
+}
+
+func (m *MockStore) ListEvents(limit int) ([]storage.EventEntry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.popError("ListEvents"); err != nil {
+		return nil, err
+	}
+	result := make([]storage.EventEntry, len(m.events))
+	// Return newest first
+	for i, e := range m.events {
+		result[len(m.events)-1-i] = e
+	}
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+func (m *MockStore) ListEventsForIP(ip string, limit int) ([]storage.EventEntry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.popError("ListEventsForIP"); err != nil {
+		return nil, err
+	}
+	var result []storage.EventEntry
+	for i := len(m.events) - 1; i >= 0; i-- {
+		if m.events[i].IP == ip {
+			result = append(result, m.events[i])
+			if limit > 0 && len(result) >= limit {
+				break
+			}
+		}
 	}
 	return result, nil
 }

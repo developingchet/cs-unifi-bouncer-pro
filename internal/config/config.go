@@ -27,7 +27,12 @@ type Config struct {
 	UnifiAPIDebug    bool          `koanf:"unifi_api_debug"`
 
 	// UniFi Sites
-	UnifiSites []string `koanf:"unifi_sites"`
+	UnifiSites       []string `koanf:"unifi_sites"`
+	UnifiSitesAuto   bool     `koanf:"unifi_sites_auto"`
+	UnifiSitesExclude []string `koanf:"-"` // parsed from UNIFI_SITES_EXCLUDE CSV
+
+	// UniFi Security
+	UnifiRequireHTTPS bool `koanf:"unifi_require_https"`
 
 	// Firewall Mode & Behavior
 	FirewallMode              string        `koanf:"firewall_mode"`
@@ -86,6 +91,13 @@ type Config struct {
 	BlockScenarioExclude    []string      `koanf:"block_scenario_exclude"`
 	BlockWhitelist          []string      `koanf:"block_whitelist"`
 	BlockMinDuration        time.Duration `koanf:"block_min_duration"`
+	// BlockScenarioDurationMap overrides the ban duration for specific scenarios.
+	// Parsed from BLOCK_SCENARIO_DURATION_MAP=ssh-bf=168h,http-probing=24h
+	BlockScenarioDurationMap map[string]time.Duration `koanf:"-"`
+
+	// Decision Rate Limiting
+	DecisionRateLimit int `koanf:"decision_rate_limit"` // decisions/second, 0 = unlimited
+	DecisionBurstSize int `koanf:"decision_burst_size"`
 
 	// Session Management
 	SessionReauthMinGap  time.Duration `koanf:"session_reauth_min_gap"`
@@ -96,13 +108,31 @@ type Config struct {
 	BanTTL  time.Duration `koanf:"ban_ttl"`
 
 	// Operational
-	DryRun          bool          `koanf:"dry_run"`
-	LogLevel        string        `koanf:"log_level"`
-	LogFormat       string        `koanf:"log_format"`
-	MetricsEnabled  bool          `koanf:"metrics_enabled"`
-	MetricsAddr     string        `koanf:"metrics_addr"`
-	HealthAddr      string        `koanf:"health_addr"`
-	JanitorInterval time.Duration `koanf:"janitor_interval"`
+	DryRun              bool          `koanf:"dry_run"`
+	LogLevel            string        `koanf:"log_level"`
+	LogFormat           string        `koanf:"log_format"`
+	MetricsEnabled      bool          `koanf:"metrics_enabled"`
+	MetricsAddr         string        `koanf:"metrics_addr"`
+	HealthAddr          string        `koanf:"health_addr"`
+	JanitorInterval     time.Duration `koanf:"janitor_interval"`
+	ShutdownGracePeriod time.Duration `koanf:"shutdown_grace_period"`
+	HealthCheckLAPI     bool          `koanf:"health_check_lapi"`
+
+	// Storage
+	HistoryMaxEvents int `koanf:"history_max_events"`
+
+	// Blocklist import
+	BlocklistURLs            []string      `koanf:"-"` // parsed from BLOCKLIST_URLS CSV
+	BlocklistRefreshInterval time.Duration `koanf:"blocklist_refresh_interval"`
+	BlocklistNamePrefix      string        `koanf:"blocklist_name_prefix"`
+
+	// Webhook notifications
+	WebhookURL    string   `koanf:"webhook_url"`
+	WebhookEvents []string `koanf:"-"` // parsed from WEBHOOK_EVENTS CSV
+
+	// Zone routing by scenario
+	// Parsed from ZONE_PAIRS_SCENARIO_MAP
+	ZonePairsScenarioMap map[string][]ZonePair `koanf:"-"`
 
 	// DeprecationWarnings holds warnings about deprecated env vars that were
 	// used. Callers should log these after building the logger.
@@ -280,6 +310,15 @@ func defaults() map[string]interface{} {
 		"metrics_addr":                ":9090",
 		"health_addr":                 ":8081",
 		"janitor_interval":            "1h",
+		"shutdown_grace_period":       "30s",
+		"health_check_lapi":           false,
+		"history_max_events":          10000,
+		"blocklist_refresh_interval":  "24h",
+		"blocklist_name_prefix":       "ext-blocklist",
+		"decision_rate_limit":         0,
+		"decision_burst_size":         1000,
+		"unifi_require_https":         false,
+		"unifi_sites_auto":            false,
 	}
 }
 
@@ -331,11 +370,20 @@ func Load() (*Config, error) {
 
 	// Post-process comma-separated list fields that koanf won't split automatically
 	cfg.UnifiSites = splitCSV(k.String("unifi_sites"))
+	cfg.UnifiSitesExclude = splitCSV(k.String("unifi_sites_exclude"))
 	cfg.CrowdSecOrigins = splitCSV(k.String("crowdsec_origins"))
 	cfg.BlockScenarioExclude = splitCSV(k.String("block_scenario_exclude"))
 	cfg.BlockWhitelist = splitCSV(k.String("block_whitelist"))
 	cfg.ZonePairs = splitZonePairList(k.String("zone_pairs"))
 	cfg.CloudflareZonePairs = splitZonePairList(k.String("cloudflare_zone_pairs"))
+	cfg.BlocklistURLs = splitCSV(k.String("blocklist_urls"))
+	cfg.WebhookEvents = splitCSV(k.String("webhook_events"))
+
+	// Parse BLOCK_SCENARIO_DURATION_MAP
+	cfg.BlockScenarioDurationMap = parseScenarioDurationMap(k.String("block_scenario_duration_map"))
+
+	// Parse ZONE_PAIRS_SCENARIO_MAP
+	cfg.ZonePairsScenarioMap = parseZonePairsScenarioMap(k.String("zone_pairs_scenario_map"))
 
 	// Strip Docker env-file quoting from all string values
 	cfg.sanitise()
@@ -360,6 +408,15 @@ func Load() (*Config, error) {
 func (c *Config) Validate() error {
 	if c.UnifiURL == "" {
 		return fmt.Errorf("UNIFI_URL is required")
+	}
+
+	// UNIFI_URL scheme validation
+	if u, err := url.Parse(c.UnifiURL); err == nil && u.Scheme == "http" {
+		if c.UnifiRequireHTTPS {
+			return fmt.Errorf("UNIFI_URL uses http:// — set UNIFI_REQUIRE_HTTPS=false to allow (not recommended)")
+		}
+		c.DeprecationWarnings = append(c.DeprecationWarnings,
+			"UNIFI_URL uses http:// — credentials will be transmitted in plaintext; use https://")
 	}
 	if c.CrowdSecLAPIKey == "" {
 		return fmt.Errorf("CROWDSEC_LAPI_KEY is required")
@@ -613,6 +670,77 @@ func splitZonePairList(s string) []string {
 
 	// Commas are port-list separators — the whole string is a single zone pair.
 	return []string{s}
+}
+
+// parseScenarioDurationMap parses a comma-separated "scenario=duration" list.
+// Example: "ssh-bf=168h,http-probing=24h"
+// Returns nil map on empty input; invalid entries are silently skipped.
+func parseScenarioDurationMap(s string) map[string]time.Duration {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	result := make(map[string]time.Duration)
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		idx := strings.Index(part, "=")
+		if idx < 1 {
+			continue
+		}
+		key := strings.TrimSpace(part[:idx])
+		valStr := strings.TrimSpace(part[idx+1:])
+		if key == "" || valStr == "" {
+			continue
+		}
+		d, err := time.ParseDuration(valStr)
+		if err != nil {
+			continue
+		}
+		result[key] = d
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// parseZonePairsScenarioMap parses a semicolon-separated "scenario_key=pair1,pair2" list.
+// Example: "ssh-bf=External:22->Internal:22;http-probing=External->Internal:80,443"
+// Returns nil map on empty input.
+func parseZonePairsScenarioMap(s string) map[string][]ZonePair {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	result := make(map[string][]ZonePair)
+	for _, entry := range strings.Split(s, ";") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		idx := strings.Index(entry, "=")
+		if idx < 1 {
+			continue
+		}
+		key := strings.TrimSpace(entry[:idx])
+		pairsStr := strings.TrimSpace(entry[idx+1:])
+		if key == "" || pairsStr == "" {
+			continue
+		}
+		pairList := splitZonePairList(pairsStr)
+		pairs, err := parseZonePairList(pairList)
+		if err != nil {
+			continue
+		}
+		result[key] = pairs
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 // rawProvider implements koanf.Provider for a map[string]interface{}.

@@ -95,16 +95,22 @@ The pipeline is implemented as a single function (`decision.Filter`) that return
 
 ## Firewall Abstraction
 
-The `firewall.Manager` interface exposes four operations:
+The `firewall.Manager` interface exposes the following operations:
 
 ```go
 type Manager interface {
     EnsureInfrastructure(ctx context.Context, sites []string) error
     ApplyBan(ctx context.Context, site, ip string, ipv6 bool) error
+    ApplyBanWithZones(ctx context.Context, site, ip string, ipv6 bool, zonePairs []config.ZonePair) error
     ApplyUnban(ctx context.Context, site, ip string, ipv6 bool) error
     Reconcile(ctx context.Context, sites []string) (*ReconcileResult, error)
+    SyncDirty(ctx context.Context, sites []string) error
+    Drain(ctx context.Context, sites []string) error
+    ZoneManager() *ZoneManager
 }
 ```
+
+`ApplyBanWithZones` is used by the job handler when `ZONE_PAIRS_SCENARIO_MAP` provides an override for the decision's scenario. In Phase 1 the IP is routed to the default shard while the override pairs are logged; per-scenario shard provisioning is reserved for a future release.
 
 Two concrete implementations sit behind this interface:
 
@@ -163,6 +169,9 @@ Persistent state is stored in a single [bbolt](https://github.com/etcd-io/bbolt)
 | `bans` | IP string | msgpack-encoded `BanEntry` {RecordedAt, ExpiresAt, IPv6} |
 | `groups` | `site/family/shard` | msgpack-encoded `GroupRecord` {UnifiID, Members, UpdatedAt} |
 | `policies` | `site/family/shard` | msgpack-encoded `PolicyRecord` {UnifiID, RuleID, Mode, Priority, UpdatedAt} |
+| `events` | uint64 big-endian sequence | JSON-encoded `EventEntry` {Action, Origin, Scenario, IP, RecordedAt} |
+
+The `events` bucket is a ring buffer. Keys are auto-incrementing uint64 values encoded as 8-byte big-endian, which guarantees chronological cursor iteration. When the entry count exceeds `HISTORY_MAX_EVENTS`, the oldest entries (lowest keys) are pruned in the same write transaction. The key count is determined by cursor iteration rather than `Stats().KeyN` (which reflects stats at transaction start, not after mid-transaction mutations).
 
 bbolt provides ACID transactions with a single writer at a time. This matches the access pattern well: the ban bucket has many concurrent readers (idempotency checks) and one writer per decision batch (persist step).
 
@@ -182,7 +191,34 @@ This corrects drift caused by manual edits, controller restarts, or bouncer down
 A background goroutine runs every `JANITOR_INTERVAL` (default 1 h):
 
 - Prunes expired bans from the `bans` bucket (entries older than `BAN_TTL`)
+- Calls `ApplyUnban` on the firewall manager for each pruned IP
+- Writes an `action=expire` event to the audit trail ring buffer
 - Updates the `crowdsec_unifi_db_size_bytes` gauge
+
+### Ban History (Audit Trail)
+
+Every successful ban, unban, and janitor expiry is appended to the `events` bucket as an `EventEntry`. The `Store` interface exposes three query methods:
+
+- `RecordEvent(e EventEntry) error` — append an event (ring-buffer eviction on overflow)
+- `ListEvents(limit int) ([]EventEntry, error)` — newest-first, bounded by `limit`
+- `ListEventsForIP(ip string, limit int) ([]EventEntry, error)` — newest-first, filtered by IP
+
+These are used by the `status history` and `status ip` CLI subcommands to surface the audit trail without requiring a live daemon connection.
+
+### External Blocklists
+
+`internal/blocklist.Manager` fetches one or more plain-text IP/CIDR URLs on startup and then on a ticker. For each valid entry:
+
+1. `store.BanRecord(ip, now+2×interval, ipv6)` — writes to bbolt with a self-healing expiry
+2. `fwMgr.ApplyBan(ctx, site, ip, ipv6)` — pushes to UniFi
+
+The 2× interval expiry ensures that bans auto-expire if the feed URL becomes permanently unreachable. IPs from blocklists go through the same idempotency check as CrowdSec decisions.
+
+### Webhook Notifications
+
+`internal/webhook.Notifier` posts a small JSON payload to a configured URL when named events are fired. The notifier is a no-op when the URL is empty or the event name is not in the allowed set. HTTP errors are logged at `warn` level and never propagate to the caller.
+
+Circuit breaker state changes (`OnCircuitBreakerOpen` / `OnCircuitBreakerClose` callbacks on `ManagerConfig`) and reconcile drift are the three currently supported event types. The callbacks are plain `func()` values — the `firewall` package has no import dependency on `webhook`.
 
 ---
 
@@ -289,19 +325,18 @@ All log output is written through a `RedactWriter` that applies regexp substitut
 All tests are table-driven and run without external services. The test suite covers:
 
 - **`internal/config`**: required field validation, defaults, `_FILE` injection, template syntax, zone pair parsing including port filter syntax (`src[:ports]->dst[:ports]`), out-of-range and non-numeric port validation, Cloudflare zone pair parsing
-- **`internal/decision`**: filter pipeline (all 8 stages), IP parsing and sanitisation, private IP detection, whitelist matching
+- **`internal/decision`**: filter pipeline (all 8 stages), IP parsing and sanitisation, private IP detection, whitelist matching, per-scenario duration overrides (`BLOCK_SCENARIO_DURATION_MAP`)
 - **`internal/firewall`**: namer template rendering, shard manager operations, port TML creation and idempotency, `needsUpdateZonePolicy` including port TML ID comparison
 - **`internal/controller`**: session management, 401 re-authentication logic, TML wire format conversion (PORT_NUMBER as int), port filter population in policy wire structs
-- **`internal/storage`**: bbolt ban operations, group/policy cache
+- **`internal/storage`**: bbolt ban operations, group/policy cache, event ring buffer (record, list, list-by-IP, capacity eviction)
+- **`internal/bouncer/handler`**: job handler idempotency, BAN_TTL cap, dry-run mode, per-site error continuation, auth error short-circuit, per-scenario zone routing (`ZONE_PAIRS_SCENARIO_MAP`) dispatching `ApplyBanWithZones`
+- **`internal/bouncer/janitor`**: expired ban pruning, skip-on-unban-failure
 - **`internal/logger`**: redaction patterns
-- **`internal/lapi_metrics`**: Reporter construction, interval clamping, counter reset
-  behaviour after push, payload structure validation, user-agent and API key headers,
-  concurrent recording under the race detector, shutdown final-push
-- **`internal/capabilities`**: Constant value contracts (`BouncerType`, `Layer`,
-  remediation support flags) and the intentional distinction between `BouncerType`
-  (used in the metrics payload `type` field) and the LAPI user-agent service token
-  (`crowdsec-unifi-bouncer`, used in HTTP headers)
+- **`internal/lapi_metrics`**: Reporter construction, interval clamping, counter reset behaviour after push, payload structure validation, user-agent and API key headers, concurrent recording under the race detector, shutdown final-push
+- **`internal/capabilities`**: Constant value contracts (`BouncerType`, `Layer`, remediation support flags) and the intentional distinction between `BouncerType` (used in the metrics payload `type` field) and the LAPI user-agent service token (`crowdsec-unifi-bouncer`, used in HTTP headers)
 - **`internal/whitelist`**: TML creation and update idempotency, ALLOW policy creation with IP TML IDs and port TML IDs, no-op when current, delete+recreate triggered when port TML IDs change (portFilter constraint), orphan policy and TML sweep, policy ordering (whitelist ALLOW policies placed before block policies via the ordering API)
+- **`internal/webhook`**: fires on registered events, skips unregistered events, ignores HTTP errors, empty URL disables notifier, payload is valid JSON
+- **`internal/blocklist`**: fetch and apply valid IPs, skip invalid lines, parse CIDRs, handle server errors and timeouts
 
 A `nopRecorder` no-op implementation of `MetricsRecorder` is used in handler tests
 to keep them independent of the LAPI metrics reporter.

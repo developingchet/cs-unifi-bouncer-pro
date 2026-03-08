@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
@@ -104,6 +105,12 @@ type Manager interface {
 	// ApplyBan adds an IP to the appropriate shard for all given sites.
 	ApplyBan(ctx context.Context, site, ip string, ipv6 bool) error
 
+	// ApplyBanWithZones adds an IP using the given zone pair override instead of
+	// the globally configured zone pairs. If zonePairs is empty it falls back to
+	// ApplyBan. In Phase 1 the IP is placed in the same default shard; full
+	// per-scenario shard provisioning is reserved for a future release.
+	ApplyBanWithZones(ctx context.Context, site, ip string, ipv6 bool, zonePairs []config.ZonePair) error
+
 	// ApplyUnban removes an IP from its shard for all given sites.
 	ApplyUnban(ctx context.Context, site, ip string, ipv6 bool) error
 
@@ -142,6 +149,11 @@ type ManagerConfig struct {
 	// for consolidation into a larger shard (read from SHARD_MERGE_THRESHOLD).
 	// 0 = auto (50% of shard capacity). -1 = disable.
 	ShardMergeThreshold int
+
+	// Optional callbacks fired when the circuit breaker changes state.
+	// Nil = no-op. These are called from attachShardCallbacks.
+	OnCircuitBreakerOpen  func()
+	OnCircuitBreakerClose func()
 }
 
 type managerImpl struct {
@@ -179,6 +191,12 @@ type managerImpl struct {
 	// overlapping the first ticker fire). TryLock is used so a slow flush
 	// does not block the ticker goroutine — the tick is simply skipped.
 	syncMu sync.Mutex
+
+	// bgCtx is the long-lived daemon context captured on first EnsureInfrastructure
+	// call. Activation callbacks use this instead of the transient ctx they receive,
+	// so a cancelled startup context never breaks mid-run shard provisioning.
+	bgCtx   context.Context
+	bgCtxMu sync.Once
 }
 
 // NewManager constructs a Manager.
@@ -209,6 +227,7 @@ func NewManager(cfg ManagerConfig, ctrl controller.Controller, store storage.Sto
 
 // EnsureInfrastructure bootstraps all groups and rules/policies for every site.
 func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) error {
+	m.bgCtxMu.Do(func() { m.bgCtx = ctx })
 	m.sites = sites
 
 	for _, site := range sites {
@@ -280,9 +299,11 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		m.mu.RLock()
 		v4Mgr := m.v4Mgrs[site]
 		v6Mgr := m.v6Mgrs[site]
-		// Set activation callbacks to provision infrastructure when Pending shards become Active
-		v4Mgr.SetActivationCallback(func(ctx context.Context, shardIdx int, groupID string) {
-			if err := m.ensureNewShardInfrastructure(ctx, site, false, shardIdx, v4Mgr); err != nil {
+		// Set activation callbacks to provision infrastructure when Pending shards become Active.
+		// Use m.bgCtx (the long-lived daemon context) rather than the callback's ctx so that
+		// a cancelled startup context does not abort mid-run shard provisioning.
+		v4Mgr.SetActivationCallback(func(_ context.Context, shardIdx int, groupID string) {
+			if err := m.ensureNewShardInfrastructure(m.bgCtx, site, false, shardIdx, v4Mgr); err != nil {
 				m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).Str("group_id", groupID).
 					Msg("failed to provision infrastructure for newly activated v4 shard")
 			}
@@ -306,8 +327,8 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		}
 		v4Mgr.SetDrainCallback(onDrained)
 		if m.cfg.EnableIPv6 && v6Mgr != nil {
-			v6Mgr.SetActivationCallback(func(ctx context.Context, shardIdx int, groupID string) {
-				if err := m.ensureNewShardInfrastructure(ctx, site, true, shardIdx, v6Mgr); err != nil {
+			v6Mgr.SetActivationCallback(func(_ context.Context, shardIdx int, groupID string) {
+				if err := m.ensureNewShardInfrastructure(m.bgCtx, site, true, shardIdx, v6Mgr); err != nil {
 					m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).Str("group_id", groupID).
 						Msg("failed to provision infrastructure for newly activated v6 shard")
 				}
@@ -397,6 +418,21 @@ func (m *managerImpl) ApplyBan(ctx context.Context, site, ip string, ipv6 bool) 
 	}
 
 	return nil
+}
+
+// ApplyBanWithZones applies a ban using an optional scenario-specific set of
+// zone pairs. When zonePairs is non-empty, the override is logged and the IP
+// is routed through the default shard (Phase 1 — per-scenario shard
+// provisioning is deferred). When zonePairs is empty the call is identical to
+// ApplyBan.
+func (m *managerImpl) ApplyBanWithZones(ctx context.Context, site, ip string, ipv6 bool, zonePairs []config.ZonePair) error {
+	if len(zonePairs) == 0 {
+		return m.ApplyBan(ctx, site, ip, ipv6)
+	}
+	m.log.Info().Str("site", site).Str("ip", ip).Bool("ipv6", ipv6).
+		Int("override_zone_pairs", len(zonePairs)).
+		Msg("applying ban with scenario zone pair override")
+	return m.ApplyBan(ctx, site, ip, ipv6)
 }
 
 // ApplyUnban removes an IP from its shard and schedules a batch flush.
@@ -572,12 +608,18 @@ func (m *managerImpl) attachShardCallbacks(mgr *ShardManager) {
 			if m.cb.recordSuccess() {
 				m.log.Info().Msg("circuit breaker closed: controller reachable again")
 				metrics.CircuitBreakerState.Set(0)
+				if m.cfg.OnCircuitBreakerClose != nil {
+					m.cfg.OnCircuitBreakerClose()
+				}
 			}
 		},
 		func() { // onSyncError
 			if tripped := m.cb.recordFailure(); tripped {
 				m.log.Error().Msg("circuit breaker opened: too many consecutive sync failures")
 				metrics.CircuitBreakerState.Set(1)
+				if m.cfg.OnCircuitBreakerOpen != nil {
+					m.cfg.OnCircuitBreakerOpen()
+				}
 			}
 		},
 	)

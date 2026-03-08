@@ -97,10 +97,14 @@ func (r *Reporter) Run(ctx context.Context) {
 			case <-ticker.C:
 			default:
 			}
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := r.push(shutdownCtx); err != nil {
-				r.log.Warn().Err(err).Msg("lapi usage-metrics final push failed")
+				r.log.Warn().Err(err).Msg("lapi usage-metrics final push failed; retrying once")
+				time.Sleep(500 * time.Millisecond)
+				if err2 := r.push(shutdownCtx); err2 != nil {
+					r.log.Warn().Err(err2).Msg("lapi usage-metrics final push retry also failed")
+				}
 			}
 			return
 		}
