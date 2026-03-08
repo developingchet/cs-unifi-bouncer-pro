@@ -372,7 +372,7 @@ func TestDefaults(t *testing.T) {
 	if cfg.GroupNameTemplate != "crowdsec-block-{{.Family}}-{{.Index}}" {
 		t.Errorf("default GroupNameTemplate: got %q", cfg.GroupNameTemplate)
 	}
-	if len(cfg.ZonePairs) != 1 || cfg.ZonePairs[0] != "External->Internal" {
+	if len(cfg.ZonePairs) != 1 || cfg.ZonePairs[0] != "External->Dmz" {
 		t.Errorf("default ZonePairs: got %v", cfg.ZonePairs)
 	}
 }
