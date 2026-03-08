@@ -20,6 +20,7 @@ func buildRoot() *cobra.Command {
 	root.AddCommand(
 		runCmd(), healthcheckCmd(), versionCmd(), reconcileCmd(),
 		statusCmd(), drainCmd(), validateCmd(), diagnoseCmd(),
+		banCmd(), unbanCmd(),
 	)
 	return root
 }
@@ -30,10 +31,10 @@ func TestRootSubcommands(t *testing.T) {
 
 	registered := make(map[string]bool)
 	for _, cmd := range root.Commands() {
-		registered[cmd.Use] = true
+		registered[cmd.Name()] = true
 	}
 
-	for _, want := range []string{"run", "version", "healthcheck", "reconcile", "status", "drain", "validate", "diagnose"} {
+	for _, want := range []string{"run", "version", "healthcheck", "reconcile", "status", "drain", "validate", "diagnose", "ban", "unban"} {
 		if !registered[want] {
 			t.Errorf("subcommand %q not registered on root command", want)
 		}

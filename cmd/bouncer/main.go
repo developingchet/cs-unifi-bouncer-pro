@@ -1056,7 +1056,11 @@ No API calls are made — safe to run in CI without network access.`,
 				os.Exit(1)
 			}
 
-			pairs, _ := cfg.ParseZonePairs()
+			pairs, err := cfg.ParseZonePairs()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "configuration invalid: %v\n", err)
+				os.Exit(1)
+			}
 			pairStr := fmt.Sprintf("%d pair(s)", len(pairs))
 			if len(pairs) > 0 {
 				parts := make([]string, 0, len(pairs))

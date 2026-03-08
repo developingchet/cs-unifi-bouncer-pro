@@ -111,13 +111,12 @@ func Filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger) FilterResu
 	}
 
 	// Stage 5: parse and sanitize
-	sanitized, isCIDR, err := ParseAndSanitize(value)
+	sanitized, _, err := ParseAndSanitize(value)
 	if err != nil {
 		metrics.DecisionsFiltered.WithLabelValues(stageParse, "parse_error").Inc()
 		log.Warn().Str("value", value).Err(err).Msg("filtered: parse error")
 		return FilterResult{}
 	}
-	_ = isCIDR
 	isV6 := IsIPv6(sanitized)
 
 	// Stage 6: reject private/loopback/link-local/ULA
