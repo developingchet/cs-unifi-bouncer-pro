@@ -389,7 +389,13 @@ func healthcheckCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := http.Get("http://" + cfg.HealthAddr + "/healthz") //nolint:noctx
+			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+cfg.HealthAddr+"/healthz", nil)
+			if err != nil {
+				return err
+			}
+			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "healthcheck failed: %v\n", err)
 				os.Exit(1)
