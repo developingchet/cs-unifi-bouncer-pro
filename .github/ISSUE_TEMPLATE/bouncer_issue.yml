@@ -1,0 +1,47 @@
+name: Bouncer / CrowdSec Integration Issue
+description: Issues specific to the CrowdSec engine, LAPI connection, or bouncer behavior
+labels: ["crowdsec", "integration"]
+body:
+  - type: input
+    id: crowdsec-version
+    attributes:
+      label: CrowdSec version
+      placeholder: "e.g. 1.6.2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: bouncer-type
+    attributes:
+      label: Bouncer type affected
+      options:
+        - UniFi bouncer
+        - Traefik bouncer
+        - Both
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the issue
+      description: Include LAPI errors, decision sync issues, or ban behavior problems
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant config (sanitized)
+      description: Paste relevant bouncer config — remove API keys and credentials
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      render: shell
+    validations:
+      required: false

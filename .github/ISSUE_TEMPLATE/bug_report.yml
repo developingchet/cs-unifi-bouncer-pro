@@ -1,0 +1,70 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please check existing issues and confirm you are on the latest release.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `cs-unifi-bouncer version` or the release tag
+      placeholder: "v1.2.3"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture
+      options:
+        - amd64
+        - arm64 (e.g. Raspberry Pi)
+        - other
+    validations:
+      required: true
+
+  - type: input
+    id: unifi-version
+    attributes:
+      label: UniFi OS / UDM Version
+      placeholder: "e.g. UniFi OS 3.2.7, UDM Pro"
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Clear description of the bug
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run ...
+        2. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste sanitized logs (remove IPs/credentials)
+      render: shell
+    validations:
+      required: false
