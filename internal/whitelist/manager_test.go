@@ -881,3 +881,60 @@ func TestEnsureAllowPolicy_DstIPTMLID_ChangeTriggerRecreate(t *testing.T) {
 		t.Errorf("recreated DstIPTMLID: got %q, want %q", policies[0].DstIPTMLID, "new-dst-ip-tml")
 	}
 }
+
+// TestDrain_DeletesAllWhitelistObjects verifies that Drain removes all
+// crowdsec-whitelist-cloudflare-* policies and TMLs while leaving unrelated
+// objects (ban policies, ban TMLs) intact. This covers the case where
+// CLOUDFLARE_WHITELIST_ENABLED is set to false after the feature was active.
+func TestDrain_DeletesAllWhitelistObjects(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	log := zerolog.Nop()
+	// nil provider — Drain does not fetch Cloudflare IPs.
+	mgr := NewManager(ctrl, []string{"test-site"}, nil, log)
+	ctx := context.Background()
+
+	const managedDesc = "Managed by cs-unifi-bouncer-pro. Cloudflare whitelist. Do not edit manually."
+	ctrl.SetPolicies("test-site", []controller.ZonePolicy{
+		{ID: "p-v4", Name: "crowdsec-whitelist-cloudflare-External-Dmz-v4", Description: managedDesc, Action: "ALLOW"},
+		{ID: "p-v6", Name: "crowdsec-whitelist-cloudflare-External-Dmz-v6", Description: managedDesc, Action: "ALLOW"},
+		// UniFi-auto-created Return mirror (no description).
+		{ID: "p-ret", Name: "crowdsec-whitelist-cloudflare-External-Dmz-v4 (Return)", Action: "ALLOW"},
+		// Non-whitelist block policy — must be preserved.
+		{ID: "p-block", Name: "crowdsec-ban-External-Dmz-v4-0", Action: "BLOCK"},
+	})
+	ctrl.SetTMLs("test-site", []controller.TrafficMatchingList{
+		{ID: "tml-v4", Name: TMLNameV4},
+		{ID: "tml-v6", Name: TMLNameV6},
+		{ID: "tml-ports", Name: "crowdsec-whitelist-cloudflare-srcports-External-Dmz"},
+		// Non-whitelist ban TML — must be preserved.
+		{ID: "tml-ban", Name: "crowdsec-v4-shard-0"},
+	})
+
+	if err := mgr.Drain(ctx); err != nil {
+		t.Fatalf("Drain failed: %v", err)
+	}
+
+	// 3 whitelist policies deleted (v4, v6, Return); 1 block policy kept.
+	if got := ctrl.Calls("DeleteZonePolicy"); got != 3 {
+		t.Errorf("DeleteZonePolicy calls: got %d, want 3", got)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, "test-site")
+	if err != nil {
+		t.Fatalf("ListZonePolicies failed: %v", err)
+	}
+	if len(policies) != 1 || policies[0].ID != "p-block" {
+		t.Errorf("expected only block policy to remain, got %+v", policies)
+	}
+
+	// 3 whitelist TMLs deleted (v4, v6, srcports); 1 ban TML kept.
+	if got := ctrl.Calls("DeleteTrafficMatchingList"); got != 3 {
+		t.Errorf("DeleteTrafficMatchingList calls: got %d, want 3", got)
+	}
+	tmls, err := ctrl.ListTrafficMatchingLists(ctx, "test-site")
+	if err != nil {
+		t.Fatalf("ListTrafficMatchingLists failed: %v", err)
+	}
+	if len(tmls) != 1 || tmls[0].ID != "tml-ban" {
+		t.Errorf("expected only ban TML to remain, got %+v", tmls)
+	}
+}

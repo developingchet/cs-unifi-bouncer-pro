@@ -228,6 +228,13 @@ func runDaemon() error {
 		} else {
 			log.Info().Msg("Cloudflare whitelist initial sync complete")
 		}
+	} else {
+		// Feature is disabled — drain any policies/TMLs left from a previous run
+		// where it was enabled. Without this, they would remain as orphans in UniFi.
+		drainMgr := whitelist.NewManager(ctrl, cfg.UnifiSites, nil, log)
+		if err := drainMgr.Drain(ctx); err != nil {
+			log.Warn().Err(err).Msg("Cloudflare whitelist drain failed — orphaned policies may remain")
+		}
 	}
 
 	// Startup reconcile
