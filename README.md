@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/cd0d1ec5-8e15-48f4-b4fb-f28dec6629c2" width="590" alt="CrowdSec Unifi Bouncer Logo" style="max-width: 100%; height: auto;">
+  <img src="https://github.com/user-attachments/assets/459a7024-a9b2-4782-aaab-80fdba87174d" width="590" alt="CrowdSec Unifi Bouncer Logo" style="max-width: 100%; height: auto;">
 </p>
 
 # cs-unifi-bouncer-pro
