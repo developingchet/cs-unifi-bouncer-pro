@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -1065,10 +1066,11 @@ func TestListZonePolicies_Pagination(t *testing.T) {
 		}
 		offsetStr := r.URL.Query().Get("offset")
 		limitStr := r.URL.Query().Get("limit")
-		offset := 0
-		limit := 3
-		fmt.Sscan(offsetStr, &offset)
-		fmt.Sscan(limitStr, &limit)
+		offset, _ := strconv.Atoi(offsetStr)
+		limit, _ := strconv.Atoi(limitStr)
+		if limit == 0 {
+			limit = 3
+		}
 
 		end := offset + limit
 		if end > len(allPolicies) {
@@ -1125,10 +1127,11 @@ func TestListTMLs_Pagination(t *testing.T) {
 		}
 		offsetStr := r.URL.Query().Get("offset")
 		limitStr := r.URL.Query().Get("limit")
-		offset := 0
-		limit := 3
-		fmt.Sscan(offsetStr, &offset)
-		fmt.Sscan(limitStr, &limit)
+		offset, _ := strconv.Atoi(offsetStr)
+		limit, _ := strconv.Atoi(limitStr)
+		if limit == 0 {
+			limit = 3
+		}
 
 		end := offset + limit
 		if end > len(allTMLs) {
