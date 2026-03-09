@@ -385,6 +385,9 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 
 // ApplyBan adds an IP to the appropriate shard and schedules a batch flush.
 func (m *managerImpl) ApplyBan(ctx context.Context, site, ip string, ipv6 bool) error {
+	if ipv6 && !m.cfg.EnableIPv6 {
+		return nil // IPv6 firewall disabled; silently ignore IPv6 decisions
+	}
 	if m.cfg.DryRun {
 		m.log.Info().Str("site", site).Str("ip", ip).Bool("ipv6", ipv6).Msg("[DRY-RUN] would apply ban")
 		return nil

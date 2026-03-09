@@ -809,7 +809,9 @@ func TestSyncSite_DstIPs_CreatesDstIPTML(t *testing.T) {
 		t.Errorf("v4 policy DstIPTMLID: got %q, want %q", v4Policy.DstIPTMLID, dstIPTML.ID)
 	}
 
-	// The v6 ALLOW policy must NOT have a DstIPTMLID (no IPv6 addresses configured).
+	// The v6 ALLOW policy must also have DstIPTMLID set: when only IPv4 dst IPs are
+	// configured the v4 TML is reused for the v6 policy so both policies are equally
+	// scoped to the destination host.
 	var v6Policy *controller.ZonePolicy
 	for i := range policies {
 		if policies[i].Name == "crowdsec-whitelist-cloudflare-External-Dmz-v6" {
@@ -820,8 +822,8 @@ func TestSyncSite_DstIPs_CreatesDstIPTML(t *testing.T) {
 	if v6Policy == nil {
 		t.Fatal("expected v6 ALLOW policy to be created")
 	}
-	if v6Policy.DstIPTMLID != "" {
-		t.Errorf("v6 ALLOW policy DstIPTMLID should be empty (no IPv6 dst IPs), got %q", v6Policy.DstIPTMLID)
+	if v6Policy.DstIPTMLID != dstIPTML.ID {
+		t.Errorf("v6 ALLOW policy DstIPTMLID: got %q, want %q (should fall back to v4 TML)", v6Policy.DstIPTMLID, dstIPTML.ID)
 	}
 }
 

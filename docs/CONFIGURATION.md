@@ -243,7 +243,7 @@ src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]
 | `External:80->Internal@10.0.0.0/24` | Match source port 80, block only traffic destined for `10.0.0.0/24` |
 | `External->Dmz;External->Internal@10.0.0.0/24` | First pair unrestricted; second scoped to subnet |
 
-IPv4 and IPv6 destination IPs are split into separate Traffic Matching Lists (`crowdsec-dstips-v4-{Src}-{Dst}` and `crowdsec-dstips-v6-{Src}-{Dst}`) and attached to the corresponding v4/v6 block policies at creation time. Because the UniFi PUT endpoint does not accept destination `trafficFilter` changes, any modification to destination IPs triggers a delete-and-recreate of the affected policies (same behaviour as port filter changes).
+IPv4 and IPv6 destination IPs are split into separate Traffic Matching Lists (`crowdsec-dstips-v4-{Src}-{Dst}` and `crowdsec-dstips-v6-{Src}-{Dst}`). The destination filter is **family-agnostic**: when only v4 destination IPs are configured, the v4 TML is attached to both the v4 and v6 block policies (and vice versa for v6-only). This ensures both address families are equally scoped to the destination host — a v6-family block policy no longer silently loses the destination filter when only IPv4 dst IPs are specified. For mixed `@v4ip,v6ip` configurations the UniFi API only accepts one destination TML per policy, so each policy uses the TML whose family matches (API ceiling). Because the UniFi PUT endpoint does not accept destination `trafficFilter` changes, any modification to destination IPs triggers a delete-and-recreate of the affected policies (same behaviour as port filter changes).
 
 ---
 

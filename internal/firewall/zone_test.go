@@ -666,6 +666,89 @@ func TestZoneManager_EnsurePolicies_UnmanagedAPIPolicy_Preserved(t *testing.T) {
 	}
 }
 
+// TestZoneManager_EnsurePoliciesForShard_DstIPTML_V4Only verifies the family-agnostic
+// dst IP behaviour in the EnsurePoliciesForShard path: when only v4 destination IPs
+// are configured, both the v4 and v6 new-shard block policies must carry the v4 TML ID.
+// This exercises the pickDstIPTML helper in the shard-overflow activation path.
+func TestZoneManager_EnsurePoliciesForShard_DstIPTML_V4Only(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore()
+	namer := zoneTestNamer(t)
+
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	v6 := ensuredZoneV6Shard(t, ctrl, store)
+
+	zm := NewZoneManager(ZoneConfig{
+		ZonePairs: []config.ZonePair{
+			{Src: "wan", Dst: "lan", DstIPs: []string{"10.0.5.251"}}, // v4-only dst IP
+		},
+		Description: "test",
+	}, namer, ctrl, store, zerolog.Nop())
+
+	if err := zm.Bootstrap(context.Background(), []string{testSite}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	v4GroupIDs := v4.GroupIDs()
+	if len(v4GroupIDs) == 0 {
+		t.Fatal("expected at least one v4 shard")
+	}
+	v6GroupIDs := v6.GroupIDs()
+	if len(v6GroupIDs) == 0 {
+		t.Fatal("expected at least one v6 shard")
+	}
+
+	if err := zm.EnsurePoliciesForShard(context.Background(), testSite, v4GroupIDs[0], false, 0); err != nil {
+		t.Fatalf("EnsurePoliciesForShard (v4): %v", err)
+	}
+	if err := zm.EnsurePoliciesForShard(context.Background(), testSite, v6GroupIDs[0], true, 0); err != nil {
+		t.Fatalf("EnsurePoliciesForShard (v6): %v", err)
+	}
+
+	// Find the created dst IP TML (v4).
+	tmls, err := ctrl.ListTrafficMatchingLists(context.Background(), testSite)
+	if err != nil {
+		t.Fatalf("ListTrafficMatchingLists: %v", err)
+	}
+	var dstIPTML *controller.TrafficMatchingList
+	for i := range tmls {
+		if strings.HasPrefix(tmls[i].Name, "crowdsec-dstips-v4-") {
+			dstIPTML = &tmls[i]
+			break
+		}
+	}
+	if dstIPTML == nil {
+		t.Fatal("expected crowdsec-dstips-v4-* TML to be created during Bootstrap")
+	}
+
+	// Both the v4 and v6 shard policies must carry the v4 dst IP TML ID.
+	policies, err := ctrl.ListZonePolicies(context.Background(), testSite)
+	if err != nil {
+		t.Fatalf("ListZonePolicies: %v", err)
+	}
+	var v4Policy, v6Policy *controller.ZonePolicy
+	for i := range policies {
+		switch policies[i].IPVersion {
+		case "IPV4":
+			v4Policy = &policies[i]
+		case "IPV6":
+			v6Policy = &policies[i]
+		}
+	}
+	if v4Policy == nil {
+		t.Fatal("expected v4 block policy to be created")
+	}
+	if v6Policy == nil {
+		t.Fatal("expected v6 block policy to be created")
+	}
+	if v4Policy.DstIPTMLID != dstIPTML.ID {
+		t.Errorf("v4 policy DstIPTMLID = %q, want %q", v4Policy.DstIPTMLID, dstIPTML.ID)
+	}
+	if v6Policy.DstIPTMLID != dstIPTML.ID {
+		t.Errorf("v6 policy DstIPTMLID = %q, want %q (v4-only dst IPs must reuse v4 TML for v6 policy)", v6Policy.DstIPTMLID, dstIPTML.ID)
+	}
+}
+
 // TestZoneManager_EnsurePolicies_AllowPolicy_Preserved verifies that an ALLOW
 // policy (e.g. a Cloudflare whitelist policy) bearing our description is never
 // deleted by the block-policy orphan sweep, even if it carries our description.

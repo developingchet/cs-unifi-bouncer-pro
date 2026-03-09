@@ -26,10 +26,9 @@ type ZoneConfig struct {
 
 // portTMLIDs holds TML IDs for a single zone pair (port filters and dst IP filter).
 type portTMLIDs struct {
-	SrcTMLID     string // empty if no src port filter configured
-	DstTMLID     string // empty if no dst port filter configured
-	DstIPv4TMLID string // TML of type IPV4_ADDRESSES for dst IP filter; empty if not configured
-	DstIPv6TMLID string // TML of type IPV6_ADDRESSES for dst IP filter; empty if not configured
+	SrcTMLID    string   // empty if no src port filter configured
+	DstTMLID    string   // empty if no dst port filter configured
+	DstIPTMLIDs []string // ordered: v4 TML first (if present), v6 TML second; use pickDstIPTML to select
 }
 
 // ZoneManager manages zone-based firewall policies.
@@ -173,7 +172,7 @@ func (zm *ZoneManager) ensurePortTMLs(ctx context.Context, site string) (map[str
 				if err != nil {
 					return nil, fmt.Errorf("ensure dst IPv4 TML %q: %w", name, err)
 				}
-				ids.DstIPv4TMLID = id
+				ids.DstIPTMLIDs = append(ids.DstIPTMLIDs, id)
 			}
 			if len(v6IPs) > 0 {
 				name := "crowdsec-dstips-v6-" + pair.Src + "-" + pair.Dst
@@ -181,7 +180,7 @@ func (zm *ZoneManager) ensurePortTMLs(ctx context.Context, site string) (map[str
 				if err != nil {
 					return nil, fmt.Errorf("ensure dst IPv6 TML %q: %w", name, err)
 				}
-				ids.DstIPv6TMLID = id
+				ids.DstIPTMLIDs = append(ids.DstIPTMLIDs, id)
 			}
 		}
 		result[key] = ids
@@ -290,6 +289,33 @@ func ipTMLItemsMatch(items []controller.TrafficMatchingListItem, ips []string) b
 		}
 	}
 	return true
+}
+
+// pickDstIPTML selects the destination IP TML ID for a policy.
+//
+// ids is the DstIPTMLIDs slice from portTMLIDs — ordered v4 first (if present),
+// v6 second (if present). Selection rule:
+//
+//	len 0 → ""             no destination IP filter configured
+//	len 1 → ids[0]         single-family: both v4 and v6 policies share the same TML
+//	len 2 → ids[1] if ipv6 mixed: each policy uses the TML whose family matches (API ceiling)
+//	         ids[0] otherwise
+//
+// This keeps the destination filter family-agnostic: a v4-only dst IP is applied
+// to the v6 block policy as well (and vice versa), scoping both address families
+// to the same destination host.
+func pickDstIPTML(ids []string, ipv6 bool) string {
+	switch len(ids) {
+	case 0:
+		return ""
+	case 1:
+		return ids[0]
+	default: // len >= 2: mixed; use the family-matching TML
+		if ipv6 {
+			return ids[1]
+		}
+		return ids[0]
+	}
 }
 
 // classifyIPs splits a list of IPs/CIDRs into IPv4 and IPv6 groups.
@@ -459,11 +485,7 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 		if ids, ok := sitePortTMLs[pair.Src+":"+pair.Dst]; ok {
 			srcPortTMLID = ids.SrcTMLID
 			dstPortTMLID = ids.DstTMLID
-			if ipv6 {
-				dstIPTMLID = ids.DstIPv6TMLID
-			} else {
-				dstIPTMLID = ids.DstIPv4TMLID
-			}
+			dstIPTMLID = pickDstIPTML(ids.DstIPTMLIDs, ipv6)
 		}
 	}
 	zm.mu.RUnlock()
@@ -660,11 +682,7 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 			if ids, ok := sitePortTMLs[pair.Src+":"+pair.Dst]; ok {
 				srcPortTMLID = ids.SrcTMLID
 				dstPortTMLID = ids.DstTMLID
-				if ipv6 {
-					dstIPTMLID = ids.DstIPv6TMLID
-				} else {
-					dstIPTMLID = ids.DstIPv4TMLID
-				}
+				dstIPTMLID = pickDstIPTML(ids.DstIPTMLIDs, ipv6)
 			}
 		}
 		zm.mu.RUnlock()

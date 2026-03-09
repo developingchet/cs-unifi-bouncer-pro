@@ -122,7 +122,8 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 		}
 
 		// Create/ensure destination IP TMLs (one per IP family) when DstIPs are configured.
-		var dstIPTMLIDv4, dstIPTMLIDv6 string
+		// dstIPTMLIDs is ordered: v4 TML first (if present), v6 TML second.
+		var dstIPTMLIDs []string
 		if len(pair.DstIPs) > 0 {
 			v4IPs, v6IPs := splitByFamily(pair.DstIPs)
 			if len(v4IPs) > 0 {
@@ -131,7 +132,7 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 				if ipErr != nil {
 					m.log.Error().Err(ipErr).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure dst IP v4 TML failed")
 				} else {
-					dstIPTMLIDv4 = t.ID
+					dstIPTMLIDs = append(dstIPTMLIDs, t.ID)
 					expectedTMLNames[dstIPv4TMLName] = true
 				}
 			}
@@ -141,11 +142,13 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 				if ipErr != nil {
 					m.log.Error().Err(ipErr).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure dst IP v6 TML failed")
 				} else {
-					dstIPTMLIDv6 = t.ID
+					dstIPTMLIDs = append(dstIPTMLIDs, t.ID)
 					expectedTMLNames[dstIPv6TMLName] = true
 				}
 			}
 		}
+		dstIPTMLIDForV4 := pickDstIPTML(dstIPTMLIDs, false)
+		dstIPTMLIDForV6 := pickDstIPTML(dstIPTMLIDs, true)
 
 		v4Name := "crowdsec-whitelist-cloudflare-External-" + pair.DstName + "-v4"
 		v6Name := "crowdsec-whitelist-cloudflare-External-" + pair.DstName + "-v6"
@@ -154,13 +157,13 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 		managedBaseNames[v6Name] = true
 
 		var pairPolicyIDs []string
-		if p, err := m.ensureAllowPolicy(ctx, site, pair, tmlV4.ID, srcPortTMLID, dstPortTMLID, dstIPTMLIDv4, "IPV4", v4Name, existingPolicies); err != nil {
+		if p, err := m.ensureAllowPolicy(ctx, site, pair, tmlV4.ID, srcPortTMLID, dstPortTMLID, dstIPTMLIDForV4, "IPV4", v4Name, existingPolicies); err != nil {
 			m.log.Error().Err(err).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure v4 allow policy failed")
 		} else {
 			managedPolicyIDs[p.ID] = true
 			pairPolicyIDs = append(pairPolicyIDs, p.ID)
 		}
-		if p, err := m.ensureAllowPolicy(ctx, site, pair, tmlV6.ID, srcPortTMLID, dstPortTMLID, dstIPTMLIDv6, "IPV6", v6Name, existingPolicies); err != nil {
+		if p, err := m.ensureAllowPolicy(ctx, site, pair, tmlV6.ID, srcPortTMLID, dstPortTMLID, dstIPTMLIDForV6, "IPV6", v6Name, existingPolicies); err != nil {
 			m.log.Error().Err(err).Str("pair", pair.SrcName+"->"+pair.DstName).Msg("ensure v6 allow policy failed")
 		} else {
 			managedPolicyIDs[p.ID] = true
@@ -240,6 +243,29 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 	}
 
 	return nil
+}
+
+// pickDstIPTML selects the destination IP TML ID for a policy.
+//
+// ids is an ordered slice of dst IP TML IDs: v4 TML first (if present), v6 second.
+// Selection rule:
+//
+//	len 0 → ""             no destination IP filter configured
+//	len 1 → ids[0]         single-family: both v4 and v6 policies share the same TML
+//	len 2 → ids[1] if ipv6 mixed: each policy uses the TML whose family matches (API ceiling)
+//	         ids[0] otherwise
+func pickDstIPTML(ids []string, ipv6 bool) string {
+	switch len(ids) {
+	case 0:
+		return ""
+	case 1:
+		return ids[0]
+	default:
+		if ipv6 {
+			return ids[1]
+		}
+		return ids[0]
+	}
 }
 
 // splitByFamily splits a slice of IPs/CIDRs into IPv4 and IPv6 buckets.
