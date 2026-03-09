@@ -1,4 +1,4 @@
-![CrowdSec Unifi Bouncer Logo](https://github.com/user-attachments/assets/d2d5c595-b0ed-4ef4-9fb6-fc487a8ca990)
+![CrowdSec Unifi Bouncer Logo](https://raw.githubusercontent.com/developingchet/cs-unifi-bouncer-pro/main/docs/logo.png)
 
 # cs-unifi-bouncer-pro
 
