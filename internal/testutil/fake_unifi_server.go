@@ -161,7 +161,7 @@ func newFakeServer(apiKey, username, password string) *FakeUnifiServer {
 		ordering:    make(map[string]fakeOrdering),
 		faults:      make(map[string]int),
 	}
-	s.srv = httptest.NewServer(s)
+	s.srv = httptest.NewTLSServer(s)
 	return s
 }
 
@@ -401,7 +401,7 @@ func (s *FakeUnifiServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.sessions[token] = true
 	s.mu.Unlock()
 
-	http.SetCookie(w, &http.Cookie{Name: "TOKEN", Value: token, Path: "/"})
+	http.SetCookie(w, &http.Cookie{Name: "TOKEN", Value: token, Path: "/", HttpOnly: true, Secure: true})
 	w.Header().Set("X-Csrf-Token", csrf)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
