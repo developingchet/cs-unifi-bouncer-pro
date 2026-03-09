@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Stage 1: Build
-FROM golang:1.24-alpine@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191 AS builder
+FROM golang:1.25-alpine@sha256:8e02eb337d9e0ea459e041f1ee5eece41cbb61f1d83e7d883a3e2fb4862063fa AS builder
 
 RUN apk add --no-cache git ca-certificates tzdata
 
