@@ -246,7 +246,7 @@ func (s *FakeUnifiServer) AddTML(siteID, id, tmlType, name string, items []FakeT
 	defer s.mu.Unlock()
 	fi := make([]fakeTMLItem, len(items))
 	for i, it := range items {
-		fi[i] = fakeTMLItem{Type: it.Type, Value: it.Value}
+		fi[i] = fakeTMLItem(it)
 	}
 	s.tmls[siteID] = append(s.tmls[siteID], fakeTML{ID: id, Type: tmlType, Name: name, Items: fi})
 }
