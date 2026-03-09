@@ -3,9 +3,14 @@ name: Update Docker Hub Description
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read  # default — Docker Hub credentials are separate secrets
+
 jobs:
   update:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
