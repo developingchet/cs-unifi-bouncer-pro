@@ -940,3 +940,74 @@ func TestDrain_DeletesAllWhitelistObjects(t *testing.T) {
 		t.Errorf("expected only ban TML to remain, got %+v", tmls)
 	}
 }
+
+// TestReorderWhitelistFirst_FiltersNullIDs verifies that empty-string IDs
+// (decoded from JSON null entries returned by the UniFi ordering GET for
+// newly auto-created (Return) mirror policies) are stripped before the PUT,
+// preventing the "beforeSystemDefined[N] must not be null" 400 error.
+func TestReorderWhitelistFirst_FiltersNullIDs(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	log := zerolog.Nop()
+	provider := NewCloudflareProvider("", "")
+	mgr := NewManager(ctrl, []string{"test-site"}, provider, log)
+	ctx := context.Background()
+
+	pair := ZonePairConfig{
+		SrcName:   "External",
+		DstName:   "Dmz",
+		SrcZoneID: "zone-external",
+		DstZoneID: "zone-dmz",
+	}
+
+	// Simulate what UniFi returns from GET ordering right after two ALLOW
+	// policies are created: the (Return) mirror for the v6 policy hasn't been
+	// assigned a UUID yet, so the API returns null there — decoded as "" in Go.
+	ctrl.SetOrdering("test-site", "zone-external", "zone-dmz", controller.PolicyOrdering{
+		BeforeSystemDefined: []string{"v4-policy-id", "v4-return-mirror-id", "v6-policy-id", ""},
+		AfterSystemDefined:  nil,
+	})
+
+	// reorderWhitelistFirst is called with the two freshly created policy IDs.
+	mgr.reorderWhitelistFirst(ctx, "test-site", pair, []string{"v4-policy-id", "v6-policy-id"})
+
+	// The PUT must have been called (ordering changed).
+	if got := ctrl.Calls("SetPolicyOrdering"); got != 1 {
+		t.Fatalf("SetPolicyOrdering calls: got %d, want 1", got)
+	}
+
+	sent := ctrl.GetLastOrdering("test-site", "zone-external", "zone-dmz")
+
+	// No empty strings allowed in beforeSystemDefined.
+	for i, id := range sent.BeforeSystemDefined {
+		if id == "" {
+			t.Errorf("beforeSystemDefined[%d] is empty (null) — must be filtered out before PUT", i)
+		}
+	}
+
+	// Our whitelist policies must be first.
+	if len(sent.BeforeSystemDefined) < 2 {
+		t.Fatalf("beforeSystemDefined has %d entries, want >= 2", len(sent.BeforeSystemDefined))
+	}
+	if sent.BeforeSystemDefined[0] != "v4-policy-id" {
+		t.Errorf("beforeSystemDefined[0] = %q, want v4-policy-id", sent.BeforeSystemDefined[0])
+	}
+	if sent.BeforeSystemDefined[1] != "v6-policy-id" {
+		t.Errorf("beforeSystemDefined[1] = %q, want v6-policy-id", sent.BeforeSystemDefined[1])
+	}
+
+	// The legitimate Return mirror must still be present.
+	found := false
+	for _, id := range sent.BeforeSystemDefined {
+		if id == "v4-return-mirror-id" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("v4-return-mirror-id was incorrectly dropped from ordering")
+	}
+
+	// afterSystemDefined must be a non-nil empty slice, never null.
+	if sent.AfterSystemDefined == nil {
+		t.Error("afterSystemDefined is nil — must be []string{} to avoid sending null in PUT body")
+	}
+}

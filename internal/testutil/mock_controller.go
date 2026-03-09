@@ -372,6 +372,12 @@ func (m *MockController) GetSiteID(ctx context.Context, siteName string) (string
 }
 
 // GetLastOrdering returns the ordering last set for the given zone pair.
+func (m *MockController) SetOrdering(site, srcZoneID, dstZoneID string, ordering controller.PolicyOrdering) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.orderings[site+":"+srcZoneID+":"+dstZoneID] = ordering
+}
+
 func (m *MockController) GetLastOrdering(site, srcZoneID, dstZoneID string) controller.PolicyOrdering {
 	m.mu.Lock()
 	defer m.mu.Unlock()

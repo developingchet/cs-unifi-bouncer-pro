@@ -418,23 +418,42 @@ func (m *Manager) reorderWhitelistFirst(ctx context.Context, site string, pair Z
 		return
 	}
 
-	// Build a set of our whitelist IDs so we can filter duplicates.
+	// Build a set of our whitelist IDs. Filter out any empty IDs — the UniFi
+	// API may return null entries (decoded as "") for auto-created (Return) mirror
+	// policies that have not yet been assigned a UUID; sending empty strings in
+	// the PUT body causes a 400 "must not be null" error.
 	idSet := make(map[string]bool, len(policyIDs))
+	validPolicyIDs := make([]string, 0, len(policyIDs))
 	for _, id := range policyIDs {
-		idSet[id] = true
+		if id != "" {
+			idSet[id] = true
+			validPolicyIDs = append(validPolicyIDs, id)
+		}
 	}
-	// Retain existing ordering for non-whitelist policies.
+	if len(validPolicyIDs) == 0 {
+		return // nothing to reorder
+	}
+
+	// Retain existing ordering for non-whitelist policies; skip empty IDs for
+	// the same reason as above.
 	others := make([]string, 0, len(current.BeforeSystemDefined))
 	for _, id := range current.BeforeSystemDefined {
-		if !idSet[id] {
+		if id != "" && !idSet[id] {
 			others = append(others, id)
 		}
 	}
-	newBefore := append(policyIDs, others...)
+	newBefore := append(validPolicyIDs, others...)
+
+	// Ensure afterSystemDefined is never nil — some UniFi versions reject a
+	// null value there even though the field is logically optional.
+	afterDefined := current.AfterSystemDefined
+	if afterDefined == nil {
+		afterDefined = []string{}
+	}
 
 	if err := m.ctrl.SetPolicyOrdering(ctx, site, pair.SrcZoneID, pair.DstZoneID, controller.PolicyOrdering{
 		BeforeSystemDefined: newBefore,
-		AfterSystemDefined:  current.AfterSystemDefined,
+		AfterSystemDefined:  afterDefined,
 	}); err != nil {
 		m.log.Warn().Err(err).Str("pair", pair.SrcName+"->"+pair.DstName).
 			Msg("failed to reorder whitelist policies to top")
