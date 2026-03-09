@@ -41,10 +41,21 @@ func (m *MockStore) SetError(method string, err error) {
 	m.errors[method] = err
 }
 
-func (m *MockStore) popError(method string) error {
+// check returns and clears any pending injected error for the named method.
+// Must be called with m.mu held.
+func (m *MockStore) check(method string) error {
 	err := m.errors[method]
 	delete(m.errors, method)
 	return err
+}
+
+// copyMap returns a shallow copy of src. Package-level generic helper.
+func copyMap[K comparable, V any](src map[K]V) map[K]V {
+	dst := make(map[K]V, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 // --- Ban operations ---------------------------------------------------------
@@ -52,7 +63,7 @@ func (m *MockStore) popError(method string) error {
 func (m *MockStore) BanExists(ip string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("BanExists"); err != nil {
+	if err := m.check("BanExists"); err != nil {
 		return false, err
 	}
 	_, ok := m.bans[ip]
@@ -62,7 +73,7 @@ func (m *MockStore) BanExists(ip string) (bool, error) {
 func (m *MockStore) BanRecord(ip string, expiresAt time.Time, ipv6 bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("BanRecord"); err != nil {
+	if err := m.check("BanRecord"); err != nil {
 		return err
 	}
 	m.bans[ip] = storage.BanEntry{
@@ -76,7 +87,7 @@ func (m *MockStore) BanRecord(ip string, expiresAt time.Time, ipv6 bool) error {
 func (m *MockStore) BanDelete(ip string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("BanDelete"); err != nil {
+	if err := m.check("BanDelete"); err != nil {
 		return err
 	}
 	delete(m.bans, ip)
@@ -86,14 +97,10 @@ func (m *MockStore) BanDelete(ip string) error {
 func (m *MockStore) BanList() (map[string]storage.BanEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("BanList"); err != nil {
+	if err := m.check("BanList"); err != nil {
 		return nil, err
 	}
-	result := make(map[string]storage.BanEntry, len(m.bans))
-	for k, v := range m.bans {
-		result[k] = v
-	}
-	return result, nil
+	return copyMap(m.bans), nil
 }
 
 // --- Janitor helpers --------------------------------------------------------
@@ -101,7 +108,7 @@ func (m *MockStore) BanList() (map[string]storage.BanEntry, error) {
 func (m *MockStore) PruneExpiredBans() (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("PruneExpiredBans"); err != nil {
+	if err := m.check("PruneExpiredBans"); err != nil {
 		return 0, err
 	}
 	now := time.Now().UTC()
@@ -120,7 +127,7 @@ func (m *MockStore) PruneExpiredBans() (int, error) {
 func (m *MockStore) GetGroup(name string) (*storage.GroupRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("GetGroup"); err != nil {
+	if err := m.check("GetGroup"); err != nil {
 		return nil, err
 	}
 	rec, ok := m.groups[name]
@@ -134,7 +141,7 @@ func (m *MockStore) GetGroup(name string) (*storage.GroupRecord, error) {
 func (m *MockStore) SetGroup(name string, rec storage.GroupRecord) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("SetGroup"); err != nil {
+	if err := m.check("SetGroup"); err != nil {
 		return err
 	}
 	m.groups[name] = rec
@@ -144,7 +151,7 @@ func (m *MockStore) SetGroup(name string, rec storage.GroupRecord) error {
 func (m *MockStore) DeleteGroup(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("DeleteGroup"); err != nil {
+	if err := m.check("DeleteGroup"); err != nil {
 		return err
 	}
 	delete(m.groups, name)
@@ -154,14 +161,10 @@ func (m *MockStore) DeleteGroup(name string) error {
 func (m *MockStore) ListGroups() (map[string]storage.GroupRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("ListGroups"); err != nil {
+	if err := m.check("ListGroups"); err != nil {
 		return nil, err
 	}
-	result := make(map[string]storage.GroupRecord, len(m.groups))
-	for k, v := range m.groups {
-		result[k] = v
-	}
-	return result, nil
+	return copyMap(m.groups), nil
 }
 
 // --- Policy cache -----------------------------------------------------------
@@ -169,7 +172,7 @@ func (m *MockStore) ListGroups() (map[string]storage.GroupRecord, error) {
 func (m *MockStore) GetPolicy(name string) (*storage.PolicyRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("GetPolicy"); err != nil {
+	if err := m.check("GetPolicy"); err != nil {
 		return nil, err
 	}
 	rec, ok := m.policies[name]
@@ -183,7 +186,7 @@ func (m *MockStore) GetPolicy(name string) (*storage.PolicyRecord, error) {
 func (m *MockStore) SetPolicy(name string, rec storage.PolicyRecord) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("SetPolicy"); err != nil {
+	if err := m.check("SetPolicy"); err != nil {
 		return err
 	}
 	m.policies[name] = rec
@@ -193,7 +196,7 @@ func (m *MockStore) SetPolicy(name string, rec storage.PolicyRecord) error {
 func (m *MockStore) DeletePolicy(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("DeletePolicy"); err != nil {
+	if err := m.check("DeletePolicy"); err != nil {
 		return err
 	}
 	delete(m.policies, name)
@@ -203,14 +206,10 @@ func (m *MockStore) DeletePolicy(name string) error {
 func (m *MockStore) ListPolicies() (map[string]storage.PolicyRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("ListPolicies"); err != nil {
+	if err := m.check("ListPolicies"); err != nil {
 		return nil, err
 	}
-	result := make(map[string]storage.PolicyRecord, len(m.policies))
-	for k, v := range m.policies {
-		result[k] = v
-	}
-	return result, nil
+	return copyMap(m.policies), nil
 }
 
 // --- Event history ----------------------------------------------------------
@@ -218,7 +217,7 @@ func (m *MockStore) ListPolicies() (map[string]storage.PolicyRecord, error) {
 func (m *MockStore) RecordEvent(e storage.EventEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("RecordEvent"); err != nil {
+	if err := m.check("RecordEvent"); err != nil {
 		return err
 	}
 	m.events = append(m.events, e)
@@ -228,7 +227,7 @@ func (m *MockStore) RecordEvent(e storage.EventEntry) error {
 func (m *MockStore) ListEvents(limit int) ([]storage.EventEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("ListEvents"); err != nil {
+	if err := m.check("ListEvents"); err != nil {
 		return nil, err
 	}
 	result := make([]storage.EventEntry, len(m.events))
@@ -245,7 +244,7 @@ func (m *MockStore) ListEvents(limit int) ([]storage.EventEntry, error) {
 func (m *MockStore) ListEventsForIP(ip string, limit int) ([]storage.EventEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("ListEventsForIP"); err != nil {
+	if err := m.check("ListEventsForIP"); err != nil {
 		return nil, err
 	}
 	var result []storage.EventEntry
@@ -265,7 +264,7 @@ func (m *MockStore) ListEventsForIP(ip string, limit int) ([]storage.EventEntry,
 func (m *MockStore) SizeBytes() (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.popError("SizeBytes"); err != nil {
+	if err := m.check("SizeBytes"); err != nil {
 		return 0, err
 	}
 	return m.Size, nil

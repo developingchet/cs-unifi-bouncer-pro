@@ -486,3 +486,167 @@ func TestFakeServer_Ping(t *testing.T) {
 		t.Fatalf("Ping: %v", err)
 	}
 }
+
+// TestFakeServer_Reset verifies that Reset clears all data state while
+// preserving auth credentials.
+func TestFakeServer_Reset(t *testing.T) {
+	s := testutil.NewFakeUnifiServer()
+	defer s.Close()
+	ctx := context.Background()
+
+	// Pre-populate data.
+	s.AddSite("default", "site-uuid-1", "Default")
+	s.AddZone("site-uuid-1", "zone-1", "External")
+	s.AddTML("site-uuid-1", "tml-1", "IPV4_ADDRESSES", "list-1", nil)
+	s.AddGroup("default", "grp-1", "g1", "address-group", nil)
+	s.InjectFault(http.MethodGet, "/api/self", http.StatusInternalServerError)
+
+	c := newFakeClient(t, s)
+	// Touch the server so requests are captured.
+	_ = c.Ping(ctx)
+
+	s.Reset()
+
+	// Requests slice should be empty immediately after Reset.
+	if reqs := s.Requests(); len(reqs) != 0 {
+		t.Errorf("expected 0 requests after Reset, got %d", len(reqs))
+	}
+
+	// All list endpoints should now return empty.
+	sites, err := c.DiscoverSites(ctx)
+	if err != nil {
+		t.Fatalf("DiscoverSites after Reset: %v", err)
+	}
+	if len(sites) != 0 {
+		t.Errorf("expected 0 sites after Reset, got %d", len(sites))
+	}
+
+	groups, err := c.ListFirewallGroups(ctx, "default")
+	if err != nil {
+		t.Fatalf("ListFirewallGroups after Reset: %v", err)
+	}
+	if len(groups) != 0 {
+		t.Errorf("expected 0 groups after Reset, got %d", len(groups))
+	}
+
+	// Fault injected before Reset should not trigger.
+	if err := c.Ping(ctx); err != nil {
+		t.Fatalf("Ping after Reset (fault should be cleared): %v", err)
+	}
+}
+
+// TestFakeServer_RateLimitInject verifies InjectRateLimit returns ErrRateLimit
+// with the exact Retry-After value.
+func TestFakeServer_RateLimitInject(t *testing.T) {
+	s := testutil.NewFakeUnifiServer()
+	defer s.Close()
+	c := newFakeClient(t, s)
+
+	s.InjectRateLimit(http.MethodGet, "/api/self", 30)
+
+	err := c.Ping(context.Background())
+	if err == nil {
+		t.Fatal("expected ErrRateLimit, got nil")
+	}
+	var rl *controller.ErrRateLimit
+	if !errors.As(err, &rl) {
+		t.Fatalf("expected *ErrRateLimit, got %T: %v", err, err)
+	}
+	want := 30 * time.Second
+	if rl.RetryAfter != want {
+		t.Errorf("RetryAfter = %v, want %v", rl.RetryAfter, want)
+	}
+}
+
+// TestFakeServer_OrderingSetup verifies SetOrdering pre-populates ordering
+// that GetPolicyOrdering returns correctly.
+func TestFakeServer_OrderingSetup(t *testing.T) {
+	s := testutil.NewFakeUnifiServer()
+	defer s.Close()
+	s.AddSite("default", "site-uuid-1", "Default")
+	c := newFakeClient(t, s)
+	ctx := context.Background()
+
+	want := controller.PolicyOrdering{
+		BeforeSystemDefined: []string{"pol-a", "pol-b"},
+		AfterSystemDefined:  []string{"pol-c"},
+	}
+	s.SetOrdering("site-uuid-1", "zone-src", "zone-dst", want)
+
+	got, err := c.GetPolicyOrdering(ctx, "default", "zone-src", "zone-dst")
+	if err != nil {
+		t.Fatalf("GetPolicyOrdering: %v", err)
+	}
+	if len(got.BeforeSystemDefined) != 2 ||
+		got.BeforeSystemDefined[0] != "pol-a" ||
+		got.BeforeSystemDefined[1] != "pol-b" {
+		t.Errorf("BeforeSystemDefined = %v, want %v", got.BeforeSystemDefined, want.BeforeSystemDefined)
+	}
+	if len(got.AfterSystemDefined) != 1 || got.AfterSystemDefined[0] != "pol-c" {
+		t.Errorf("AfterSystemDefined = %v, want %v", got.AfterSystemDefined, want.AfterSystemDefined)
+	}
+}
+
+// TestFakeServer_CSRFTokenRotation verifies that each response carries a fresh
+// X-Csrf-Token value (LastCSRFToken changes between calls).
+func TestFakeServer_CSRFTokenRotation(t *testing.T) {
+	s := testutil.NewFakeUnifiServerWithAuth("admin", "secret")
+	defer s.Close()
+	c := newFakeClientWithAuth(t, s, "admin", "secret")
+	ctx := context.Background()
+
+	// First Ping: records a CSRF token.
+	if err := c.Ping(ctx); err != nil {
+		t.Fatalf("first Ping: %v", err)
+	}
+	first := s.LastCSRFToken()
+
+	// Second Ping: server should have rotated to a different token.
+	if err := c.Ping(ctx); err != nil {
+		t.Fatalf("second Ping: %v", err)
+	}
+	second := s.LastCSRFToken()
+
+	if first == second {
+		t.Errorf("CSRF token did not rotate: both calls returned %q", first)
+	}
+}
+
+// TestFakeServer_PolicyWithTrafficFilter verifies that a ZonePolicy created
+// with a TrafficMatchingListID survives a full Create→List round-trip
+// (validates Phase B fakePolicy TrafficFilter preservation).
+func TestFakeServer_PolicyWithTrafficFilter(t *testing.T) {
+	s := testutil.NewFakeUnifiServer()
+	defer s.Close()
+	s.AddSite("default", "site-uuid-1", "Default")
+	c := newFakeClient(t, s)
+	ctx := context.Background()
+
+	const tmlID = "tml-abc-123"
+	pol, err := c.CreateZonePolicy(ctx, "default", controller.ZonePolicy{
+		Name:                   "tml-policy",
+		Enabled:                true,
+		Action:                 "BLOCK",
+		SrcZone:                "zone-ext",
+		DstZone:                "zone-int",
+		TrafficMatchingListIDs: []string{tmlID},
+	})
+	if err != nil {
+		t.Fatalf("CreateZonePolicy: %v", err)
+	}
+	if pol.ID == "" {
+		t.Fatal("expected non-empty ID")
+	}
+
+	pols, err := c.ListZonePolicies(ctx, "default")
+	if err != nil {
+		t.Fatalf("ListZonePolicies: %v", err)
+	}
+	if len(pols) != 1 {
+		t.Fatalf("expected 1 policy, got %d", len(pols))
+	}
+	got := pols[0]
+	if len(got.TrafficMatchingListIDs) != 1 || got.TrafficMatchingListIDs[0] != tmlID {
+		t.Errorf("TrafficMatchingListIDs = %v, want [%s]", got.TrafficMatchingListIDs, tmlID)
+	}
+}

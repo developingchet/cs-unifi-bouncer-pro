@@ -132,6 +132,13 @@ func (m *MockController) popError(method string) error {
 	return err
 }
 
+// track increments the call counter for name and returns any pending injected
+// error. Must be called with m.mu held.
+func (m *MockController) track(name string) error {
+	m.calls[name]++
+	return m.popError(name)
+}
+
 func (m *MockController) newID() string {
 	m.nextID++
 	return fmt.Sprintf("mock-id-%d", m.nextID)
@@ -142,8 +149,7 @@ func (m *MockController) newID() string {
 func (m *MockController) ListFirewallGroups(ctx context.Context, site string) ([]controller.FirewallGroup, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["ListFirewallGroups"]++
-	if err := m.popError("ListFirewallGroups"); err != nil {
+	if err := m.track("ListFirewallGroups"); err != nil {
 		return nil, err
 	}
 	return append([]controller.FirewallGroup{}, m.groups[site]...), nil
@@ -152,8 +158,7 @@ func (m *MockController) ListFirewallGroups(ctx context.Context, site string) ([
 func (m *MockController) CreateFirewallGroup(ctx context.Context, site string, g controller.FirewallGroup) (controller.FirewallGroup, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["CreateFirewallGroup"]++
-	if err := m.popError("CreateFirewallGroup"); err != nil {
+	if err := m.track("CreateFirewallGroup"); err != nil {
 		return controller.FirewallGroup{}, err
 	}
 	g.ID = m.newID()
@@ -164,8 +169,7 @@ func (m *MockController) CreateFirewallGroup(ctx context.Context, site string, g
 func (m *MockController) UpdateFirewallGroup(ctx context.Context, site string, g controller.FirewallGroup) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["UpdateFirewallGroup"]++
-	if err := m.popError("UpdateFirewallGroup"); err != nil {
+	if err := m.track("UpdateFirewallGroup"); err != nil {
 		return err
 	}
 	for i, existing := range m.groups[site] {
@@ -180,8 +184,7 @@ func (m *MockController) UpdateFirewallGroup(ctx context.Context, site string, g
 func (m *MockController) DeleteFirewallGroup(ctx context.Context, site string, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["DeleteFirewallGroup"]++
-	if err := m.popError("DeleteFirewallGroup"); err != nil {
+	if err := m.track("DeleteFirewallGroup"); err != nil {
 		return err
 	}
 	groups := m.groups[site][:0]
@@ -197,8 +200,7 @@ func (m *MockController) DeleteFirewallGroup(ctx context.Context, site string, i
 func (m *MockController) ListFirewallRules(ctx context.Context, site string) ([]controller.FirewallRule, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["ListFirewallRules"]++
-	if err := m.popError("ListFirewallRules"); err != nil {
+	if err := m.track("ListFirewallRules"); err != nil {
 		return nil, err
 	}
 	return append([]controller.FirewallRule{}, m.rules[site]...), nil
@@ -207,8 +209,7 @@ func (m *MockController) ListFirewallRules(ctx context.Context, site string) ([]
 func (m *MockController) CreateFirewallRule(ctx context.Context, site string, r controller.FirewallRule) (controller.FirewallRule, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["CreateFirewallRule"]++
-	if err := m.popError("CreateFirewallRule"); err != nil {
+	if err := m.track("CreateFirewallRule"); err != nil {
 		return controller.FirewallRule{}, err
 	}
 	r.ID = m.newID()
@@ -219,8 +220,7 @@ func (m *MockController) CreateFirewallRule(ctx context.Context, site string, r 
 func (m *MockController) UpdateFirewallRule(ctx context.Context, site string, r controller.FirewallRule) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["UpdateFirewallRule"]++
-	if err := m.popError("UpdateFirewallRule"); err != nil {
+	if err := m.track("UpdateFirewallRule"); err != nil {
 		return err
 	}
 	for i, existing := range m.rules[site] {
@@ -235,8 +235,7 @@ func (m *MockController) UpdateFirewallRule(ctx context.Context, site string, r 
 func (m *MockController) DeleteFirewallRule(ctx context.Context, site string, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["DeleteFirewallRule"]++
-	if err := m.popError("DeleteFirewallRule"); err != nil {
+	if err := m.track("DeleteFirewallRule"); err != nil {
 		return err
 	}
 	rules := m.rules[site][:0]
@@ -252,8 +251,7 @@ func (m *MockController) DeleteFirewallRule(ctx context.Context, site string, id
 func (m *MockController) ListZonePolicies(ctx context.Context, site string) ([]controller.ZonePolicy, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["ListZonePolicies"]++
-	if err := m.popError("ListZonePolicies"); err != nil {
+	if err := m.track("ListZonePolicies"); err != nil {
 		return nil, err
 	}
 	return append([]controller.ZonePolicy{}, m.policies[site]...), nil
@@ -262,8 +260,7 @@ func (m *MockController) ListZonePolicies(ctx context.Context, site string) ([]c
 func (m *MockController) CreateZonePolicy(ctx context.Context, site string, p controller.ZonePolicy) (controller.ZonePolicy, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["CreateZonePolicy"]++
-	if err := m.popError("CreateZonePolicy"); err != nil {
+	if err := m.track("CreateZonePolicy"); err != nil {
 		return controller.ZonePolicy{}, err
 	}
 	p.ID = m.newID()
@@ -274,8 +271,7 @@ func (m *MockController) CreateZonePolicy(ctx context.Context, site string, p co
 func (m *MockController) UpdateZonePolicy(ctx context.Context, site string, p controller.ZonePolicy) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["UpdateZonePolicy"]++
-	if err := m.popError("UpdateZonePolicy"); err != nil {
+	if err := m.track("UpdateZonePolicy"); err != nil {
 		return err
 	}
 	for i, existing := range m.policies[site] {
@@ -290,8 +286,7 @@ func (m *MockController) UpdateZonePolicy(ctx context.Context, site string, p co
 func (m *MockController) DeleteZonePolicy(ctx context.Context, site string, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["DeleteZonePolicy"]++
-	if err := m.popError("DeleteZonePolicy"); err != nil {
+	if err := m.track("DeleteZonePolicy"); err != nil {
 		return err
 	}
 	policies := m.policies[site][:0]
@@ -307,8 +302,7 @@ func (m *MockController) DeleteZonePolicy(ctx context.Context, site string, id s
 func (m *MockController) GetZoneID(ctx context.Context, siteID, zoneName string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["GetZoneID"]++
-	if err := m.popError("GetZoneID"); err != nil {
+	if err := m.track("GetZoneID"); err != nil {
 		return "", err
 	}
 
@@ -325,8 +319,7 @@ func (m *MockController) GetZoneID(ctx context.Context, siteID, zoneName string)
 func (m *MockController) HasFeature(ctx context.Context, site string, feature string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["HasFeature"]++
-	if err := m.popError("HasFeature"); err != nil {
+	if err := m.track("HasFeature"); err != nil {
 		return false, err
 	}
 	if siteFeatures, ok := m.features[site]; ok {
@@ -346,8 +339,7 @@ func (m *MockController) InvalidateZoneCache(site string) {
 func (m *MockController) Ping(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["Ping"]++
-	return m.popError("Ping")
+	return m.track("Ping")
 }
 
 func (m *MockController) Close() error {
@@ -360,8 +352,7 @@ func (m *MockController) Close() error {
 func (m *MockController) GetSiteID(ctx context.Context, siteName string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["GetSiteID"]++
-	if err := m.popError("GetSiteID"); err != nil {
+	if err := m.track("GetSiteID"); err != nil {
 		return "", err
 	}
 	if id, ok := m.siteIDs[siteName]; ok {
@@ -387,8 +378,7 @@ func (m *MockController) GetLastOrdering(site, srcZoneID, dstZoneID string) cont
 func (m *MockController) GetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string) (controller.PolicyOrdering, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["GetPolicyOrdering"]++
-	if err := m.popError("GetPolicyOrdering"); err != nil {
+	if err := m.track("GetPolicyOrdering"); err != nil {
 		return controller.PolicyOrdering{}, err
 	}
 	return m.orderings[site+":"+srcZoneID+":"+dstZoneID], nil
@@ -397,8 +387,7 @@ func (m *MockController) GetPolicyOrdering(ctx context.Context, site, srcZoneID,
 func (m *MockController) SetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string, ordering controller.PolicyOrdering) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["SetPolicyOrdering"]++
-	if err := m.popError("SetPolicyOrdering"); err != nil {
+	if err := m.track("SetPolicyOrdering"); err != nil {
 		return err
 	}
 	m.orderings[site+":"+srcZoneID+":"+dstZoneID] = ordering
@@ -408,8 +397,7 @@ func (m *MockController) SetPolicyOrdering(ctx context.Context, site, srcZoneID,
 func (m *MockController) DiscoverZones(ctx context.Context, site string) ([]controller.Zone, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["DiscoverZones"]++
-	if err := m.popError("DiscoverZones"); err != nil {
+	if err := m.track("DiscoverZones"); err != nil {
 		return nil, err
 	}
 	return append([]controller.Zone{}, m.zones[site]...), nil
@@ -418,8 +406,7 @@ func (m *MockController) DiscoverZones(ctx context.Context, site string) ([]cont
 func (m *MockController) ListTrafficMatchingLists(ctx context.Context, site string) ([]controller.TrafficMatchingList, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["ListTrafficMatchingLists"]++
-	if err := m.popError("ListTrafficMatchingLists"); err != nil {
+	if err := m.track("ListTrafficMatchingLists"); err != nil {
 		return nil, err
 	}
 	return append([]controller.TrafficMatchingList{}, m.tmls[site]...), nil
@@ -428,8 +415,7 @@ func (m *MockController) ListTrafficMatchingLists(ctx context.Context, site stri
 func (m *MockController) CreateTrafficMatchingList(ctx context.Context, site string, list controller.TrafficMatchingList) (controller.TrafficMatchingList, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["CreateTrafficMatchingList"]++
-	if err := m.popError("CreateTrafficMatchingList"); err != nil {
+	if err := m.track("CreateTrafficMatchingList"); err != nil {
 		return controller.TrafficMatchingList{}, err
 	}
 	list.ID = m.newID()
@@ -440,8 +426,7 @@ func (m *MockController) CreateTrafficMatchingList(ctx context.Context, site str
 func (m *MockController) UpdateTrafficMatchingList(ctx context.Context, site string, list controller.TrafficMatchingList) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["UpdateTrafficMatchingList"]++
-	if err := m.popError("UpdateTrafficMatchingList"); err != nil {
+	if err := m.track("UpdateTrafficMatchingList"); err != nil {
 		return err
 	}
 	for i, existing := range m.tmls[site] {
@@ -463,8 +448,7 @@ func (m *MockController) SetDiscoveredSites(sites []string) {
 func (m *MockController) DiscoverSites(ctx context.Context) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["DiscoverSites"]++
-	if err := m.popError("DiscoverSites"); err != nil {
+	if err := m.track("DiscoverSites"); err != nil {
 		return nil, err
 	}
 	return append([]string{}, m.discoveredSites...), nil
@@ -473,8 +457,7 @@ func (m *MockController) DiscoverSites(ctx context.Context) ([]string, error) {
 func (m *MockController) DeleteTrafficMatchingList(ctx context.Context, site string, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls["DeleteTrafficMatchingList"]++
-	if err := m.popError("DeleteTrafficMatchingList"); err != nil {
+	if err := m.track("DeleteTrafficMatchingList"); err != nil {
 		return err
 	}
 	tmls := m.tmls[site][:0]
@@ -486,4 +469,3 @@ func (m *MockController) DeleteTrafficMatchingList(ctx context.Context, site str
 	m.tmls[site] = tmls
 	return nil
 }
-

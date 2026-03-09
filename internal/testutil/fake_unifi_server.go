@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 )
 
 // --- Exported helper types --------------------------------------------------
@@ -41,9 +43,9 @@ type FakeRequest struct {
 // --- Internal wire types ----------------------------------------------------
 
 type fakeSite struct {
-	ID           string `json:"id"`
-	InternalRef  string `json:"internalReference"`
-	Name         string `json:"name"`
+	ID          string `json:"id"`
+	InternalRef string `json:"internalReference"`
+	Name        string `json:"name"`
 }
 
 type fakeZone struct {
@@ -86,22 +88,31 @@ type fakeTML struct {
 	Items []fakeTMLItem `json:"items"`
 }
 
+// fakePolicy preserves the full API surface for zone policies. TrafficFilter
+// subtrees are stored as raw JSON so the server can echo exact bytes without
+// coupling to controller-internal wire types.
 type fakePolicy struct {
 	ID      string `json:"id,omitempty"`
 	Enabled bool   `json:"enabled"`
 	Name    string `json:"name"`
 	Action  struct {
-		Type string `json:"type"`
+		Type               string `json:"type"`
+		AllowReturnTraffic bool   `json:"allowReturnTraffic,omitempty"`
 	} `json:"action"`
 	Source struct {
-		ZoneID string `json:"zoneId"`
+		ZoneID        string          `json:"zoneId"`
+		TrafficFilter json.RawMessage `json:"trafficFilter,omitempty"`
 	} `json:"source"`
 	Destination struct {
-		ZoneID string `json:"zoneId"`
+		ZoneID        string          `json:"zoneId"`
+		TrafficFilter json.RawMessage `json:"trafficFilter,omitempty"`
 	} `json:"destination"`
 	IPProtocolScope struct {
 		IPVersion string `json:"ipVersion"`
 	} `json:"ipProtocolScope"`
+	ConnectionStateFilter []string `json:"connectionStateFilter,omitempty"`
+	LoggingEnabled        bool     `json:"loggingEnabled"`
+	Description           string   `json:"description,omitempty"`
 }
 
 type fakeOrdering struct {
@@ -125,6 +136,7 @@ type FakeUnifiServer struct {
 	password    string
 	sessions    map[string]bool
 	csrfToken   string
+	csrfSeq     int
 
 	// State — legacy REST (keyed by site internalReference)
 	groups map[string][]fakeGroup
@@ -143,6 +155,9 @@ type FakeUnifiServer struct {
 	// Fault injection: "METHOD pathPrefix" -> statusCode (consumed on first match)
 	faults map[string]int
 
+	// Rate-limit injection: "METHOD pathPrefix" -> retryAfterSec (consumed on first match)
+	rateLimits map[string]int
+
 	nextID int
 }
 
@@ -160,6 +175,7 @@ func newFakeServer(apiKey, username, password string) *FakeUnifiServer {
 		tmls:        make(map[string][]fakeTML),
 		ordering:    make(map[string]fakeOrdering),
 		faults:      make(map[string]int),
+		rateLimits:  make(map[string]int),
 	}
 	s.srv = httptest.NewTLSServer(s)
 	return s
@@ -257,6 +273,60 @@ func (s *FakeUnifiServer) InjectFault(method, pathPrefix string, statusCode int)
 	s.faults[method+" "+pathPrefix] = statusCode
 }
 
+// InjectRateLimit registers a one-shot 429 response with a configurable
+// Retry-After header. Unlike InjectFault, the retry delay is explicit.
+func (s *FakeUnifiServer) InjectRateLimit(method, pathPrefix string, retryAfterSec int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rateLimits[method+" "+pathPrefix] = retryAfterSec
+}
+
+// ClearFaults removes all pending fault and rate-limit injections.
+func (s *FakeUnifiServer) ClearFaults() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.faults = make(map[string]int)
+	s.rateLimits = make(map[string]int)
+}
+
+// Reset clears all data state (sites, zones, groups, rules, TMLs, policies,
+// ordering, requests, faults, rateLimits, nextID) while preserving auth
+// credentials (validAPIKey, username, password, sessions, csrfToken).
+// Essential for test isolation within a single server instance.
+func (s *FakeUnifiServer) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sites = nil
+	s.zones = make(map[string][]fakeZone)
+	s.groups = make(map[string][]fakeGroup)
+	s.rules = make(map[string][]fakeRule)
+	s.policies = make(map[string][]fakePolicy)
+	s.tmls = make(map[string][]fakeTML)
+	s.ordering = make(map[string]fakeOrdering)
+	s.requests = nil
+	s.faults = make(map[string]int)
+	s.rateLimits = make(map[string]int)
+	s.nextID = 0
+}
+
+// SetOrdering pre-populates the policy ordering for a site/zone pair.
+// Equivalent to sending a SetPolicyOrdering request without going through HTTP.
+func (s *FakeUnifiServer) SetOrdering(siteID, srcZoneID, dstZoneID string, ordering controller.PolicyOrdering) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fo := fakeOrdering{}
+	fo.OrderedFirewallPolicyIDs.BeforeSystemDefined = ordering.BeforeSystemDefined
+	fo.OrderedFirewallPolicyIDs.AfterSystemDefined = ordering.AfterSystemDefined
+	s.ordering[siteID+":"+srcZoneID+":"+dstZoneID] = fo
+}
+
+// LastCSRFToken returns the most recently issued CSRF token.
+func (s *FakeUnifiServer) LastCSRFToken() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.csrfToken
+}
+
 // --- Request capture --------------------------------------------------------
 
 // Requests returns a copy of all captured requests.
@@ -320,13 +390,40 @@ func (s *FakeUnifiServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if faultKey != "" {
 		delete(s.faults, faultKey)
 	}
+
+	// Rate-limit injection: check for matching entry (first match wins, consumed).
+	rlKey := ""
+	rlSecs := 0
+	for k, secs := range s.rateLimits {
+		parts := strings.SplitN(k, " ", 2)
+		if len(parts) == 2 && parts[0] == r.Method && strings.HasPrefix(r.URL.Path, parts[1]) {
+			rlKey = k
+			rlSecs = secs
+			break
+		}
+	}
+	if rlKey != "" {
+		delete(s.rateLimits, rlKey)
+	}
+
+	// CSRF token rotation: generate a new token for every non-faulted request.
+	newCSRF := fmt.Sprintf("csrf-%d", s.csrfSeq)
+	s.csrfSeq++
+	s.csrfToken = newCSRF
 	s.mu.Unlock()
+
+	w.Header().Set("X-Csrf-Token", newCSRF)
 
 	if faultCode != 0 {
 		if faultCode == http.StatusTooManyRequests {
 			w.Header().Set("Retry-After", "10")
 		}
 		http.Error(w, fmt.Sprintf("injected fault %d", faultCode), faultCode)
+		return
+	}
+	if rlSecs > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(rlSecs))
+		http.Error(w, fmt.Sprintf("injected rate limit %d", rlSecs), http.StatusTooManyRequests)
 		return
 	}
 
@@ -454,8 +551,7 @@ func (s *FakeUnifiServer) handleGroups(w http.ResponseWriter, r *http.Request, b
 
 	case http.MethodPost:
 		var g fakeGroup
-		if err := json.Unmarshal(body, &g); err != nil {
-			http.Error(w, "bad body", http.StatusBadRequest)
+		if !unmarshalOrErr(w, body, &g) {
 			return
 		}
 		s.mu.Lock()
@@ -470,8 +566,7 @@ func (s *FakeUnifiServer) handleGroups(w http.ResponseWriter, r *http.Request, b
 			return
 		}
 		var g fakeGroup
-		if err := json.Unmarshal(body, &g); err != nil {
-			http.Error(w, "bad body", http.StatusBadRequest)
+		if !unmarshalOrErr(w, body, &g) {
 			return
 		}
 		g.ID = id
@@ -491,15 +586,7 @@ func (s *FakeUnifiServer) handleGroups(w http.ResponseWriter, r *http.Request, b
 			return
 		}
 		s.mu.Lock()
-		found := false
-		ng := s.groups[site][:0]
-		for _, g := range s.groups[site] {
-			if g.ID == id {
-				found = true
-			} else {
-				ng = append(ng, g)
-			}
-		}
+		ng, found := filterSlice(s.groups[site], id, func(g fakeGroup) string { return g.ID })
 		s.groups[site] = ng
 		s.mu.Unlock()
 		if !found {
@@ -527,8 +614,7 @@ func (s *FakeUnifiServer) handleRules(w http.ResponseWriter, r *http.Request, bo
 
 	case http.MethodPost:
 		var ru fakeRule
-		if err := json.Unmarshal(body, &ru); err != nil {
-			http.Error(w, "bad body", http.StatusBadRequest)
+		if !unmarshalOrErr(w, body, &ru) {
 			return
 		}
 		s.mu.Lock()
@@ -543,8 +629,7 @@ func (s *FakeUnifiServer) handleRules(w http.ResponseWriter, r *http.Request, bo
 			return
 		}
 		var ru fakeRule
-		if err := json.Unmarshal(body, &ru); err != nil {
-			http.Error(w, "bad body", http.StatusBadRequest)
+		if !unmarshalOrErr(w, body, &ru) {
 			return
 		}
 		ru.ID = id
@@ -564,15 +649,7 @@ func (s *FakeUnifiServer) handleRules(w http.ResponseWriter, r *http.Request, bo
 			return
 		}
 		s.mu.Lock()
-		found := false
-		nr := s.rules[site][:0]
-		for _, ru := range s.rules[site] {
-			if ru.ID == id {
-				found = true
-			} else {
-				nr = append(nr, ru)
-			}
-		}
+		nr, found := filterSlice(s.rules[site], id, func(ru fakeRule) string { return ru.ID })
 		s.rules[site] = nr
 		s.mu.Unlock()
 		if !found {
@@ -649,13 +726,7 @@ func (s *FakeUnifiServer) handleListSites(w http.ResponseWriter, r *http.Request
 	s.mu.Lock()
 	sites := append([]fakeSite{}, s.sites...)
 	s.mu.Unlock()
-
-	items := make([]json.RawMessage, len(sites))
-	for i, site := range sites {
-		b, _ := json.Marshal(site)
-		items[i] = b
-	}
-	writeV1Page(w, r, items)
+	writeV1List(w, r, sites)
 }
 
 func (s *FakeUnifiServer) handleZones(w http.ResponseWriter, r *http.Request, siteID string) {
@@ -666,13 +737,7 @@ func (s *FakeUnifiServer) handleZones(w http.ResponseWriter, r *http.Request, si
 	s.mu.Lock()
 	zones := append([]fakeZone{}, s.zones[siteID]...)
 	s.mu.Unlock()
-
-	items := make([]json.RawMessage, len(zones))
-	for i, z := range zones {
-		b, _ := json.Marshal(z)
-		items[i] = b
-	}
-	writeV1Page(w, r, items)
+	writeV1List(w, r, zones)
 }
 
 func (s *FakeUnifiServer) handleTMLs(w http.ResponseWriter, r *http.Request, body []byte, siteID, tmlID string) {
@@ -681,17 +746,11 @@ func (s *FakeUnifiServer) handleTMLs(w http.ResponseWriter, r *http.Request, bod
 		s.mu.Lock()
 		tmls := append([]fakeTML{}, s.tmls[siteID]...)
 		s.mu.Unlock()
-		items := make([]json.RawMessage, len(tmls))
-		for i, t := range tmls {
-			b, _ := json.Marshal(t)
-			items[i] = b
-		}
-		writeV1Page(w, r, items)
+		writeV1List(w, r, tmls)
 
 	case http.MethodPost:
 		var t fakeTML
-		if err := json.Unmarshal(body, &t); err != nil {
-			http.Error(w, "bad body", http.StatusBadRequest)
+		if !unmarshalOrErr(w, body, &t) {
 			return
 		}
 		s.mu.Lock()
@@ -705,20 +764,11 @@ func (s *FakeUnifiServer) handleTMLs(w http.ResponseWriter, r *http.Request, bod
 			http.Error(w, "missing id", http.StatusBadRequest)
 			return
 		}
-		// CRITICAL: reject PUT body that contains "id" field.
-		var check map[string]json.RawMessage
-		if err := json.Unmarshal(body, &check); err == nil {
-			if _, hasID := check["id"]; hasID {
-				writeJSON(w, http.StatusBadRequest, map[string]string{
-					"errorCode": "INVALID_BODY",
-					"message":   "id must not be in PUT body",
-				})
-				return
-			}
+		if !checkNoPutID(w, body) {
+			return
 		}
 		var t fakeTML
-		if err := json.Unmarshal(body, &t); err != nil {
-			http.Error(w, "bad body", http.StatusBadRequest)
+		if !unmarshalOrErr(w, body, &t) {
 			return
 		}
 		t.ID = tmlID
@@ -738,15 +788,7 @@ func (s *FakeUnifiServer) handleTMLs(w http.ResponseWriter, r *http.Request, bod
 			return
 		}
 		s.mu.Lock()
-		found := false
-		nt := s.tmls[siteID][:0]
-		for _, t := range s.tmls[siteID] {
-			if t.ID == tmlID {
-				found = true
-			} else {
-				nt = append(nt, t)
-			}
-		}
+		nt, found := filterSlice(s.tmls[siteID], tmlID, func(t fakeTML) string { return t.ID })
 		s.tmls[siteID] = nt
 		s.mu.Unlock()
 		if !found {
@@ -766,17 +808,11 @@ func (s *FakeUnifiServer) handlePolicies(w http.ResponseWriter, r *http.Request,
 		s.mu.Lock()
 		pols := append([]fakePolicy{}, s.policies[siteID]...)
 		s.mu.Unlock()
-		items := make([]json.RawMessage, len(pols))
-		for i, p := range pols {
-			b, _ := json.Marshal(p)
-			items[i] = b
-		}
-		writeV1Page(w, r, items)
+		writeV1List(w, r, pols)
 
 	case http.MethodPost:
 		var p fakePolicy
-		if err := json.Unmarshal(body, &p); err != nil {
-			http.Error(w, "bad body", http.StatusBadRequest)
+		if !unmarshalOrErr(w, body, &p) {
 			return
 		}
 		s.mu.Lock()
@@ -790,20 +826,11 @@ func (s *FakeUnifiServer) handlePolicies(w http.ResponseWriter, r *http.Request,
 			http.Error(w, "missing id", http.StatusBadRequest)
 			return
 		}
-		// CRITICAL: reject PUT body that contains "id" field.
-		var check map[string]json.RawMessage
-		if err := json.Unmarshal(body, &check); err == nil {
-			if _, hasID := check["id"]; hasID {
-				writeJSON(w, http.StatusBadRequest, map[string]string{
-					"errorCode": "INVALID_BODY",
-					"message":   "id must not be in PUT body",
-				})
-				return
-			}
+		if !checkNoPutID(w, body) {
+			return
 		}
 		var p fakePolicy
-		if err := json.Unmarshal(body, &p); err != nil {
-			http.Error(w, "bad body", http.StatusBadRequest)
+		if !unmarshalOrErr(w, body, &p) {
 			return
 		}
 		p.ID = policyID
@@ -823,15 +850,7 @@ func (s *FakeUnifiServer) handlePolicies(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		s.mu.Lock()
-		found := false
-		np := s.policies[siteID][:0]
-		for _, p := range s.policies[siteID] {
-			if p.ID == policyID {
-				found = true
-			} else {
-				np = append(np, p)
-			}
-		}
+		np, found := filterSlice(s.policies[siteID], policyID, func(p fakePolicy) string { return p.ID })
 		s.policies[siteID] = np
 		s.mu.Unlock()
 		if !found {
@@ -865,8 +884,7 @@ func (s *FakeUnifiServer) handleOrdering(w http.ResponseWriter, r *http.Request,
 
 	case http.MethodPut:
 		var ord fakeOrdering
-		if err := json.Unmarshal(body, &ord); err != nil {
-			http.Error(w, "bad body", http.StatusBadRequest)
+		if !unmarshalOrErr(w, body, &ord) {
 			return
 		}
 		s.mu.Lock()
@@ -945,6 +963,57 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(b)
+}
+
+// writeV1List marshals a typed slice into a paginated v1 response.
+func writeV1List[T any](w http.ResponseWriter, r *http.Request, items []T) {
+	raw := make([]json.RawMessage, len(items))
+	for i, item := range items {
+		b, _ := json.Marshal(item)
+		raw[i] = b
+	}
+	writeV1Page(w, r, raw)
+}
+
+// unmarshalOrErr decodes body into v. On failure it writes HTTP 400 and returns
+// false; on success it returns true. Callers should return immediately on false.
+func unmarshalOrErr(w http.ResponseWriter, body []byte, v any) bool {
+	if err := json.Unmarshal(body, v); err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// checkNoPutID rejects a PUT body that contains a top-level "id" key.
+// Returns false (and writes HTTP 400 JSON) if "id" is present.
+func checkNoPutID(w http.ResponseWriter, body []byte) bool {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err == nil {
+		if _, hasID := m["id"]; hasID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"errorCode": "INVALID_BODY",
+				"message":   "id must not be in PUT body",
+			})
+			return false
+		}
+	}
+	return true
+}
+
+// filterSlice returns a copy of slice with the element matching id removed,
+// plus a boolean indicating whether such an element was found.
+func filterSlice[T any](slice []T, id string, getID func(T) string) ([]T, bool) {
+	out := slice[:0]
+	found := false
+	for _, item := range slice {
+		if getID(item) == id {
+			found = true
+		} else {
+			out = append(out, item)
+		}
+	}
+	return out, found
 }
 
 // --- Internal helpers -------------------------------------------------------
