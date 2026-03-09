@@ -752,3 +752,474 @@ func TestIgnoreNotFound(t *testing.T) {
 		})
 	}
 }
+
+// ---- Additional endpoint coverage ------------------------------------------
+
+func TestUpdateFirewallRule(t *testing.T) {
+	const site = "default"
+	const ruleID = "rule-upd-1"
+	expectedPath := fmt.Sprintf("/proxy/network/api/s/%s/rest/firewallrule/%s", site, ruleID)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != expectedPath {
+			http.Error(w, fmt.Sprintf("unexpected %s %s", r.Method, r.URL.Path), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(makeAPIResp())
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	r := FirewallRule{ID: ruleID, Name: "updated", Action: "drop", Ruleset: "WAN_IN"}
+	if err := updateFirewallRule(context.Background(), c, site, r); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+func TestDeleteFirewallRule(t *testing.T) {
+	const site = "default"
+	const ruleID = "rule-del-1"
+	expectedPath := fmt.Sprintf("/proxy/network/api/s/%s/rest/firewallrule/%s", site, ruleID)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != expectedPath {
+			http.Error(w, fmt.Sprintf("unexpected %s %s", r.Method, r.URL.Path), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(makeAPIResp())
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	if err := deleteFirewallRule(context.Background(), c, site, ruleID); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+func TestUpdateZonePolicy(t *testing.T) {
+	const siteID = testSiteUUID
+	const policyID = "pol-upd-1"
+	expectedPath := fmt.Sprintf("/proxy/network/integration/v1/sites/%s/firewall/policies/%s", siteID, policyID)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != expectedPath {
+			http.Error(w, fmt.Sprintf("unexpected %s %s", r.Method, r.URL.Path), http.StatusBadRequest)
+			return
+		}
+		// Verify "id" is absent from PUT body.
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		if _, ok := body["id"]; ok {
+			t.Errorf("PUT policy body must not contain 'id' field")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	p := ZonePolicy{ID: policyID, Name: "updated", Action: "BLOCK", SrcZone: testZoneExternal, DstZone: testZoneInternal}
+	if err := updateZonePolicyV1(context.Background(), c, siteID, p); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+func TestDeleteZonePolicy(t *testing.T) {
+	const siteID = testSiteUUID
+	const policyID = "pol-del-1"
+	expectedPath := fmt.Sprintf("/proxy/network/integration/v1/sites/%s/firewall/policies/%s", siteID, policyID)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != expectedPath {
+			http.Error(w, fmt.Sprintf("unexpected %s %s", r.Method, r.URL.Path), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	if err := deleteZonePolicyV1(context.Background(), c, siteID, policyID); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+func TestUpdateTML(t *testing.T) {
+	const siteID = testSiteUUID
+	const tmlID = "tml-upd-1"
+	expectedPath := fmt.Sprintf("/proxy/network/integration/v1/sites/%s/traffic-matching-lists/%s", siteID, tmlID)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != expectedPath {
+			http.Error(w, fmt.Sprintf("unexpected %s %s", r.Method, r.URL.Path), http.StatusBadRequest)
+			return
+		}
+		// Verify "id" is absent from PUT body.
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		if _, ok := body["id"]; ok {
+			t.Errorf("PUT TML body must not contain 'id' field")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	list := TrafficMatchingList{ID: tmlID, Type: "IPV4_ADDRESSES", Name: "updated-list"}
+	if err := updateTML(context.Background(), c, siteID, list); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+func TestDeleteTML(t *testing.T) {
+	const siteID = testSiteUUID
+	const tmlID = "tml-del-1"
+	expectedPath := fmt.Sprintf("/proxy/network/integration/v1/sites/%s/traffic-matching-lists/%s", siteID, tmlID)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != expectedPath {
+			http.Error(w, fmt.Sprintf("unexpected %s %s", r.Method, r.URL.Path), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	if err := deleteTML(context.Background(), c, siteID, tmlID); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+func TestGetPolicyOrdering(t *testing.T) {
+	const siteID = testSiteUUID
+	const srcZone = testZoneExternal
+	const dstZone = testZoneInternal
+	expectedPath := fmt.Sprintf("/proxy/network/integration/v1/sites/%s/firewall/policies/ordering", siteID)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != expectedPath {
+			http.Error(w, fmt.Sprintf("unexpected %s %s", r.Method, r.URL.Path), http.StatusBadRequest)
+			return
+		}
+		// Verify zone query params are present.
+		if got := r.URL.Query().Get("sourceFirewallZoneId"); got != srcZone {
+			t.Errorf("sourceFirewallZoneId = %q, want %q", got, srcZone)
+		}
+		if got := r.URL.Query().Get("destinationFirewallZoneId"); got != dstZone {
+			t.Errorf("destinationFirewallZoneId = %q, want %q", got, dstZone)
+		}
+		resp := apiOrderingBody{
+			OrderedFirewallPolicyIDs: apiOrderedPolicyIDs{
+				BeforeSystemDefined: []string{"pol-1"},
+				AfterSystemDefined:  []string{"pol-2"},
+			},
+		}
+		b, _ := json.Marshal(resp)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(b)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	got, err := getPolicyOrderingV1(context.Background(), c, siteID, srcZone, dstZone)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if len(got.BeforeSystemDefined) != 1 || got.BeforeSystemDefined[0] != "pol-1" {
+		t.Errorf("BeforeSystemDefined = %v, want [pol-1]", got.BeforeSystemDefined)
+	}
+}
+
+func TestSetPolicyOrdering(t *testing.T) {
+	const siteID = testSiteUUID
+	const srcZone = testZoneExternal
+	const dstZone = testZoneInternal
+	expectedPath := fmt.Sprintf("/proxy/network/integration/v1/sites/%s/firewall/policies/ordering", siteID)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != expectedPath {
+			http.Error(w, fmt.Sprintf("unexpected %s %s", r.Method, r.URL.Path), http.StatusBadRequest)
+			return
+		}
+		if got := r.URL.Query().Get("sourceFirewallZoneId"); got != srcZone {
+			t.Errorf("sourceFirewallZoneId = %q, want %q", got, srcZone)
+		}
+		if got := r.URL.Query().Get("destinationFirewallZoneId"); got != dstZone {
+			t.Errorf("destinationFirewallZoneId = %q, want %q", got, dstZone)
+		}
+		var body apiOrderingBody
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		if len(body.OrderedFirewallPolicyIDs.BeforeSystemDefined) != 2 {
+			t.Errorf("BeforeSystemDefined: got %v, want 2 items", body.OrderedFirewallPolicyIDs.BeforeSystemDefined)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	ordering := PolicyOrdering{BeforeSystemDefined: []string{"pol-1", "pol-2"}}
+	if err := setPolicyOrderingV1(context.Background(), c, siteID, srcZone, dstZone, ordering); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+func TestDiscoverSites(t *testing.T) {
+	expectedPath := "/proxy/network/integration/v1/sites"
+
+	respBody := makeV1Page(
+		apiSiteV1{ID: testSiteUUID, InternalReference: "default", Name: "Default"},
+		apiSiteV1{ID: "uuid-b", InternalReference: "site-b", Name: "Site B"},
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != expectedPath {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(respBody)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	sites, err := discoverSites(context.Background(), c)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if len(sites) != 2 {
+		t.Fatalf("expected 2 sites, got %d: %v", len(sites), sites)
+	}
+}
+
+func TestDiscoverZones(t *testing.T) {
+	const siteID = testSiteUUID
+	expectedPath := fmt.Sprintf("/proxy/network/integration/v1/sites/%s/firewall/zones", siteID)
+
+	respBody := makeV1Page(
+		apiFirewallZoneV1{ID: testZoneExternal, Name: "WAN"},
+		apiFirewallZoneV1{ID: testZoneInternal, Name: "LAN"},
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != expectedPath {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(respBody)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	zones, err := listFirewallZones(context.Background(), c, siteID)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if len(zones) != 2 {
+		t.Fatalf("expected 2 zones, got %d", len(zones))
+	}
+	if zones[0].ID != testZoneExternal {
+		t.Errorf("zones[0].ID = %q, want %q", zones[0].ID, testZoneExternal)
+	}
+}
+
+func TestListZonePolicies_Pagination(t *testing.T) {
+	const siteID = testSiteUUID
+	expectedPath := fmt.Sprintf("/proxy/network/integration/v1/sites/%s/firewall/policies", siteID)
+
+	// Server returns page1 (3 items) then page2 (2 items) based on offset.
+	makePolicy := func(id string) apiV1Policy {
+		return apiV1Policy{
+			ID: id, Enabled: true, Name: id, Action: apiV1PolicyAction{Type: "BLOCK"},
+			Source:          apiV1PolicySrc{ZoneID: testZoneExternal},
+			Destination:     apiV1PolicyDst{ZoneID: testZoneInternal},
+			IPProtocolScope: apiV1IPScope{IPVersion: "IPV4"},
+		}
+	}
+	allPolicies := []apiV1Policy{
+		makePolicy("p1"), makePolicy("p2"), makePolicy("p3"),
+		makePolicy("p4"), makePolicy("p5"),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != expectedPath {
+			http.Error(w, "unexpected path", http.StatusBadRequest)
+			return
+		}
+		offsetStr := r.URL.Query().Get("offset")
+		limitStr := r.URL.Query().Get("limit")
+		offset := 0
+		limit := 3
+		fmt.Sscan(offsetStr, &offset)
+		fmt.Sscan(limitStr, &limit)
+
+		end := offset + limit
+		if end > len(allPolicies) {
+			end = len(allPolicies)
+		}
+		page := allPolicies[offset:end]
+		items := make([]json.RawMessage, len(page))
+		for i, p := range page {
+			items[i], _ = json.Marshal(p)
+		}
+		resp := struct {
+			Offset     int               `json:"offset"`
+			Limit      int               `json:"limit"`
+			Count      int               `json:"count"`
+			TotalCount int               `json:"totalCount"`
+			Data       []json.RawMessage `json:"data"`
+		}{
+			Offset:     offset,
+			Limit:      limit,
+			Count:      len(page),
+			TotalCount: len(allPolicies),
+			Data:       items,
+		}
+		b, _ := json.Marshal(resp)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(b)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	policies, err := listZonePoliciesV1(context.Background(), c, siteID)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if len(policies) != 5 {
+		t.Errorf("expected 5 policies via pagination, got %d", len(policies))
+	}
+}
+
+func TestListTMLs_Pagination(t *testing.T) {
+	const siteID = testSiteUUID
+	expectedPath := fmt.Sprintf("/proxy/network/integration/v1/sites/%s/traffic-matching-lists", siteID)
+
+	allTMLs := make([]apiTMLV1, 5)
+	for i := range allTMLs {
+		allTMLs[i] = apiTMLV1{ID: fmt.Sprintf("tml-%d", i), Type: "IPV4_ADDRESSES", Name: fmt.Sprintf("list-%d", i)}
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != expectedPath {
+			http.Error(w, "unexpected path", http.StatusBadRequest)
+			return
+		}
+		offsetStr := r.URL.Query().Get("offset")
+		limitStr := r.URL.Query().Get("limit")
+		offset := 0
+		limit := 3
+		fmt.Sscan(offsetStr, &offset)
+		fmt.Sscan(limitStr, &limit)
+
+		end := offset + limit
+		if end > len(allTMLs) {
+			end = len(allTMLs)
+		}
+		page := allTMLs[offset:end]
+		items := make([]json.RawMessage, len(page))
+		for i, t := range page {
+			items[i], _ = json.Marshal(t)
+		}
+		resp := struct {
+			Offset     int               `json:"offset"`
+			Limit      int               `json:"limit"`
+			Count      int               `json:"count"`
+			TotalCount int               `json:"totalCount"`
+			Data       []json.RawMessage `json:"data"`
+		}{
+			Offset:     offset,
+			Limit:      limit,
+			Count:      len(page),
+			TotalCount: len(allTMLs),
+			Data:       items,
+		}
+		b, _ := json.Marshal(resp)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(b)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	tmls, err := listTMLs(context.Background(), c, siteID)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if len(tmls) != 5 {
+		t.Errorf("expected 5 TMLs via pagination, got %d", len(tmls))
+	}
+}
+
+// --- Wire struct unit tests -------------------------------------------------
+
+// TestTMLWireUpdate_ExcludesID verifies that tmlToWireUpdate produces JSON
+// without an "id" field — the primary regression guard for TML PUT requests.
+func TestTMLWireUpdate_ExcludesID(t *testing.T) {
+	tml := TrafficMatchingList{ID: "some-id", Type: "IPV4_ADDRESSES", Name: "test"}
+	wire := tmlToWireUpdate(tml)
+	b, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := m["id"]; ok {
+		t.Error("tmlToWireUpdate must not produce an 'id' field in JSON output")
+	}
+	// Verify expected fields are present.
+	if _, ok := m["type"]; !ok {
+		t.Error("tmlToWireUpdate must include 'type' field")
+	}
+	if _, ok := m["name"]; !ok {
+		t.Error("tmlToWireUpdate must include 'name' field")
+	}
+}
+
+// TestPolicyWireUpdate_ExcludesID verifies that modelToV1PolicyUpdate produces
+// JSON without an "id" field — regression guard for policy PUT requests.
+func TestPolicyWireUpdate_ExcludesID(t *testing.T) {
+	p := ZonePolicy{
+		ID:      "some-policy-id",
+		Name:    "test-policy",
+		Enabled: true,
+		Action:  "BLOCK",
+		SrcZone: testZoneExternal,
+		DstZone: testZoneInternal,
+	}
+	wire := modelToV1PolicyUpdate(p)
+	b, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := m["id"]; ok {
+		t.Error("modelToV1PolicyUpdate must not produce an 'id' field in JSON output")
+	}
+	if _, ok := m["name"]; !ok {
+		t.Error("modelToV1PolicyUpdate must include 'name' field")
+	}
+}

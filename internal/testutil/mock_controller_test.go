@@ -448,3 +448,335 @@ func TestMockController_MultiSite(t *testing.T) {
 		t.Fatalf("unexpected site-b groups: %+v", b)
 	}
 }
+
+// TestMockController_TMLs covers the full TML CRUD cycle.
+func TestMockController_TMLs(t *testing.T) {
+	ctx := context.Background()
+	const site = "default"
+
+	t.Run("empty by default", func(t *testing.T) {
+		m := testutil.NewMockController()
+		tmls, err := m.ListTrafficMatchingLists(ctx, site)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(tmls) != 0 {
+			t.Fatalf("expected empty, got %d", len(tmls))
+		}
+	})
+
+	t.Run("preset is returned", func(t *testing.T) {
+		m := testutil.NewMockController()
+		m.SetTMLs(site, []controller.TrafficMatchingList{{ID: "t1", Name: "list-1", Type: "IPV4_ADDRESSES"}})
+		tmls, err := m.ListTrafficMatchingLists(ctx, site)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(tmls) != 1 || tmls[0].ID != "t1" {
+			t.Fatalf("unexpected TMLs: %+v", tmls)
+		}
+	})
+
+	t.Run("list returns a copy not an alias", func(t *testing.T) {
+		m := testutil.NewMockController()
+		m.SetTMLs(site, []controller.TrafficMatchingList{{ID: "t1"}})
+		first, _ := m.ListTrafficMatchingLists(ctx, site)
+		first[0].ID = "mutated"
+		second, _ := m.ListTrafficMatchingLists(ctx, site)
+		if second[0].ID != "t1" {
+			t.Fatal("list returned alias of internal slice")
+		}
+	})
+
+	t.Run("create assigns ID and persists", func(t *testing.T) {
+		m := testutil.NewMockController()
+		tml, err := m.CreateTrafficMatchingList(ctx, site, controller.TrafficMatchingList{Name: "new-list"})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if tml.ID == "" {
+			t.Fatal("expected non-empty ID")
+		}
+		tmls, _ := m.ListTrafficMatchingLists(ctx, site)
+		if len(tmls) != 1 || tmls[0].ID != tml.ID {
+			t.Fatalf("created TML not found: %+v", tmls)
+		}
+	})
+
+	t.Run("update modifies in-place", func(t *testing.T) {
+		m := testutil.NewMockController()
+		tml, _ := m.CreateTrafficMatchingList(ctx, site, controller.TrafficMatchingList{Name: "orig"})
+		tml.Name = "updated"
+		if err := m.UpdateTrafficMatchingList(ctx, site, tml); err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		tmls, _ := m.ListTrafficMatchingLists(ctx, site)
+		if tmls[0].Name != "updated" {
+			t.Errorf("expected updated name, got %q", tmls[0].Name)
+		}
+	})
+
+	t.Run("delete removes and leaves others intact", func(t *testing.T) {
+		m := testutil.NewMockController()
+		t1, _ := m.CreateTrafficMatchingList(ctx, site, controller.TrafficMatchingList{Name: "keep"})
+		t2, _ := m.CreateTrafficMatchingList(ctx, site, controller.TrafficMatchingList{Name: "remove"})
+		if err := m.DeleteTrafficMatchingList(ctx, site, t2.ID); err != nil {
+			t.Fatalf("delete: %v", err)
+		}
+		tmls, _ := m.ListTrafficMatchingLists(ctx, site)
+		if len(tmls) != 1 || tmls[0].ID != t1.ID {
+			t.Fatalf("unexpected TMLs after delete: %+v", tmls)
+		}
+	})
+}
+
+// TestMockController_PolicyOrdering covers SetOrdering/GetPolicyOrdering/SetPolicyOrdering.
+func TestMockController_PolicyOrdering(t *testing.T) {
+	ctx := context.Background()
+	m := testutil.NewMockController()
+
+	// SetOrdering (test helper) then GetPolicyOrdering.
+	m.SetOrdering("default", "src-zone", "dst-zone", controller.PolicyOrdering{
+		BeforeSystemDefined: []string{"pol-1"},
+		AfterSystemDefined:  []string{"pol-2"},
+	})
+	ord, err := m.GetPolicyOrdering(ctx, "default", "src-zone", "dst-zone")
+	if err != nil {
+		t.Fatalf("GetPolicyOrdering: %v", err)
+	}
+	if len(ord.BeforeSystemDefined) != 1 || ord.BeforeSystemDefined[0] != "pol-1" {
+		t.Errorf("BeforeSystemDefined = %v", ord.BeforeSystemDefined)
+	}
+
+	// SetPolicyOrdering via Controller interface then verify.
+	if err := m.SetPolicyOrdering(ctx, "default", "src-zone", "dst-zone", controller.PolicyOrdering{
+		BeforeSystemDefined: []string{"pol-x", "pol-y"},
+	}); err != nil {
+		t.Fatalf("SetPolicyOrdering: %v", err)
+	}
+	ord2, _ := m.GetPolicyOrdering(ctx, "default", "src-zone", "dst-zone")
+	if len(ord2.BeforeSystemDefined) != 2 {
+		t.Errorf("expected 2 before, got %v", ord2.BeforeSystemDefined)
+	}
+
+	// Different zone pair is independent.
+	ord3, _ := m.GetPolicyOrdering(ctx, "default", "other-src", "other-dst")
+	if len(ord3.BeforeSystemDefined) != 0 {
+		t.Errorf("expected empty for different zone pair, got %v", ord3.BeforeSystemDefined)
+	}
+}
+
+// TestMockController_DiscoverSites verifies DiscoverSites returns a copy.
+func TestMockController_DiscoverSites(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("empty by default", func(t *testing.T) {
+		m := testutil.NewMockController()
+		sites, err := m.DiscoverSites(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(sites) != 0 {
+			t.Fatalf("expected empty, got %v", sites)
+		}
+	})
+
+	t.Run("returns preset sites as copy", func(t *testing.T) {
+		m := testutil.NewMockController()
+		m.SetDiscoveredSites([]string{"site-a", "site-b"})
+		got, _ := m.DiscoverSites(ctx)
+		if len(got) != 2 {
+			t.Fatalf("expected 2 sites, got %v", got)
+		}
+		got[0] = "mutated"
+		got2, _ := m.DiscoverSites(ctx)
+		if got2[0] != "site-a" {
+			t.Fatal("DiscoverSites returned alias of internal slice")
+		}
+	})
+}
+
+// TestMockController_DiscoverZones verifies DiscoverZones returns a copy.
+func TestMockController_DiscoverZones(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("empty by default", func(t *testing.T) {
+		m := testutil.NewMockController()
+		zones, err := m.DiscoverZones(ctx, "default")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(zones) != 0 {
+			t.Fatalf("expected empty, got %v", zones)
+		}
+	})
+
+	t.Run("returns preset zones as copy", func(t *testing.T) {
+		m := testutil.NewMockController()
+		m.SetZones("default", []controller.Zone{{ID: "z1", Name: "WAN"}, {ID: "z2", Name: "LAN"}})
+		zones, _ := m.DiscoverZones(ctx, "default")
+		if len(zones) != 2 {
+			t.Fatalf("expected 2 zones, got %d", len(zones))
+		}
+		zones[0].ID = "mutated"
+		zones2, _ := m.DiscoverZones(ctx, "default")
+		if zones2[0].ID != "z1" {
+			t.Fatal("DiscoverZones returned alias")
+		}
+	})
+}
+
+// TestMockController_GetSiteID covers lookup, passthrough, and cross-site isolation.
+func TestMockController_GetSiteID(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("preset lookup", func(t *testing.T) {
+		m := testutil.NewMockController()
+		m.SetSiteID("default", "uuid-default")
+		id, err := m.GetSiteID(ctx, "default")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if id != "uuid-default" {
+			t.Errorf("expected uuid-default, got %q", id)
+		}
+	})
+
+	t.Run("passthrough for unknown site", func(t *testing.T) {
+		m := testutil.NewMockController()
+		id, err := m.GetSiteID(ctx, "some-uuid-direct")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if id != "some-uuid-direct" {
+			t.Errorf("expected passthrough, got %q", id)
+		}
+	})
+
+	t.Run("cross-site isolation", func(t *testing.T) {
+		m := testutil.NewMockController()
+		m.SetSiteID("site-a", "uuid-a")
+		id, _ := m.GetSiteID(ctx, "site-b")
+		// site-b not preset, so it passthrough-returns "site-b" not "uuid-a"
+		if id == "uuid-a" {
+			t.Error("site-a mapping leaked to site-b")
+		}
+	})
+}
+
+// TestMockController_InvalidateZoneCache verifies the call counter increments.
+func TestMockController_InvalidateZoneCache(t *testing.T) {
+	m := testutil.NewMockController()
+	m.InvalidateZoneCache("default")
+	m.InvalidateZoneCache("default")
+	if n := m.Calls("InvalidateZoneCache"); n != 2 {
+		t.Errorf("expected 2 InvalidateZoneCache calls, got %d", n)
+	}
+}
+
+// TestMockController_Concurrent hammers Create/List/Delete from 10 goroutines.
+// Must not data-race under `go test -race`.
+func TestMockController_Concurrent(t *testing.T) {
+	m := testutil.NewMockController()
+	ctx := context.Background()
+
+	const workers = 10
+	done := make(chan struct{}, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			g, _ := m.CreateFirewallGroup(ctx, "default", controller.FirewallGroup{Name: "g"})
+			_, _ = m.ListFirewallGroups(ctx, "default")
+			_ = m.DeleteFirewallGroup(ctx, "default", g.ID)
+		}()
+	}
+	for i := 0; i < workers; i++ {
+		<-done
+	}
+}
+
+// TestMockController_ErrorInjection_TML verifies SetError for TML and ordering methods.
+func TestMockController_ErrorInjection_TML(t *testing.T) {
+	ctx := context.Background()
+	const site = "default"
+	sentinel := errors.New("injected")
+
+	cases := []struct {
+		method string
+		call   func(m *testutil.MockController) error
+	}{
+		{
+			"ListTrafficMatchingLists",
+			func(m *testutil.MockController) error {
+				_, err := m.ListTrafficMatchingLists(ctx, site)
+				return err
+			},
+		},
+		{
+			"CreateTrafficMatchingList",
+			func(m *testutil.MockController) error {
+				_, err := m.CreateTrafficMatchingList(ctx, site, controller.TrafficMatchingList{})
+				return err
+			},
+		},
+		{
+			"UpdateTrafficMatchingList",
+			func(m *testutil.MockController) error {
+				return m.UpdateTrafficMatchingList(ctx, site, controller.TrafficMatchingList{})
+			},
+		},
+		{
+			"DeleteTrafficMatchingList",
+			func(m *testutil.MockController) error {
+				return m.DeleteTrafficMatchingList(ctx, site, "id")
+			},
+		},
+		{
+			"GetPolicyOrdering",
+			func(m *testutil.MockController) error {
+				_, err := m.GetPolicyOrdering(ctx, site, "src", "dst")
+				return err
+			},
+		},
+		{
+			"SetPolicyOrdering",
+			func(m *testutil.MockController) error {
+				return m.SetPolicyOrdering(ctx, site, "src", "dst", controller.PolicyOrdering{})
+			},
+		},
+		{
+			"DiscoverSites",
+			func(m *testutil.MockController) error {
+				_, err := m.DiscoverSites(ctx)
+				return err
+			},
+		},
+		{
+			"DiscoverZones",
+			func(m *testutil.MockController) error {
+				_, err := m.DiscoverZones(ctx, site)
+				return err
+			},
+		},
+		{
+			"GetSiteID",
+			func(m *testutil.MockController) error {
+				_, err := m.GetSiteID(ctx, site)
+				return err
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.method, func(t *testing.T) {
+			m := testutil.NewMockController()
+			m.SetError(tc.method, sentinel)
+			if err := tc.call(m); !errors.Is(err, sentinel) {
+				t.Fatalf("expected sentinel error, got: %v", err)
+			}
+			if err := tc.call(m); err != nil {
+				t.Fatalf("expected no error on second call, got: %v", err)
+			}
+		})
+	}
+}
