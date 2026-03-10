@@ -25,6 +25,7 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 - [Cloudflare Whitelist](#cloudflare-whitelist)
 - [CrowdSec LAPI](#crowdsec-lapi)
 - [Decision Filtering](#decision-filtering)
+- [Decision Rate Limiting](#decision-rate-limiting)
 - [Session Management](#session-management)
 - [Storage](#storage)
 - [Ban History](#ban-history)
@@ -46,6 +47,7 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 | `UNIFI_CA_CERT` | — | No | Path to a PEM CA certificate for self-signed controller certs. |
 | `UNIFI_HTTP_TIMEOUT` | `120s` | No | HTTP request timeout for UniFi API calls. |
 | `UNIFI_API_DEBUG` | `false` | No | Log raw HTTP request/response bodies (verbose; do not use in production). |
+| `UNIFI_REQUIRE_HTTPS` | `false` | No | When `true`, the bouncer refuses to start if `UNIFI_URL` uses `http://`. Set to `true` in hardened environments to prevent accidental plaintext connections. |
 | `ENABLE_IPV6` | `false` | No | Enable IPv6 dialing for the HTTP client. Set to `true` only if your controller is reachable over IPv6 with a working network path. This is separate from `FIREWALL_ENABLE_IPV6`. |
 
 ### Authentication priority
@@ -59,6 +61,8 @@ API key authentication is preferred. If `UNIFI_API_KEY` is set, username/passwor
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `UNIFI_SITES` | `default` | No | Comma-separated list of UniFi site names. Bans are applied to **all** listed sites simultaneously. |
+| `UNIFI_SITES_EXCLUDE` | — | No | Comma-separated site names to exclude when `UNIFI_SITES_AUTO=true`. Has no effect when sites are specified manually via `UNIFI_SITES`. |
+| `UNIFI_SITES_AUTO` | `false` | No | Automatically discover all sites from the controller and apply bans to every site except those listed in `UNIFI_SITES_EXCLUDE`. When `true`, `UNIFI_SITES` is ignored. |
 
 Site names are the internal short names (visible in the URL when logged into the controller), not display names. The default site is named `default`.
 
@@ -322,6 +326,23 @@ Decisions from CrowdSec pass through an 8-stage filter pipeline before being enq
 
 ---
 
+## Decision Rate Limiting
+
+A token-bucket rate limiter can throttle how fast decisions are dequeued and applied to UniFi during large ban waves. When the limiter is active, excess decisions are queued and processed as tokens refill. The `crowdsec_unifi_decision_queue_depth` metric tracks backpressure.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DECISION_RATE_LIMIT` | `0` | Maximum decisions processed per second. `0` disables rate limiting (unlimited throughput). |
+| `DECISION_BURST_SIZE` | `1000` | Token-bucket burst capacity — the maximum number of decisions that can be processed in a single burst before the rate limit takes effect. Has no effect when `DECISION_RATE_LIMIT=0`. |
+
+```bash
+# Allow up to 500 decisions/s with a burst of 2000
+DECISION_RATE_LIMIT=500
+DECISION_BURST_SIZE=2000
+```
+
+---
+
 ## Session Management
 
 | Variable | Default | Description |
@@ -451,3 +472,5 @@ WEBHOOK_EVENTS=circuit_breaker_open,circuit_breaker_close,reconcile_drift
 | `METRICS_ADDR` | `:9090` | Address for the Prometheus metrics endpoint |
 | `HEALTH_ADDR` | `:8081` | Address for health endpoints (`/healthz`, `/readyz`) |
 | `JANITOR_INTERVAL` | `1h` | How often the background janitor prunes expired bans and rate entries, and updates database size metrics |
+| `SHUTDOWN_GRACE_PERIOD` | `30s` | Time given to in-flight goroutines to finish cleanly after a shutdown signal before the process exits forcefully. |
+| `HEALTH_CHECK_LAPI` | `false` | When `true`, the `/readyz` health endpoint also probes the CrowdSec LAPI for reachability. By default only the UniFi controller is probed. |
