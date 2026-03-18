@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
 # Stage 1: Build
-FROM golang:1.25-alpine@sha256:8e02eb337d9e0ea459e041f1ee5eece41cbb61f1d83e7d883a3e2fb4862063fa AS builder
+# Use --platform=$BUILDPLATFORM so the builder always runs natively on the CI host (amd64).
+# TARGETARCH/TARGETOS/TARGETVARIANT are injected by BuildKit for cross-compilation via GOOS/GOARCH below.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine@sha256:8e02eb337d9e0ea459e041f1ee5eece41cbb61f1d83e7d883a3e2fb4862063fa AS builder
 
 RUN apk add --no-cache git ca-certificates tzdata
 
