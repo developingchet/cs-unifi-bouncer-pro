@@ -46,11 +46,12 @@ func NewFilterConfig() FilterConfig {
 
 // FilterResult holds the decision after pipeline processing.
 type FilterResult struct {
-	Passed   bool
-	Action   string // "ban" or "delete"
-	Value    string // sanitized IP or CIDR
-	IPv6     bool
-	Duration time.Duration
+	Passed           bool
+	Action           string // "ban" or "delete"
+	Value            string // sanitized IP or CIDR
+	IPv6             bool
+	Duration         time.Duration
+	DurationOverride bool
 }
 
 // stage labels for metrics
@@ -68,6 +69,11 @@ const (
 // Filter runs a CrowdSec decision through the 8-stage pipeline.
 // Returns a FilterResult with Passed=true if the decision should be acted on.
 func Filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger) FilterResult {
+	if d == nil || d.Type == nil || d.Scope == nil || d.Value == nil {
+		metrics.DecisionsFiltered.WithLabelValues(stageParse, "missing_field").Inc()
+		log.Warn().Msg("filtered: decision is missing required fields")
+		return FilterResult{}
+	}
 	action := strings.ToLower(*d.Type)
 	scope := strings.ToLower(*d.Scope)
 	value := *d.Value
@@ -149,21 +155,23 @@ func Filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger) FilterResu
 
 	// Per-scenario duration override: if the scenario contains any configured key
 	// as a substring, replace the duration with the mapped value.
+	matchedKey := ""
 	if action == "ban" {
-		for prefix, overrideDur := range cfg.ScenarioDurationMap {
-			if prefix != "" && strings.Contains(scenario, prefix) {
+		for key, overrideDur := range cfg.ScenarioDurationMap {
+			if key != "" && strings.Contains(scenario, key) && len(key) > len(matchedKey) {
 				dur = overrideDur
-				break
+				matchedKey = key
 			}
 		}
 	}
 
 	return FilterResult{
-		Passed:   true,
-		Action:   action,
-		Value:    sanitized,
-		IPv6:     isV6,
-		Duration: dur,
+		Passed:           true,
+		Action:           action,
+		Value:            sanitized,
+		IPv6:             isV6,
+		Duration:         dur,
+		DurationOverride: matchedKey != "",
 	}
 }
 

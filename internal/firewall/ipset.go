@@ -131,28 +131,41 @@ func (s *IPSet) MarkClean() {
 func (s *IPSet) HasChangedFromFlushed() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.lastFlushed == nil {
-		return true
-	}
-	if len(s.members) != len(s.lastFlushed) {
-		return true
-	}
-	for ip := range s.members {
-		if _, ok := s.lastFlushed[ip]; !ok {
-			return true
-		}
-	}
-	return false
+	return s.lastFlushed == nil || !sameMembers(s.members, s.lastFlushed)
 }
 
-// CommitFlushed snapshots the current member set as the last-flushed state.
-// Call after a successful API write to enable diff-based skip optimisation.
-func (s *IPSet) CommitFlushed() {
+// SkipUnchanged atomically clears dirty only when the current members match the
+// last successful API write. A concurrent Add or Remove must remain dirty.
+func (s *IPSet) SkipUnchanged() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastFlushed = make(map[string]struct{}, len(s.members))
-	for ip := range s.members {
-		s.lastFlushed[ip] = struct{}{}
+	if s.lastFlushed == nil || !sameMembers(s.members, s.lastFlushed) {
+		return false
 	}
 	s.dirty = false
+	return true
+}
+
+// CommitFlushed records exactly the members sent in a successful API write.
+// Changes made while that write was in flight remain dirty for the next flush.
+func (s *IPSet) CommitFlushed(sent []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastFlushed = make(map[string]struct{}, len(sent))
+	for _, ip := range sent {
+		s.lastFlushed[ip] = struct{}{}
+	}
+	s.dirty = !sameMembers(s.members, s.lastFlushed)
+}
+
+func sameMembers(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for ip := range a {
+		if _, ok := b[ip]; !ok {
+			return false
+		}
+	}
+	return true
 }

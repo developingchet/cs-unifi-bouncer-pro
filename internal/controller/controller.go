@@ -33,6 +33,7 @@ type FirewallRule struct {
 type ZonePolicy struct {
 	ID                     string
 	Name                   string
+	Index                  *int // controller order within a zone pair, when reported
 	Enabled                bool
 	Action                 string // "BLOCK", "ALLOW", "REJECT"
 	AllowReturnTraffic     bool   // only valid for ALLOW action
@@ -51,9 +52,10 @@ type ZonePolicy struct {
 
 // Zone represents a UniFi network zone (topology discovery).
 type Zone struct {
-	ID     string
-	Name   string
-	Origin string // metadata.origin from integration v1 API, e.g. "USER_DEFINED"
+	ID         string
+	Name       string
+	NetworkIDs []string
+	Origin     string // metadata.origin from integration v1 API, e.g. "USER_DEFINED"
 }
 
 // TrafficMatchingList represents an integration v1 IP/port list (zone mode).

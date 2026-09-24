@@ -43,11 +43,11 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 | `UNIFI_API_KEY` | — | One of API key or user/pass | UniFi API key. Takes precedence over username/password. `_FILE` variant supported. |
 | `UNIFI_USERNAME` | — | One of API key or user/pass | Local admin username. `_FILE` variant supported. |
 | `UNIFI_PASSWORD` | — | One of API key or user/pass | Local admin password. `_FILE` variant supported. |
-| `UNIFI_VERIFY_TLS` | `false` | No | Verify the controller's TLS certificate. Set to `true` only when the controller has a valid CA-signed cert or `UNIFI_CA_CERT` is provided. |
+| `UNIFI_VERIFY_TLS` | `true` | No | Verify the controller's TLS certificate. Use `UNIFI_CA_CERT` for a private CA. |
 | `UNIFI_CA_CERT` | — | No | Path to a PEM CA certificate for self-signed controller certs. |
 | `UNIFI_HTTP_TIMEOUT` | `120s` | No | HTTP request timeout for UniFi API calls. |
 | `UNIFI_API_DEBUG` | `false` | No | Log raw HTTP request/response bodies (verbose; do not use in production). |
-| `UNIFI_REQUIRE_HTTPS` | `false` | No | When `true`, the bouncer refuses to start if `UNIFI_URL` uses `http://`. Set to `true` in hardened environments to prevent accidental plaintext connections. |
+| `UNIFI_REQUIRE_HTTPS` | `true` | No | Refuses to start if `UNIFI_URL` uses `http://`. Set to `false` explicitly to allow a plaintext controller connection. |
 | `ENABLE_IPV6` | `false` | No | Enable IPv6 dialing for the HTTP client. Set to `true` only if your controller is reachable over IPv6 with a working network path. This is separate from `FIREWALL_ENABLE_IPV6`. |
 
 ### Authentication priority
@@ -88,9 +88,10 @@ UNIFI_SITES=default,homelab,iot
 | `FIREWALL_GROUP_CAPACITY_V6` | — | No | Override capacity for IPv6 groups (takes precedence over `FIREWALL_GROUP_CAPACITY`) |
 | `FIREWALL_API_SHARD_DELAY` | `250ms` | No | Minimum pause between consecutive write calls (`PUT /rest/firewallgroup`, rule/policy `POST`/`DELETE`). Prevents the UDM from stacking back-to-back ruleset regenerations. Set `0` to disable. |
 | `FIREWALL_FLUSH_CONCURRENCY` | `1` | No | Maximum concurrent `PUT /rest/firewallgroup` calls in-flight across all sites and address families. `1` = fully serialized (recommended). Increase only for multi-site setups where faster bulk updates are needed. |
-| `FIREWALL_LOG_DROPS` | `false` | No | Enable UniFi "log dropped packets" on managed firewall rules |
+| `FIREWALL_LOG_DROPS` | `false` | No | Enable logging on managed firewall rules and zone policies. Existing zone policies are updated on reconcile. |
+| `FIREWALL_CONNECTION_STATES` | `NEW,INVALID` | No | Connection states matched by zone block policies. Allowed values: `NEW`, `INVALID`, `ESTABLISHED`, or `ALL` for unrestricted matching. `ALL` can block replies to outbound connections. |
 | `FIREWALL_RECONCILE_ON_START` | `true` | No | Run a full reconcile on startup before accepting the CrowdSec stream |
-| `FIREWALL_RECONCILE_INTERVAL` | — | No | Periodically re-sync UniFi state with bbolt (e.g. `6h`). `0` or empty = startup only. |
+| `FIREWALL_RECONCILE_INTERVAL` | `10m` | No | Periodically repair shard membership and missing policies/rules. Set `0s` to disable periodic reconcile. |
 
 ### Traffic Matching List / Shard Management (Integration v1 / Zone Mode)
 
@@ -173,7 +174,7 @@ These settings apply only when `FIREWALL_MODE=zone` or when `auto` detects a zon
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ZONE_PAIRS` | `External->Dmz` | Comma-separated zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. A block policy is created for each pair and each shard. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. `External` and `Internal` are the default zone names in UniFi Network 8.x — check Settings → Firewall → Zones if you have renamed them. Standard UUIDs (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) and MongoDB ObjectIDs (24-char hex) are also accepted and passed through without a lookup. Optional colon-separated port lists after a zone name restrict which source or destination ports the block policies match (empty = any port). Optional `@ip1,ip2,...` suffix on the destination side restricts the block policy to specific destination hosts or subnets (IPv4 or IPv6 CIDRs accepted; empty = any destination). |
+| `ZONE_PAIRS` | `External->Dmz` | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. Use commas between simple pairs; use semicolons between pairs when ports or destination IPs contain commas. Ambiguous strings fail validation. A block policy is created for each pair and shard. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. Standard UUIDs and MongoDB ObjectIDs are also accepted. Optional port lists and `@ip1,ip2,...` scope each policy. |
 
 ```bash
 # Named zones (auto-resolved at startup) — no port filter (any port)
@@ -201,15 +202,15 @@ ZONE_PAIRS=External->Dmz;External->Internal@10.0.0.0/24
 ZONE_PAIRS=aaaaaaaa-0000-4000-8000-aaaaaaaaaaaa->bbbbbbbb-0000-4000-8000-bbbbbbbbbbbb
 ```
 
-Zone names are case-sensitive and must match the names shown in Settings → Firewall → Zones. If a zone name cannot be found at startup the bouncer exits with an error listing the available zones.
+Zone names are case-sensitive and must match the names shown in Settings → Firewall → Zones. If a zone name cannot be found at startup the bouncer exits with an error listing the available zones. A configured zone with an explicitly empty network list also stops startup or reload; External and Gateway do not require network membership.
 
 ### Per-scenario zone routing
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ZONE_PAIRS_SCENARIO_MAP` | — | Per-scenario zone pair overrides. Semicolon-separated `key=pairs` entries where `key` is matched as a substring of the CrowdSec scenario name and `pairs` uses the same `src[:sport,...]->dst[:dport,...]` format as `ZONE_PAIRS`. When a ban's scenario matches a key, the override pairs are used instead of the default `ZONE_PAIRS`. Example: `ssh-bf=External:22->Internal:22;http-probing=External->Internal:80,443` |
+| `ZONE_PAIRS_SCENARIO_MAP` | — | Unsupported. The bouncer rejects this setting because it cannot provision separate policies for each scenario. |
 
-In Phase 1, the override zone pairs are logged with each matching ban for audit purposes; full per-scenario shard provisioning (separate firewall groups per scenario) is reserved for a future release.
+Per-scenario zone routing requires separate shards and policies for each scenario. Until that is implemented, remove `ZONE_PAIRS_SCENARIO_MAP` and configure the shared `ZONE_PAIRS` list instead.
 
 ### Port filtering for zone pairs
 
@@ -261,7 +262,7 @@ When enabled, the bouncer periodically fetches current Cloudflare IP ranges and 
 | `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | No | How often to re-fetch Cloudflare IP ranges and update the IP TMLs (default: weekly). |
 | `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | No | URL to fetch the current Cloudflare IPv4 CIDR list. |
 | `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | No | URL to fetch the current Cloudflare IPv6 CIDR list. |
-| `CLOUDFLARE_ZONE_PAIRS` | — | If enabled | Comma-separated zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]` format. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. Determines which zone pair(s) the Cloudflare ALLOW policies are created for. Supports the same port filter and destination IP filter syntax as `ZONE_PAIRS`. |
+| `CLOUDFLARE_ZONE_PAIRS` | — | If enabled | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]` format. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. Use semicolons between pairs when a pair contains comma-separated ports or IPs. Zones are resolved separately for each site. Filter creation failure prevents a broader ALLOW policy from being created. |
 
 ```bash
 # Minimal — ALLOW Cloudflare traffic from External to Internal on any port
@@ -291,9 +292,11 @@ Zone names in `CLOUDFLARE_ZONE_PAIRS` are resolved independently of `ZONE_PAIRS`
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `CROWDSEC_LAPI_URL` | `http://crowdsec:8080` | No | URL of the CrowdSec Local API |
+| `CROWDSEC_LAPI_URL` | `https://crowdsec:8080` | No | URL of the CrowdSec Local API |
 | `CROWDSEC_LAPI_KEY` | — | **Yes** | Bouncer API key generated by `cscli bouncers add`. `_FILE` variant supported. |
 | `CROWDSEC_LAPI_VERIFY_TLS` | `true` | No | Verify the LAPI's TLS certificate |
+| `CROWDSEC_LAPI_CA_CERT` | — | No | CA bundle for a private LAPI certificate |
+| `CROWDSEC_LAPI_ALLOW_HTTP` | `false` | No | Required for non-loopback HTTP; use only on a trusted local network |
 | `CROWDSEC_ORIGINS` | — | No | Comma-separated allowed decision origins. Empty = all origins accepted. Example: `crowdsec,lists` |
 | `CROWDSEC_POLL_INTERVAL` | `30s` | No | How often to poll the LAPI stream for new decisions |
 | `LAPI_METRICS_PUSH_INTERVAL` | `30m` | No | Interval for pushing metrics to LAPI `/v1/usage-metrics`; `0` disables; minimum enforced value is `10m` |
@@ -307,9 +310,9 @@ Decisions from CrowdSec pass through an 8-stage filter pipeline before being enq
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BLOCK_SCENARIO_EXCLUDE` | — | Comma-separated scenario substrings to skip. Example: `impossible-travel,test` |
-| `BLOCK_WHITELIST` | — | Comma-separated IP addresses or CIDR ranges that are never blocked. Example: `10.0.0.0/8,192.168.0.0/16` |
+| `BLOCK_WHITELIST` | — | Comma-separated IP addresses or CIDR ranges that are never blocked. Add your public WAN IP here; private and CGNAT ranges are skipped automatically. |
 | `BLOCK_MIN_DURATION` | — | Ignore ban decisions shorter than this duration. Example: `1h`. Useful to filter out short test decisions. |
-| `BLOCK_SCENARIO_DURATION_MAP` | — | Per-scenario ban duration overrides. Semicolon-separated `key=duration` pairs where `key` is matched as a substring of the scenario name. Overrides `BAN_TTL` for matching bans. Example: `ssh-bf=168h;http-probing=24h` |
+| `BLOCK_SCENARIO_DURATION_MAP` | — | Per-scenario ban duration overrides. Comma- or semicolon-separated `key=duration` pairs where the longest matching key wins. A configured override may exceed `BAN_TTL`. Example: `ssh-bf=168h;http-probing=24h` |
 
 ### Filter pipeline stages
 
@@ -384,7 +387,7 @@ Events are written after each successful ban (`action=ban`), unban (`action=unba
 
 ### Querying the audit trail
 
-Use the `status` subcommands to inspect the running state:
+Stop the daemon to release the bbolt database lock, then use the `status` subcommands to inspect stored state:
 
 ```bash
 # Show currently active bans (paginated, sortable)
@@ -411,16 +414,14 @@ The bouncer can periodically fetch plain-text IP/CIDR blocklists from external U
 |----------|---------|-------------|
 | `BLOCKLIST_URLS` | — | Comma-separated list of URLs to fetch. Each URL must return a plain-text list with one IP address or CIDR per line. Lines beginning with `#` and blank lines are ignored. |
 | `BLOCKLIST_REFRESH_INTERVAL` | `24h` | How often to re-fetch and re-apply each URL. Bans applied from external blocklists have their expiry set to `now + 2×BLOCKLIST_REFRESH_INTERVAL`, so they auto-expire if the URL becomes unreachable. |
-| `BLOCKLIST_NAME_PREFIX` | `ext-blocklist` | Scenario name prefix used when recording blocklist bans in the audit trail. |
 
 ```bash
 # Fetch two external threat intelligence feeds every 12 hours
 BLOCKLIST_URLS=https://example.com/badips.txt,https://example.net/threatlist.txt
 BLOCKLIST_REFRESH_INTERVAL=12h
-BLOCKLIST_NAME_PREFIX=ext-threatintel
 ```
 
-Blocklist bans go through the same `BanRecord` + `ApplyBan` path as CrowdSec decisions and are therefore subject to the same idempotency checks. They are also recorded in the audit trail.
+Each feed URL owns a separate ban claim. If CrowdSec or another feed still claims an IP, expiry of one feed's claim does not remove the firewall ban. Feed refreshes extend claim expiry to twice the refresh interval; a failed fetch lets the claim expire. Feed imports are logged by URL and entry count.
 
 ---
 
@@ -431,7 +432,7 @@ The bouncer can POST a JSON notification to a webhook URL when significant event
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WEBHOOK_URL` | — | URL to POST notifications to. Leave empty to disable. |
-| `WEBHOOK_EVENTS` | — | Comma-separated list of event names to send. If empty (and `WEBHOOK_URL` is set), no events are sent. |
+| `WEBHOOK_EVENTS` | — | Comma-separated list of event names to send. Empty sends all supported events when `WEBHOOK_URL` is set. |
 
 ### Supported event names
 
@@ -465,7 +466,7 @@ WEBHOOK_EVENTS=circuit_breaker_open,circuit_breaker_close,reconcile_drift
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DRY_RUN` | `false` | Safe testing mode. The bouncer connects to both the UniFi controller and CrowdSec LAPI, reads all existing state, and logs every action it *would* take — but makes zero write requests (no `POST`, `PUT`, or `DELETE` to UniFi) and does not mutate bbolt state. Reads (`GET`) are still performed so the diff output is meaningful. Turning off dry run after a dry run session starts cleanly with no phantom bbolt entries. |
+| `DRY_RUN` | `false` | Safe testing mode. The bouncer connects to both the UniFi controller and CrowdSec LAPI, reads existing state, and logs actions it *would* take. It does not change UniFi configuration or mutate bbolt state. Username/password authentication still sends a login `POST` to create a session; API key authentication does not. Turning off dry run after a dry run session starts cleanly with no phantom bbolt entries. |
 | `LOG_LEVEL` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
 | `LOG_FORMAT` | `json` | Log format: `json` (structured, for Loki/Splunk) or `text` (human-readable) |
 | `METRICS_ENABLED` | `true` | Enable the Prometheus metrics HTTP server |
@@ -473,4 +474,4 @@ WEBHOOK_EVENTS=circuit_breaker_open,circuit_breaker_close,reconcile_drift
 | `HEALTH_ADDR` | `:8081` | Address for health endpoints (`/healthz`, `/readyz`) |
 | `JANITOR_INTERVAL` | `1h` | How often the background janitor prunes expired bans and rate entries, and updates database size metrics |
 | `SHUTDOWN_GRACE_PERIOD` | `30s` | Time given to in-flight goroutines to finish cleanly after a shutdown signal before the process exits forcefully. |
-| `HEALTH_CHECK_LAPI` | `false` | When `true`, the `/readyz` health endpoint also probes the CrowdSec LAPI for reachability. By default only the UniFi controller is probed. |
+| `HEALTH_CHECK_LAPI` | `true` | When `true`, `/readyz` checks both the UniFi controller and CrowdSec LAPI. Set to `false` to check only the controller. |

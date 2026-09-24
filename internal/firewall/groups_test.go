@@ -144,6 +144,83 @@ func TestEnsureShards_PrefersAPIOverCache(t *testing.T) {
 	}
 }
 
+func TestEnsureShards_RecoversSparseAPIOnlyGroups(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	ctrl.SetGroups(testSite, []controller.FirewallGroup{
+		{ID: "group-0", Name: "crowdsec-block-v4-0", GroupMembers: []string{"1.1.1.1"}},
+		{ID: "group-3", Name: "crowdsec-block-v4-3", GroupMembers: []string{"2.2.2.2"}},
+	})
+	sm := newV4ShardManager(t, 1, ctrl, store)
+	if err := sm.EnsureShards(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	refs := sm.GroupRefs()
+	if len(refs) != 2 || refs[0].Index != 0 || refs[1].Index != 3 || refs[1].ID != "group-3" {
+		t.Fatalf("GroupRefs = %+v, want indices 0 and 3", refs)
+	}
+	if !sm.Contains("2.2.2.2") {
+		t.Fatal("API-only shard member was not adopted")
+	}
+	if cached, err := store.GetGroup(cacheKey(testSite, "crowdsec-block-v4-3")); err != nil || cached == nil || cached.UnifiID != "group-3" {
+		t.Fatalf("recovered cache = %+v, %v", cached, err)
+	}
+	if err := sm.AddIP(context.Background(), "3.3.3.3", "v4"); err != nil {
+		t.Fatal(err)
+	}
+	if pending, _ := sm.findShardByIndexLocked(sm.families[sm.family], 4); pending == nil {
+		t.Fatal("overflow must allocate index 4 after sparse index 3")
+	}
+}
+
+func TestEnsureShards_SameNameAcrossSites(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	name := "crowdsec-block-v4-0"
+	if err := store.SetGroup(name, storage.GroupRecord{Site: "site-a", UnifiID: "group-a", Members: []string{"8.8.8.8"}}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl.SetGroups("site-a", []controller.FirewallGroup{{ID: "group-a", Name: name, GroupMembers: []string{"8.8.8.8"}}})
+	ctrl.SetGroups("site-b", []controller.FirewallGroup{{ID: "group-b", Name: name, GroupMembers: []string{"9.9.9.9"}}})
+	for _, tc := range []struct {
+		site, id, ip string
+	}{{"site-a", "group-a", "8.8.8.8"}, {"site-b", "group-b", "9.9.9.9"}} {
+		sm := NewShardManager(tc.site, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
+		if err := sm.EnsureShards(ctx); err != nil {
+			t.Fatalf("%s: %v", tc.site, err)
+		}
+		if !sm.Contains(tc.ip) {
+			t.Fatalf("%s did not load its own group", tc.site)
+		}
+		rec, err := store.GetGroup(cacheKey(tc.site, name))
+		if err != nil || rec == nil || rec.UnifiID != tc.id {
+			t.Fatalf("%s cache: %+v, %v", tc.site, rec, err)
+		}
+	}
+	if rec, err := store.GetGroup(name); err != nil || rec != nil {
+		t.Fatalf("unscoped record remains: %+v, %v", rec, err)
+	}
+}
+
+func TestEnsureShards_CustomHexIndexWithoutCache(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	namer, err := NewNamer("crowdsec-block-{{.Family}}-{{printf \"%x\" .Index}}", "rule-{{.Index}}", "policy-{{.Index}}", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl.SetGroups(testSite, []controller.FirewallGroup{{ID: "group-a", Name: "crowdsec-block-v4-a", GroupMembers: []string{"8.8.8.8"}}})
+	sm := NewShardManager(testSite, false, 5, namer, ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
+	if err := sm.EnsureShards(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	refs := sm.GroupRefs()
+	if len(refs) != 1 || refs[0].Index != 10 || refs[0].ID != "group-a" {
+		t.Fatalf("custom shard not recovered: %+v", refs)
+	}
+}
+
 // TestAdd_Basic verifies that adding an IP makes it findable and adds a group ID.
 func TestAdd_Basic(t *testing.T) {
 	ctrl := testutil.NewMockController()
@@ -635,6 +712,69 @@ func TestCreateShard_SendsNonEmptyItems(t *testing.T) {
 	}
 }
 
+func TestPendingShardRetriesUpdateWithoutRecreating(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	sm := newZoneV4ShardManager(t, 5, ctrl, newBboltStore(t))
+	if err := sm.EnsureShards(context.Background()); err != nil {
+		t.Fatalf("EnsureShards: %v", err)
+	}
+	if _, _, err := sm.Add(context.Background(), "198.51.100.41"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	ctrl.SetError("UpdateTrafficMatchingList", fmt.Errorf("temporary update failure"))
+	if err := sm.FlushDirty(context.Background()); err == nil {
+		t.Fatal("expected first update to fail")
+	}
+	if err := sm.FlushDirty(context.Background()); err != nil {
+		t.Fatalf("retry FlushDirty: %v", err)
+	}
+	if got := ctrl.Calls("CreateTrafficMatchingList"); got != 1 {
+		t.Errorf("CreateTrafficMatchingList calls: got %d, want 1", got)
+	}
+	if got := ctrl.Calls("UpdateTrafficMatchingList"); got != 2 {
+		t.Errorf("UpdateTrafficMatchingList calls: got %d, want 2", got)
+	}
+	if refs := sm.GroupRefs(); len(refs) != 1 || refs[0].ID == "" {
+		t.Errorf("active groups after retry: got %+v, want one group with an ID", refs)
+	}
+}
+
+func TestActivationFailureRetriesWithoutRewritingGroup(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	sm := newZoneV4ShardManager(t, 5, ctrl, newBboltStore(t))
+	if err := sm.EnsureShards(context.Background()); err != nil {
+		t.Fatalf("EnsureShards: %v", err)
+	}
+	if _, _, err := sm.Add(context.Background(), "198.51.100.42"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	attempts := 0
+	sm.SetActivationCallback(func(context.Context, int, string) error {
+		attempts++
+		if attempts == 1 {
+			return fmt.Errorf("policy creation failed")
+		}
+		return nil
+	})
+	if err := sm.FlushDirty(context.Background()); err == nil {
+		t.Fatal("expected policy creation failure")
+	}
+	if err := sm.FlushDirty(context.Background()); err != nil {
+		t.Fatalf("retry FlushDirty: %v", err)
+	}
+	if attempts != 2 {
+		t.Errorf("activation attempts: got %d, want 2", attempts)
+	}
+	if got := ctrl.Calls("CreateTrafficMatchingList"); got != 1 {
+		t.Errorf("CreateTrafficMatchingList calls: got %d, want 1", got)
+	}
+	if got := ctrl.Calls("UpdateTrafficMatchingList"); got != 1 {
+		t.Errorf("UpdateTrafficMatchingList calls: got %d, want 1", got)
+	}
+}
+
 // TestSyncShard_SendsPlaceholderWhenEmpty verifies that syncShard sends
 // the RFC 5737 placeholder instead of an empty items array when all bans
 // have expired (UniFi API rejects empty items on both create and update).
@@ -674,6 +814,10 @@ func TestSyncShard_SendsPlaceholderWhenEmpty(t *testing.T) {
 	// Verify UpdateTrafficMatchingList was called exactly once more (sending placeholder).
 	if got := ctrl.Calls("UpdateTrafficMatchingList") - beforeFlush; got != 1 {
 		t.Errorf("UpdateTrafficMatchingList calls: got %d, want 1", got)
+	}
+	rec, err := store.GetGroup(cacheKey(testSite, "crowdsec-block-v4-0"))
+	if err != nil || rec == nil || len(rec.Members) != 0 {
+		t.Fatalf("placeholder leaked into cache: %+v, %v", rec, err)
 	}
 }
 
@@ -786,7 +930,7 @@ func TestSyncShard_PutNotFound_ResetsToPending(t *testing.T) {
 	}
 
 	// bbolt record must have empty UnifiID.
-	rec, err := store.GetGroup(shardName)
+	rec, err := store.GetGroup(cacheKey(testSite, shardName))
 	if err != nil {
 		t.Fatalf("store.GetGroup: %v", err)
 	}

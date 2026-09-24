@@ -9,12 +9,14 @@ type BanEntry struct {
 	RecordedAt time.Time
 	ExpiresAt  time.Time // zero = never expires
 	IPv6       bool
+	Claims     map[string]time.Time
+	Pending    bool
 }
 
 // EventEntry records a single ban/unban audit event.
 type EventEntry struct {
-	Action     string    // "ban" | "unban" | "expire"
-	Origin     string    // e.g. "CAPI", "crowdsec", "manual", "expired"
+	Action     string // "ban" | "unban" | "expire"
+	Origin     string // e.g. "CAPI", "crowdsec", "manual", "expired"
 	Scenario   string
 	IP         string
 	RecordedAt time.Time
@@ -24,6 +26,7 @@ type EventEntry struct {
 type GroupRecord struct {
 	UnifiID   string
 	Site      string
+	Index     int
 	Members   []string
 	IPv6      bool
 	UpdatedAt time.Time
@@ -44,6 +47,8 @@ type Store interface {
 	// Ban operations
 	BanExists(ip string) (bool, error)
 	BanRecord(ip string, expiresAt time.Time, ipv6 bool) error
+	BanGet(ip string) (*BanEntry, error)
+	BanPut(ip string, entry BanEntry) error
 	BanDelete(ip string) error
 	BanList() (map[string]BanEntry, error)
 

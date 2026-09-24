@@ -2,9 +2,12 @@ package firewall
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,10 +21,11 @@ import (
 
 // ZoneConfig holds configuration for zone-based firewall mode.
 type ZoneConfig struct {
-	ZonePairs   []config.ZonePair
-	Description string
-	LogDrops    bool
-	APIWriteDelay time.Duration
+	ZonePairs        []config.ZonePair
+	Description      string
+	LogDrops         bool
+	ConnectionStates []string
+	APIWriteDelay    time.Duration
 }
 
 // portTMLIDs holds TML IDs for a single zone pair (port filters and dst IP filter).
@@ -38,10 +42,11 @@ type ZoneManager struct {
 	ctrl  controller.Controller
 	store storage.Store
 	log   zerolog.Logger
+	opMu  sync.Mutex // serialize config reload with policy operations
 
 	mu           sync.RWMutex
-	zoneCache    map[string]map[string]string      // site -> zone name -> zone ID
-	portTMLCache map[string]map[string]portTMLIDs  // site -> "SrcName:DstName" -> port TML IDs
+	zoneCache    map[string]map[string]string     // site -> zone name -> zone ID
+	portTMLCache map[string]map[string]portTMLIDs // site -> "SrcName:DstName" -> port TML IDs
 }
 
 // NewZoneManager constructs a ZoneManager.
@@ -54,6 +59,8 @@ func NewZoneManager(cfg ZoneConfig, namer *Namer, ctrl controller.Controller, st
 //  2. Fetches all firewall zones for each site (fails if unavailable).
 //  3. At DEBUG log level, emits a structured log for each discovered zone.
 func (zm *ZoneManager) Bootstrap(ctx context.Context, sites []string) error {
+	zm.opMu.Lock()
+	defer zm.opMu.Unlock()
 	for _, site := range sites {
 		siteID, err := zm.ctrl.GetSiteID(ctx, site)
 		if err != nil {
@@ -66,6 +73,9 @@ func (zm *ZoneManager) Bootstrap(ctx context.Context, sites []string) error {
 			return fmt.Errorf("discover firewall zones for site %q: %w", site, err)
 		}
 		zm.log.Info().Str("site", site).Int("zone_count", len(zones)).Msg("zone discovery complete")
+		if err := validateZoneNetworks(site, zm.cfg.ZonePairs, zones); err != nil {
+			return err
+		}
 
 		// Emit per-zone debug log when log level is DEBUG.
 		if zm.log.GetLevel() <= zerolog.DebugLevel {
@@ -95,13 +105,10 @@ func (zm *ZoneManager) Bootstrap(ctx context.Context, sites []string) error {
 		}
 
 		// Ensure port TMLs for zone pairs that have port filters configured.
-		sitePortTMLs, err := zm.ensurePortTMLs(ctx, site)
+		sitePortTMLs, err := zm.ensurePortTMLs(ctx, site, zm.cfg.ZonePairs)
 		if err != nil {
 			return fmt.Errorf("ensure port TMLs for site %q: %w", site, err)
 		}
-
-		// Sweep for orphaned port TMLs whose zone pair is no longer in config.
-		zm.cleanupOrphanedPortTMLs(ctx, site, sitePortTMLs)
 
 		zm.mu.Lock()
 		if zm.zoneCache == nil {
@@ -117,14 +124,14 @@ func (zm *ZoneManager) Bootstrap(ctx context.Context, sites []string) error {
 	return nil
 }
 
-// ensurePortTMLs creates or updates port TMLs and dst IP TMLs for all zone pairs
+// ensurePortTMLs creates or reuses port TMLs and dst IP TMLs for all zone pairs
 // that have port or IP filters configured. Returns a map of "SrcName:DstName" -> portTMLIDs.
-func (zm *ZoneManager) ensurePortTMLs(ctx context.Context, site string) (map[string]portTMLIDs, error) {
+func (zm *ZoneManager) ensurePortTMLs(ctx context.Context, site string, pairs []config.ZonePair) (map[string]portTMLIDs, error) {
 	result := make(map[string]portTMLIDs)
 
 	// Check whether any pair needs TMLs of any kind.
 	needsTMLs := false
-	for _, pair := range zm.cfg.ZonePairs {
+	for _, pair := range pairs {
 		if len(pair.SrcPorts) > 0 || len(pair.DstPorts) > 0 || len(pair.DstIPs) > 0 {
 			needsTMLs = true
 			break
@@ -144,7 +151,7 @@ func (zm *ZoneManager) ensurePortTMLs(ctx context.Context, site string) (map[str
 		existingByName[t.Name] = t
 	}
 
-	for _, pair := range zm.cfg.ZonePairs {
+	for _, pair := range pairs {
 		key := pair.Src + ":" + pair.Dst
 		ids := portTMLIDs{}
 
@@ -188,57 +195,18 @@ func (zm *ZoneManager) ensurePortTMLs(ctx context.Context, site string) (map[str
 	return result, nil
 }
 
-// ensurePortTML creates or updates a single PORTS TML. Returns the TML ID.
+// ensurePortTML creates a PORTS TML without changing a list referenced by an
+// active policy. On filter changes it creates a content-versioned list first.
 func (zm *ZoneManager) ensurePortTML(ctx context.Context, site, name string, ports []int, existingByName map[string]controller.TrafficMatchingList) (string, error) {
 	items := make([]controller.TrafficMatchingListItem, 0, len(ports))
 	for _, p := range ports {
 		items = append(items, controller.TrafficMatchingListItem{Type: "PORT_NUMBER", Value: strconv.Itoa(p)})
 	}
 
-	found, exists := existingByName[name]
-	if !exists {
-		created, err := zm.ctrl.CreateTrafficMatchingList(ctx, site, controller.TrafficMatchingList{
-			Name:  name,
-			Type:  "PORTS",
-			Items: items,
-		})
-		if err != nil {
-			return "", fmt.Errorf("create port TML: %w", err)
-		}
-		zm.log.Info().Str("tml", name).Str("id", created.ID).Int("ports", len(ports)).Msg("created port filter TML")
-		existingByName[name] = created
-		return created.ID, nil
-	}
-
-	// Compare current vs desired port values.
-	if !portTMLItemsMatch(found.Items, ports) {
-		found.Items = items
-		if err := zm.ctrl.UpdateTrafficMatchingList(ctx, site, found); err != nil {
-			return "", fmt.Errorf("update port TML: %w", err)
-		}
-		zm.log.Info().Str("tml", name).Int("ports", len(ports)).Msg("updated port filter TML")
-	}
-	return found.ID, nil
+	return zm.ensureImmutableFilterTML(ctx, site, name, "PORTS", items, existingByName)
 }
 
-// portTMLItemsMatch returns true if the TML items match the desired port list (order-independent).
-func portTMLItemsMatch(items []controller.TrafficMatchingListItem, ports []int) bool {
-	if len(items) != len(ports) {
-		return false
-	}
-	portSet := make(map[string]bool, len(ports))
-	for _, p := range ports {
-		portSet[strconv.Itoa(p)] = true
-	}
-	for _, item := range items {
-		if !portSet[item.Value] {
-			return false
-		}
-	}
-	return true
-}
-
-// ensureIPTML creates or updates a single IP-address TML. Returns the TML ID.
+// ensureIPTML creates an IP-address TML without mutating an active filter.
 func (zm *ZoneManager) ensureIPTML(ctx context.Context, site, name, tmlType string, ips []string, existingByName map[string]controller.TrafficMatchingList) (string, error) {
 	items := make([]controller.TrafficMatchingListItem, 0, len(ips))
 	for _, ip := range ips {
@@ -249,42 +217,51 @@ func (zm *ZoneManager) ensureIPTML(ctx context.Context, site, name, tmlType stri
 		items = append(items, controller.TrafficMatchingListItem{Type: itemType, Value: ip})
 	}
 
-	found, exists := existingByName[name]
-	if !exists {
-		created, err := zm.ctrl.CreateTrafficMatchingList(ctx, site, controller.TrafficMatchingList{
-			Name:  name,
-			Type:  tmlType,
-			Items: items,
-		})
-		if err != nil {
-			return "", fmt.Errorf("create IP TML: %w", err)
-		}
-		zm.log.Info().Str("tml", name).Str("id", created.ID).Int("ips", len(ips)).Msg("created dst IP filter TML")
-		existingByName[name] = created
-		return created.ID, nil
-	}
-
-	if !ipTMLItemsMatch(found.Items, ips) {
-		found.Items = items
-		if err := zm.ctrl.UpdateTrafficMatchingList(ctx, site, found); err != nil {
-			return "", fmt.Errorf("update IP TML: %w", err)
-		}
-		zm.log.Info().Str("tml", name).Int("ips", len(ips)).Msg("updated dst IP filter TML")
-	}
-	return found.ID, nil
+	return zm.ensureImmutableFilterTML(ctx, site, name, tmlType, items, existingByName)
 }
 
-// ipTMLItemsMatch returns true if the TML items match the desired IP list (order-independent).
-func ipTMLItemsMatch(items []controller.TrafficMatchingListItem, ips []string) bool {
-	if len(items) != len(ips) {
+func (zm *ZoneManager) ensureImmutableFilterTML(ctx context.Context, site, baseName, tmlType string, items []controller.TrafficMatchingListItem, existingByName map[string]controller.TrafficMatchingList) (string, error) {
+	if found, ok := existingByName[baseName]; ok && found.Type == tmlType && tmlItemsMatch(found.Items, items) {
+		return found.ID, nil
+	}
+	values := make([]string, 0, len(items))
+	for _, item := range items {
+		values = append(values, item.Type+":"+item.Value)
+	}
+	sort.Strings(values)
+	digest := sha256.Sum256([]byte(tmlType + ":" + strings.Join(values, ",")))
+	versionedName := baseName + "-" + hex.EncodeToString(digest[:6])
+	if found, ok := existingByName[versionedName]; ok {
+		if found.Type != tmlType || !tmlItemsMatch(found.Items, items) {
+			return "", fmt.Errorf("filter TML %s has unexpected contents", versionedName)
+		}
+		return found.ID, nil
+	}
+	name := baseName
+	if _, exists := existingByName[baseName]; exists {
+		name = versionedName
+	}
+	created, err := zm.ctrl.CreateTrafficMatchingList(ctx, site, controller.TrafficMatchingList{Name: name, Type: tmlType, Items: items})
+	if err != nil {
+		return "", fmt.Errorf("create filter TML %s: %w", name, err)
+	}
+	existingByName[name] = created
+	zm.log.Info().Str("tml", name).Str("id", created.ID).Int("items", len(items)).Msg("created filter TML")
+	return created.ID, nil
+}
+
+func tmlItemsMatch(existing, desired []controller.TrafficMatchingListItem) bool {
+	if len(existing) != len(desired) {
 		return false
 	}
-	ipSet := make(map[string]bool, len(ips))
-	for _, ip := range ips {
-		ipSet[ip] = true
+	counts := make(map[string]int, len(existing))
+	for _, item := range existing {
+		counts[item.Type+":"+item.Value]++
 	}
-	for _, item := range items {
-		if !ipSet[item.Value] {
+	for _, item := range desired {
+		key := item.Type + ":" + item.Value
+		counts[key]--
+		if counts[key] < 0 {
 			return false
 		}
 	}
@@ -339,16 +316,24 @@ func classifyIPs(ips []string) (v4, v6 []string) {
 // live cache is updated only if every zone resolves successfully (validate-then-commit).
 // Safe to call concurrently with read operations.
 func (zm *ZoneManager) Reload(ctx context.Context, sites []string, pairs []config.ZonePair) error {
+	zm.opMu.Lock()
+	defer zm.opMu.Unlock()
 	// Stage all resolutions before acquiring the write lock.
 	staged := make(map[string]map[string]string, len(sites))
-	var firstErr error
+	stagedPorts := make(map[string]map[string]portTMLIDs, len(sites))
 
 	for _, site := range sites {
 		// 1A: Evict stale cache entries so GetZoneID hits the API.
 		zm.ctrl.InvalidateZoneCache(site)
+		zones, err := zm.ctrl.DiscoverZones(ctx, site)
+		if err != nil {
+			return fmt.Errorf("discover firewall zones for site %q: %w", site, err)
+		}
+		if err := validateZoneNetworks(site, pairs, zones); err != nil {
+			return err
+		}
 
 		siteZones := make(map[string]string)
-		allOK := true
 		for _, pair := range pairs {
 			for _, name := range []string{pair.Src, pair.Dst} {
 				if _, ok := siteZones[name]; ok {
@@ -358,23 +343,20 @@ func (zm *ZoneManager) Reload(ctx context.Context, sites []string, pairs []confi
 				if err != nil {
 					zm.log.Warn().Err(err).Str("site", site).Str("zone", name).
 						Msg("reload: failed to resolve zone ID; aborting update for this site")
-					if firstErr == nil {
-						firstErr = fmt.Errorf("reload zone %q for site %q: %w", name, site, err)
-					}
-					allOK = false
-					break
+					return fmt.Errorf("reload zone %q for site %q: %w", name, site, err)
 				}
 				siteZones[name] = id
 			}
-			if !allOK {
-				break
-			}
 		}
 
-		// 1B: Only commit if all zones resolved successfully.
-		if allOK {
-			staged[site] = siteZones
+		staged[site] = siteZones
+	}
+	for _, site := range sites {
+		ports, err := zm.ensurePortTMLs(ctx, site, pairs)
+		if err != nil {
+			return fmt.Errorf("reload port and destination IP filters for site %q: %w", site, err)
 		}
+		stagedPorts[site] = ports
 	}
 
 	// Commit validated sites atomically.
@@ -383,18 +365,44 @@ func (zm *ZoneManager) Reload(ctx context.Context, sites []string, pairs []confi
 		if zm.zoneCache == nil {
 			zm.zoneCache = make(map[string]map[string]string)
 		}
+		if zm.portTMLCache == nil {
+			zm.portTMLCache = make(map[string]map[string]portTMLIDs)
+		}
 		for site, siteZones := range staged {
 			zm.zoneCache[site] = siteZones
+			zm.portTMLCache[site] = stagedPorts[site]
 		}
 		zm.cfg.ZonePairs = pairs
 		zm.mu.Unlock()
 	}
 
-	return firstErr
+	return nil
+}
+
+func validateZoneNetworks(site string, pairs []config.ZonePair, zones []controller.Zone) error {
+	used := make(map[string]bool, len(pairs)*2)
+	for _, pair := range pairs {
+		used[pair.Src] = true
+		used[pair.Dst] = true
+	}
+	for _, zone := range zones {
+		if !used[zone.Name] || zone.NetworkIDs == nil {
+			continue
+		}
+		if strings.EqualFold(zone.Name, "External") || strings.EqualFold(zone.Name, "Gateway") {
+			continue
+		}
+		if len(zone.NetworkIDs) == 0 {
+			return fmt.Errorf("configured firewall zone %q at site %q has no networks", zone.Name, site)
+		}
+	}
+	return nil
 }
 
 // EnsurePolicies idempotently creates zone policies for each shard and zone pair.
 func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards, v6Shards *ShardManager) error {
+	zm.opMu.Lock()
+	defer zm.opMu.Unlock()
 	zm.mu.RLock()
 	zoneMap, ok := zm.zoneCache[site]
 	zm.mu.RUnlock()
@@ -433,10 +441,10 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 				continue
 			}
 			family := Family(ipv6)
-			for i := range sm.GroupIDs() {
+			for _, ref := range sm.GroupRefs() {
 				name, err := zm.namer.PolicyName(NameData{
 					Family:  family,
-					Index:   i,
+					Index:   ref.Index,
 					Site:    site,
 					SrcZone: pair.Src,
 					DstZone: pair.Dst,
@@ -449,7 +457,6 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	}
 
 	for _, pair := range zm.cfg.ZonePairs {
-		// ConnectionStateFilter = nil means "All" states in UniFi API.
 		if err := zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, existingByID, false, v4Shards); err != nil {
 			return err
 		}
@@ -462,8 +469,13 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 
 	// Remove any block policies that were managed by this bouncer but whose
 	// zone pair has since been removed from ZONE_PAIRS config.
-	zm.cleanupOrphanedBlockPolicies(ctx, site, expectedNames, existingByID)
-
+	if err := zm.cleanupOrphanedBlockPolicies(ctx, site, expectedNames, existingByID); err != nil {
+		return err
+	}
+	zm.mu.RLock()
+	portIDs := zm.portTMLCache[site]
+	zm.mu.RUnlock()
+	zm.cleanupOrphanedPortTMLs(ctx, site, portIDs)
 	return nil
 }
 
@@ -474,7 +486,7 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 		ipVersion = "IPV6"
 	}
 
-	groupIDs := sm.GroupIDs()
+	groupRefs := sm.GroupRefs()
 	srcZoneID := zoneMap[pair.Src]
 	dstZoneID := zoneMap[pair.Dst]
 
@@ -491,7 +503,8 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 	zm.mu.RUnlock()
 
 	firstCreate := true
-	for i, groupID := range groupIDs {
+	for _, ref := range groupRefs {
+		i, groupID := ref.Index, ref.ID
 		policyName, err := zm.namer.PolicyName(NameData{
 			Family:  family,
 			Index:   i,
@@ -502,36 +515,81 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 		if err != nil {
 			return err
 		}
+		if groupID == "" {
+			return fmt.Errorf("shard %d for %s->%s has empty TML ID — cannot create block policy without source filter", i, pair.Src, pair.Dst)
+		}
+		policy := controller.ZonePolicy{
+			Name:                   policyName,
+			Enabled:                true,
+			Action:                 "BLOCK",
+			Description:            zm.cfg.Description,
+			SrcZone:                srcZoneID,
+			DstZone:                dstZoneID,
+			IPVersion:              ipVersion,
+			TrafficMatchingListIDs: []string{groupID},
+			ConnectionStateFilter:  append([]string(nil), zm.cfg.ConnectionStates...),
+			LoggingEnabled:         zm.cfg.LogDrops,
+			SrcPortTMLID:           srcPortTMLID,
+			DstPortTMLID:           dstPortTMLID,
+			DstIPTMLID:             dstIPTMLID,
+		}
 
-		existing, lookupErr := zm.store.GetPolicy(policyName)
+		existing, lookupErr := getCachedPolicy(zm.store, site, policyName)
 		if lookupErr != nil {
 			return fmt.Errorf("lookup policy %s: %w", policyName, lookupErr)
+		}
+		if existing == nil || existing.UnifiID == "" || existingByID[existing.UnifiID].ID == "" {
+			for _, candidate := range existingByID {
+				if candidate.Name != policyName {
+					continue
+				}
+				if candidate.Description != zm.cfg.Description {
+					return fmt.Errorf("policy %s exists with a different description", policyName)
+				}
+				if err := setCachedPolicy(zm.store, site, policyName, storage.PolicyRecord{UnifiID: candidate.ID, Site: site, Mode: "zone"}); err != nil {
+					return fmt.Errorf("cache existing zone policy %s: %w", policyName, err)
+				}
+				existing = &storage.PolicyRecord{UnifiID: candidate.ID, Site: site, Mode: "zone"}
+				break
+			}
 		}
 
 		// Check if policy exists in API and needs update (reconcile mode)
 		if existing != nil && existing.UnifiID != "" {
 			if apiPolicy, found := existingByID[existing.UnifiID]; found {
-				if needsUpdateZonePolicy(&apiPolicy, groupID, srcPortTMLID, dstPortTMLID, dstIPTMLID) {
+				if apiPolicy.Name != policyName {
+					return fmt.Errorf("cached policy %s points to different API policy %s", policyName, apiPolicy.Name)
+				}
+				if needsUpdateZonePolicy(&apiPolicy, groupID, srcPortTMLID, dstPortTMLID, dstIPTMLID, srcZoneID, dstZoneID, ipVersion, zm.cfg.Description, zm.cfg.ConnectionStates, zm.cfg.LogDrops) {
 					zm.log.Info().Str("policy", policyName).Msg("zone policy needs update, applying reconcile")
 
-					// If portFilter or dstIPTML is the reason for the update, the UniFi PUT endpoint
-					// rejects these in the request body. Delete the existing policy
-					// so it can be recreated via POST (which accepts them).
+					// The UniFi PUT endpoint cannot change port and destination-IP filters.
+					// Create a staged replacement first so a failed delete or rename
+					// never leaves this shard without a block policy.
 					portFilterChanging := apiPolicy.SrcPortTMLID != srcPortTMLID || apiPolicy.DstPortTMLID != dstPortTMLID || apiPolicy.DstIPTMLID != dstIPTMLID
 					if portFilterChanging {
-						zm.log.Info().Str("policy", policyName).Str("id", existing.UnifiID).
-							Msg("portFilter or dstIPTML changed — deleting policy for recreation")
+						staged, stageErr := zm.stageReplacementPolicy(ctx, site, policy, existingByID)
+						if stageErr != nil {
+							return fmt.Errorf("stage replacement for zone policy %s: %w", policyName, stageErr)
+						}
 						if delErr := zm.ctrl.DeleteZonePolicy(ctx, site, existing.UnifiID); delErr != nil {
 							var nf *controller.ErrNotFound
 							if !errors.As(delErr, &nf) {
-								return fmt.Errorf("delete zone policy %s before recreation: %w", policyName, delErr)
+								return fmt.Errorf("delete old zone policy %s after staging replacement: %w", policyName, delErr)
 							}
 						}
 						delete(existingByID, existing.UnifiID)
-						_ = zm.store.DeletePolicy(policyName)
-						// Fall through to creation below.
+						policy.ID = staged.ID
+						if err := zm.ctrl.UpdateZonePolicy(ctx, site, policy); err != nil {
+							return fmt.Errorf("rename staged zone policy %s: %w", policyName, err)
+						}
+						if err := setCachedPolicy(zm.store, site, policyName, storage.PolicyRecord{UnifiID: staged.ID, Site: site, Mode: "zone"}); err != nil {
+							return fmt.Errorf("cache replacement zone policy %s: %w", policyName, err)
+						}
+						existingByID[staged.ID] = policy
+						continue
 					} else {
-						updateErr := zm.updateZonePolicy(ctx, site, apiPolicy, groupID, srcPortTMLID, dstPortTMLID, dstIPTMLID)
+						updateErr := zm.updateZonePolicy(ctx, site, apiPolicy, groupID, srcPortTMLID, dstPortTMLID, dstIPTMLID, srcZoneID, dstZoneID, ipVersion)
 						if updateErr != nil {
 							var nf *controller.ErrNotFound
 							if !errors.As(updateErr, &nf) {
@@ -540,7 +598,7 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 							// 404 on PUT: policy was externally deleted; clear bbolt and fall through to create.
 							zm.log.Warn().Str("policy", policyName).Str("id", existing.UnifiID).
 								Msg("zone policy not found on update (externally deleted?); clearing record for re-creation")
-							_ = zm.store.DeletePolicy(policyName)
+							_ = deleteCachedPolicy(zm.store, site, policyName)
 						} else {
 							continue
 						}
@@ -563,27 +621,6 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 		}
 		firstCreate = false
 
-		// groupID is the TML UUID in zone mode (integration v1).
-		// ConnectionStateFilter = nil means "All" states in UniFi API.
-		if groupID == "" {
-			return fmt.Errorf("shard %d for %s->%s has empty TML ID — cannot create block policy without source filter", i, pair.Src, pair.Dst)
-		}
-		policy := controller.ZonePolicy{
-			Name:                   policyName,
-			Enabled:                true,
-			Action:                 "BLOCK",
-			Description:            zm.cfg.Description,
-			SrcZone:                srcZoneID,
-			DstZone:                dstZoneID,
-			IPVersion:              ipVersion,
-			TrafficMatchingListIDs: []string{groupID},
-			ConnectionStateFilter:  nil, // nil = All connection states
-			LoggingEnabled:         zm.cfg.LogDrops,
-			SrcPortTMLID:           srcPortTMLID,
-			DstPortTMLID:           dstPortTMLID,
-			DstIPTMLID:             dstIPTMLID,
-		}
-
 		created, err := zm.ctrl.CreateZonePolicy(ctx, site, policy)
 		if err != nil {
 			var conflict *controller.ErrConflict
@@ -591,7 +628,7 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 				if id := zm.findExistingPolicyByName(ctx, site, policyName); id != "" {
 					zm.log.Warn().Str("policy", policyName).Str("id", id).
 						Msg("zone policy already exists (409 conflict); recovering existing ID")
-					if storeErr := zm.store.SetPolicy(policyName, storage.PolicyRecord{UnifiID: id, Site: site, Mode: "zone"}); storeErr != nil {
+					if storeErr := setCachedPolicy(zm.store, site, policyName, storage.PolicyRecord{UnifiID: id, Site: site, Mode: "zone"}); storeErr != nil {
 						zm.log.Warn().Err(storeErr).Str("policy", policyName).Msg("failed to cache recovered policy in bbolt")
 					}
 					existingByID[id] = controller.ZonePolicy{ID: id}
@@ -602,7 +639,7 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 		}
 		existingByID[created.ID] = created
 
-		if err := zm.store.SetPolicy(policyName, storage.PolicyRecord{
+		if err := setCachedPolicy(zm.store, site, policyName, storage.PolicyRecord{
 			UnifiID: created.ID,
 			Site:    site,
 			Mode:    "zone",
@@ -617,9 +654,61 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 	return nil
 }
 
+// stageReplacementPolicy provisions the desired filters under a temporary
+// managed name before the old policy is removed. A retry reuses an existing
+// stage only when it still targets the same group and filters.
+func (zm *ZoneManager) stageReplacementPolicy(ctx context.Context, site string, desired controller.ZonePolicy, existingByID map[string]controller.ZonePolicy) (controller.ZonePolicy, error) {
+	parts := []string{desired.Name, desired.SrcZone, desired.DstZone, desired.IPVersion,
+		desired.TrafficMatchingListIDs[0], desired.SrcPortTMLID, desired.DstPortTMLID, desired.DstIPTMLID}
+	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	stagedName := "crowdsec-policy-stage-" + hex.EncodeToString(digest[:10])
+	stagedDesired := desired
+	stagedDesired.Name = stagedName
+	reuse := func(candidate controller.ZonePolicy) (controller.ZonePolicy, error) {
+		if len(candidate.TrafficMatchingListIDs) != 1 || candidate.TrafficMatchingListIDs[0] != desired.TrafficMatchingListIDs[0] ||
+			candidate.SrcPortTMLID != desired.SrcPortTMLID || candidate.DstPortTMLID != desired.DstPortTMLID || candidate.DstIPTMLID != desired.DstIPTMLID {
+			return controller.ZonePolicy{}, fmt.Errorf("staged policy %s has unexpected group or filter IDs", stagedName)
+		}
+		if needsUpdateZonePolicy(&candidate, desired.TrafficMatchingListIDs[0], desired.SrcPortTMLID, desired.DstPortTMLID,
+			desired.DstIPTMLID, desired.SrcZone, desired.DstZone, desired.IPVersion, desired.Description,
+			desired.ConnectionStateFilter, desired.LoggingEnabled) {
+			stagedDesired.ID = candidate.ID
+			if err := zm.ctrl.UpdateZonePolicy(ctx, site, stagedDesired); err != nil {
+				return controller.ZonePolicy{}, fmt.Errorf("repair staged policy %s: %w", stagedName, err)
+			}
+		}
+		return candidate, nil
+	}
+	for _, candidate := range existingByID {
+		if candidate.Name == stagedName {
+			return reuse(candidate)
+		}
+	}
+	staged, err := zm.ctrl.CreateZonePolicy(ctx, site, stagedDesired)
+	if err == nil {
+		return staged, nil
+	}
+	var conflict *controller.ErrConflict
+	if !errors.As(err, &conflict) {
+		return controller.ZonePolicy{}, fmt.Errorf("create staged policy %s: %w", stagedName, err)
+	}
+	policies, listErr := zm.ctrl.ListZonePolicies(ctx, site)
+	if listErr != nil {
+		return controller.ZonePolicy{}, fmt.Errorf("find staged policy %s: %w", stagedName, listErr)
+	}
+	for _, candidate := range policies {
+		if candidate.Name == stagedName {
+			return reuse(candidate)
+		}
+	}
+	return controller.ZonePolicy{}, fmt.Errorf("staged policy %s conflicted but was not found", stagedName)
+}
+
 // EnsurePoliciesForShard creates zone policies for a single new shard across all configured zone pairs.
 // Called when a new shard overflows mid-operation.
 func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID string, ipv6 bool, shardIdx int) error {
+	zm.opMu.Lock()
+	defer zm.opMu.Unlock()
 	family := Family(ipv6)
 	ipVersion := "IPV4"
 	if ipv6 {
@@ -662,7 +751,7 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 			return err
 		}
 
-		existing, lookupErr := zm.store.GetPolicy(policyName)
+		existing, lookupErr := getCachedPolicy(zm.store, site, policyName)
 		if lookupErr != nil {
 			return fmt.Errorf("lookup policy %s: %w", policyName, lookupErr)
 		}
@@ -699,7 +788,7 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 			DstZone:                dstZoneID,
 			IPVersion:              ipVersion,
 			TrafficMatchingListIDs: []string{groupID},
-			ConnectionStateFilter:  nil, // nil = All connection states
+			ConnectionStateFilter:  append([]string(nil), zm.cfg.ConnectionStates...),
 			LoggingEnabled:         zm.cfg.LogDrops,
 			SrcPortTMLID:           srcPortTMLID,
 			DstPortTMLID:           dstPortTMLID,
@@ -713,7 +802,7 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 				if id := zm.findExistingPolicyByName(ctx, site, policyName); id != "" {
 					zm.log.Warn().Str("policy", policyName).Str("id", id).
 						Msg("zone policy already exists (409 conflict); recovering existing ID")
-					if storeErr := zm.store.SetPolicy(policyName, storage.PolicyRecord{UnifiID: id, Site: site, Mode: "zone"}); storeErr != nil {
+					if storeErr := setCachedPolicy(zm.store, site, policyName, storage.PolicyRecord{UnifiID: id, Site: site, Mode: "zone"}); storeErr != nil {
 						zm.log.Warn().Err(storeErr).Str("policy", policyName).Msg("failed to cache recovered policy in bbolt")
 					}
 					continue
@@ -722,7 +811,7 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 			return fmt.Errorf("create zone policy %s: %w", policyName, err)
 		}
 
-		if err := zm.store.SetPolicy(policyName, storage.PolicyRecord{
+		if err := setCachedPolicy(zm.store, site, policyName, storage.PolicyRecord{
 			UnifiID: created.ID,
 			Site:    site,
 			Mode:    "zone",
@@ -736,33 +825,14 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 	return nil
 }
 
-// cleanupOrphanedPortTMLs deletes port-filter TMLs (crowdsec-ports-src-* and
-// crowdsec-ports-dst-*) that no longer correspond to any zone pair in the
-// current ZONE_PAIRS config. The expected set comes directly from the
-// sitePortTMLs map returned by ensurePortTMLs, which contains only the TML
-// names needed for the current config.
+// cleanupOrphanedPortTMLs removes filter lists no longer referenced by the
+// current pair configuration. IDs handle both base and content-versioned names.
 func (zm *ZoneManager) cleanupOrphanedPortTMLs(ctx context.Context, site string, sitePortTMLs map[string]portTMLIDs) {
-	// Build the set of TML names that are still needed.
-	expectedTMLNames := make(map[string]bool, len(sitePortTMLs)*4)
-	for _, pair := range zm.cfg.ZonePairs {
-		key := pair.Src + ":" + pair.Dst
-		if ids, ok := sitePortTMLs[key]; ok {
-			if len(pair.SrcPorts) > 0 {
-				expectedTMLNames["crowdsec-ports-src-"+pair.Src+"-"+pair.Dst] = true
-				_ = ids.SrcTMLID // referenced for clarity
-			}
-			if len(pair.DstPorts) > 0 {
-				expectedTMLNames["crowdsec-ports-dst-"+pair.Src+"-"+pair.Dst] = true
-				_ = ids.DstTMLID
-			}
-			if len(pair.DstIPs) > 0 {
-				v4IPs, v6IPs := classifyIPs(pair.DstIPs)
-				if len(v4IPs) > 0 {
-					expectedTMLNames["crowdsec-dstips-v4-"+pair.Src+"-"+pair.Dst] = true
-				}
-				if len(v6IPs) > 0 {
-					expectedTMLNames["crowdsec-dstips-v6-"+pair.Src+"-"+pair.Dst] = true
-				}
+	expectedIDs := make(map[string]bool, len(sitePortTMLs)*4)
+	for _, ids := range sitePortTMLs {
+		for _, id := range append([]string{ids.SrcTMLID, ids.DstTMLID}, ids.DstIPTMLIDs...) {
+			if id != "" {
+				expectedIDs[id] = true
 			}
 		}
 	}
@@ -779,7 +849,7 @@ func (zm *ZoneManager) cleanupOrphanedPortTMLs(ctx context.Context, site string,
 			!strings.HasPrefix(t.Name, "crowdsec-dstips-v6-") {
 			continue
 		}
-		if expectedTMLNames[t.Name] {
+		if expectedIDs[t.ID] {
 			continue
 		}
 		if delErr := zm.ctrl.DeleteTrafficMatchingList(ctx, site, t.ID); delErr != nil {
@@ -798,36 +868,39 @@ func (zm *ZoneManager) cleanupOrphanedPortTMLs(ctx context.Context, site string,
 //
 //   - bbolt sweep: removes policies tracked in bbolt (mode "zone") that are no
 //     longer expected. Cleans both the API object and the bbolt record.
-//   - API sweep: removes any API policy bearing the managed description that is
-//     not in expectedNames, even if bbolt has no record of it (e.g. bbolt was
-//     wiped, or a policy was left by a previous bouncer installation).
-func (zm *ZoneManager) cleanupOrphanedBlockPolicies(ctx context.Context, site string, expectedNames map[string]bool, existingByID map[string]controller.ZonePolicy) {
+//   - API sweep: removes block policies with the managed description and name
+//     prefix that are not in expectedNames, even without a bbolt record.
+func (zm *ZoneManager) cleanupOrphanedBlockPolicies(ctx context.Context, site string, expectedNames map[string]bool, existingByID map[string]controller.ZonePolicy) error {
 	deletedIDs := make(map[string]bool)
+	var cleanupErrors []error
 
 	// Pass 1 — bbolt-based: handles the normal case where bbolt tracks the policy.
 	allBbolt, err := zm.store.ListPolicies()
 	if err != nil {
 		zm.log.Warn().Err(err).Str("site", site).Msg("orphan cleanup: failed to list bbolt policies")
 	} else {
-		for name, rec := range allBbolt {
+		for key, rec := range allBbolt {
 			if rec.Site != site || rec.Mode != "zone" {
 				continue
 			}
+			name := cacheName(key)
 			if expectedNames[name] {
 				continue
 			}
 			// Orphan: in bbolt for this site but not expected by current config.
-			if p, exists := existingByID[rec.UnifiID]; exists && p.Description == zm.cfg.Description && p.Action == "BLOCK" {
+			if p, exists := existingByID[rec.UnifiID]; exists && p.Name == name && p.Action == "BLOCK" {
 				if delErr := zm.ctrl.DeleteZonePolicy(ctx, site, rec.UnifiID); delErr != nil {
 					zm.log.Warn().Err(delErr).Str("policy", name).Msg("failed to delete orphaned zone policy")
+					cleanupErrors = append(cleanupErrors, fmt.Errorf("delete orphaned zone policy %s: %w", name, delErr))
+					continue
 				} else {
 					zm.log.Info().Str("policy", name).Str("site", site).
 						Msg("deleted orphaned zone policy (zone pair removed from config)")
 					deletedIDs[rec.UnifiID] = true
 				}
 			}
-			// Remove from bbolt regardless — it no longer belongs to any active zone pair.
-			if delErr := zm.store.DeletePolicy(name); delErr != nil {
+			// Keep the cache record if deletion failed so the next reconcile retries it.
+			if delErr := zm.store.DeletePolicy(key); delErr != nil {
 				zm.log.Warn().Err(delErr).Str("policy", name).Msg("failed to remove orphaned policy from bbolt")
 			}
 		}
@@ -844,6 +917,9 @@ func (zm *ZoneManager) cleanupOrphanedBlockPolicies(ctx context.Context, site st
 		if p.Description != zm.cfg.Description {
 			continue
 		}
+		if prefix := zm.namer.PolicyPrefix(); prefix == "" || !strings.HasPrefix(p.Name, prefix) {
+			continue // without a bbolt record, description alone does not prove ownership
+		}
 		if p.Action != "BLOCK" {
 			continue // the block manager only ever creates BLOCK zone policies
 		}
@@ -853,18 +929,23 @@ func (zm *ZoneManager) cleanupOrphanedBlockPolicies(ctx context.Context, site st
 		if delErr := zm.ctrl.DeleteZonePolicy(ctx, site, id); delErr != nil {
 			zm.log.Warn().Err(delErr).Str("policy", p.Name).Str("site", site).
 				Msg("failed to delete API-orphaned zone policy")
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("delete API-orphaned zone policy %s: %w", p.Name, delErr))
+			continue
 		} else {
 			zm.log.Info().Str("policy", p.Name).Str("site", site).
 				Msg("deleted API-orphaned zone policy (matches managed description, not in current config)")
 		}
 		// Clean up any stale bbolt entry that may exist under this name.
-		_ = zm.store.DeletePolicy(p.Name)
+		_ = deleteCachedPolicy(zm.store, site, p.Name)
 	}
+	return errors.Join(cleanupErrors...)
 }
 
 // DeletePoliciesForShard deletes all zone policies for the given shard across all zone pairs.
 // Called during shard pruning.
 func (zm *ZoneManager) DeletePoliciesForShard(ctx context.Context, site string, ipv6 bool, shardIdx int) error {
+	zm.opMu.Lock()
+	defer zm.opMu.Unlock()
 	family := Family(ipv6)
 
 	for _, pair := range zm.cfg.ZonePairs {
@@ -879,7 +960,7 @@ func (zm *ZoneManager) DeletePoliciesForShard(ctx context.Context, site string, 
 			return err
 		}
 
-		existing, lookupErr := zm.store.GetPolicy(policyName)
+		existing, lookupErr := getCachedPolicy(zm.store, site, policyName)
 		if lookupErr != nil {
 			return fmt.Errorf("lookup policy %s: %w", policyName, lookupErr)
 		}
@@ -892,7 +973,7 @@ func (zm *ZoneManager) DeletePoliciesForShard(ctx context.Context, site string, 
 			return fmt.Errorf("delete zone policy %s: %w", policyName, err)
 		}
 
-		if err := zm.store.DeletePolicy(policyName); err != nil {
+		if err := deleteCachedPolicy(zm.store, site, policyName); err != nil {
 			zm.log.Warn().Err(err).Str("policy", policyName).Msg("failed to delete policy from bbolt")
 		}
 
@@ -907,19 +988,23 @@ func (zm *ZoneManager) DeletePolicies(ctx context.Context, site string) error {
 	if err != nil {
 		return err
 	}
+	var errs []error
 	for name, rec := range policies {
 		if rec.Site != site || rec.Mode != "zone" {
 			continue
 		}
 		if err := zm.ctrl.DeleteZonePolicy(ctx, site, rec.UnifiID); err != nil {
-			zm.log.Warn().Err(err).Str("policy", name).Msg("failed to delete zone policy")
-			continue
+			var missing *controller.ErrNotFound
+			if !errors.As(err, &missing) {
+				errs = append(errs, fmt.Errorf("delete zone policy %s: %w", name, err))
+				continue
+			}
 		}
 		if err := zm.store.DeletePolicy(name); err != nil {
-			zm.log.Warn().Err(err).Str("policy", name).Msg("failed to delete policy from bbolt")
+			errs = append(errs, fmt.Errorf("remove zone policy %s from storage: %w", name, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // UpdateGroupReference updates zone policies that reference an old TML/group ID with a new one.
@@ -947,12 +1032,14 @@ func (zm *ZoneManager) UpdateGroupReference(ctx context.Context, site, oldGroupI
 
 // needsUpdateZonePolicy returns true if the policy needs to be updated to match the desired state.
 // It checks:
-// 1. ConnectionStateFilter is not nil (UniFi API will show "Custom" instead of "All")
+// 1. ConnectionStateFilter and logging match the desired settings
 // 2. TrafficMatchingListIDs is empty or has the wrong IP TML ID
 // 3. SrcPortTMLID, DstPortTMLID, or DstIPTMLID differ from desired
-func needsUpdateZonePolicy(policy *controller.ZonePolicy, desiredTMLID, desiredSrcPortTMLID, desiredDstPortTMLID, desiredDstIPTMLID string) bool {
-	// ConnectionStateFilter should be nil for "All" states
-	if policy.ConnectionStateFilter != nil {
+func needsUpdateZonePolicy(policy *controller.ZonePolicy, desiredTMLID, desiredSrcPortTMLID, desiredDstPortTMLID, desiredDstIPTMLID, srcZoneID, dstZoneID, ipVersion, description string, states []string, logDrops bool) bool {
+	if !policy.Enabled || policy.Action != "BLOCK" || policy.SrcZone != srcZoneID || policy.DstZone != dstZoneID || policy.IPVersion != ipVersion || policy.Description != description {
+		return true
+	}
+	if !sameConnectionStates(policy.ConnectionStateFilter, states) || policy.LoggingEnabled != logDrops {
 		return true
 	}
 	// TrafficMatchingListIDs should have exactly one entry with the desired TML ID
@@ -971,10 +1058,33 @@ func needsUpdateZonePolicy(policy *controller.ZonePolicy, desiredTMLID, desiredS
 	return false
 }
 
+func sameConnectionStates(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, state := range a {
+		counts[state]++
+	}
+	for _, state := range b {
+		counts[state]--
+		if counts[state] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // updateZonePolicy updates an existing zone policy with the correct settings.
-func (zm *ZoneManager) updateZonePolicy(ctx context.Context, site string, policy controller.ZonePolicy, newGroupID, srcPortTMLID, dstPortTMLID, dstIPTMLID string) error {
+func (zm *ZoneManager) updateZonePolicy(ctx context.Context, site string, policy controller.ZonePolicy, newGroupID, srcPortTMLID, dstPortTMLID, dstIPTMLID, srcZoneID, dstZoneID, ipVersion string) error {
+	policy.Enabled = true
+	policy.Action = "BLOCK"
+	policy.Description = zm.cfg.Description
+	policy.SrcZone = srcZoneID
+	policy.DstZone = dstZoneID
+	policy.IPVersion = ipVersion
 	policy.TrafficMatchingListIDs = []string{newGroupID}
-	policy.ConnectionStateFilter = nil
+	policy.ConnectionStateFilter = append([]string(nil), zm.cfg.ConnectionStates...)
 	policy.LoggingEnabled = zm.cfg.LogDrops
 	policy.SrcPortTMLID = srcPortTMLID
 	policy.DstPortTMLID = dstPortTMLID

@@ -3,21 +3,26 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/blocklist"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/bouncer"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/capabilities"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/lapi_metrics"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/lapihttp"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
@@ -77,6 +82,13 @@ func runCmd() *cobra.Command {
 	}
 }
 
+func openStore(cfg *config.Config, log zerolog.Logger) (storage.Store, error) {
+	if cfg.DryRun {
+		return storage.NewDryRunStore(cfg.DataDir)
+	}
+	return storage.NewBboltStore(cfg.DataDir, log, cfg.HistoryMaxEvents)
+}
+
 func runDaemon() error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -90,6 +102,9 @@ func runDaemon() error {
 	if w := cfg.InsecureLAPIURLWarning(); w != "" {
 		log.Warn().Str("url", cfg.CrowdSecLAPIURL).Msg(w)
 	}
+	if len(cfg.BlockWhitelist) == 0 {
+		log.Warn().Msg("BLOCK_WHITELIST is empty; add your public WAN address to prevent self-ban")
+	}
 	log.Info().Str("version", Version).Msg("cs-unifi-bouncer-pro starting")
 	log.Info().
 		Str("bouncer_type", capabilities.BouncerType).
@@ -99,23 +114,25 @@ func runDaemon() error {
 		Bool("appsec", capabilities.SupportsAppSec).
 		Msg("bouncer capabilities")
 
-	store, err := storage.NewBboltStore(cfg.DataDir, log, cfg.HistoryMaxEvents)
+	store, err := openStore(cfg, log)
 	if err != nil {
 		return fmt.Errorf("open storage: %w", err)
 	}
 	defer store.Close()
 
 	ctrl, err := controller.NewClient(context.Background(), controller.ClientConfig{
-		BaseURL:      cfg.UnifiURL,
-		Username:     cfg.UnifiUsername,
-		Password:     cfg.UnifiPassword,
-		APIKey:       cfg.UnifiAPIKey,
-		VerifyTLS:    cfg.UnifiVerifyTLS,
-		CACertPath:   cfg.UnifiCACert,
-		Timeout:      cfg.UnifiHTTPTimeout,
-		Debug:        cfg.UnifiAPIDebug,
-		ReauthMinGap: cfg.SessionReauthMinGap,
-		EnableIPv6:   cfg.EnableIPv6,
+		BaseURL:       cfg.UnifiURL,
+		Username:      cfg.UnifiUsername,
+		Password:      cfg.UnifiPassword,
+		APIKey:        cfg.UnifiAPIKey,
+		VerifyTLS:     cfg.UnifiVerifyTLS,
+		CACertPath:    cfg.UnifiCACert,
+		Timeout:       cfg.UnifiHTTPTimeout,
+		Debug:         cfg.UnifiAPIDebug,
+		ReauthMinGap:  cfg.SessionReauthMinGap,
+		ReauthTimeout: cfg.SessionReauthTimeout,
+		DryRun:        cfg.DryRun,
+		EnableIPv6:    cfg.EnableIPv6,
 	}, log)
 	if err != nil {
 		return fmt.Errorf("init UniFi client: %w", err)
@@ -125,7 +142,8 @@ func runDaemon() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// Parse Cloudflare zone pairs if enabled (after ctx is created for zone resolution)
+	// Parse Cloudflare zone pairs. Zone IDs are resolved separately for each site
+	// by the whitelist manager after site auto-discovery.
 	var cfZonePairs []whitelist.ZonePairConfig
 	if cfg.CloudflareWhitelistEnabled {
 		parsedCFPairs, cfParseErr := cfg.ParseCloudflareZonePairs()
@@ -133,23 +151,12 @@ func runDaemon() error {
 			return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: %w", cfParseErr)
 		}
 		for _, pair := range parsedCFPairs {
-			// Resolve zone names to UUIDs - independent of main zone pair resolution.
-			srcID, err := ctrl.GetZoneID(ctx, cfg.UnifiSites[0], pair.Src)
-			if err != nil {
-				return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: resolve src zone %q: %w", pair.Src, err)
-			}
-			dstID, err := ctrl.GetZoneID(ctx, cfg.UnifiSites[0], pair.Dst)
-			if err != nil {
-				return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: resolve dst zone %q: %w", pair.Dst, err)
-			}
 			cfZonePairs = append(cfZonePairs, whitelist.ZonePairConfig{
-				SrcName:   pair.Src,
-				DstName:   pair.Dst,
-				SrcZoneID: srcID,
-				DstZoneID: dstID,
-				SrcPorts:  pair.SrcPorts,
-				DstPorts:  pair.DstPorts,
-				DstIPs:    pair.DstIPs,
+				SrcName:  pair.Src,
+				DstName:  pair.Dst,
+				SrcPorts: pair.SrcPorts,
+				DstPorts: pair.DstPorts,
+				DstIPs:   pair.DstIPs,
 			})
 		}
 	}
@@ -165,7 +172,11 @@ func runDaemon() error {
 	}
 
 	// Build webhook notifier (no-op when WEBHOOK_URL is empty).
-	whNotifier := webhook.New(cfg.WebhookURL, cfg.WebhookEvents, log)
+	webhookURL := cfg.WebhookURL
+	if cfg.DryRun {
+		webhookURL = ""
+	}
+	whNotifier := webhook.New(webhookURL, cfg.WebhookEvents, log)
 
 	fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log,
 		func() { whNotifier.Fire(ctx, "circuit_breaker_open", nil) },
@@ -174,6 +185,7 @@ func runDaemon() error {
 	if err != nil {
 		return err
 	}
+	claims := banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun)
 
 	// Bootstrap infrastructure
 	log.Info().Strs("sites", cfg.UnifiSites).Msg("ensuring firewall infrastructure")
@@ -190,6 +202,10 @@ func runDaemon() error {
 			case <-ctx.Done():
 				return
 			case <-sighup:
+				if cfg.DryRun {
+					log.Info().Msg("[DRY-RUN] skipping zone reload")
+					continue
+				}
 				newCfg, err := config.Load()
 				if err != nil {
 					log.Warn().Err(err).Msg("SIGHUP: reload config failed")
@@ -205,22 +221,26 @@ func runDaemon() error {
 					log.Warn().Msg("SIGHUP: ZoneManager not available (legacy mode?), skipping reload")
 					continue
 				}
-				if err := zm.Reload(ctx, newCfg.UnifiSites, newPairs); err != nil {
-					log.Warn().Err(err).Msg("SIGHUP: zone reload completed with errors")
-				} else {
-					log.Info().Msg("SIGHUP: zone pairs reloaded successfully")
+				if err := zm.Reload(ctx, cfg.UnifiSites, newPairs); err != nil {
+					log.Warn().Err(err).Msg("SIGHUP: zone reload failed")
+					continue
 				}
+				if _, err := fwMgr.Reconcile(ctx, cfg.UnifiSites); err != nil {
+					log.Warn().Err(err).Msg("SIGHUP: zone policies could not be fully reconciled")
+					continue
+				}
+				log.Info().Msg("SIGHUP: zone pairs and policies reloaded successfully")
 			}
 		}
 	}()
 
 	// Start Cloudflare whitelist sync if enabled
 	var cfManager *whitelist.Manager
-	if cfg.CloudflareWhitelistEnabled {
+	if cfg.CloudflareWhitelistEnabled && !cfg.DryRun {
 		cfProvider := whitelist.NewCloudflareProvider(cfg.CloudflareIPv4URL, cfg.CloudflareIPv6URL)
 		cfManager = whitelist.NewManager(ctrl, cfg.UnifiSites, cfProvider, log)
 
-		// cfZonePairs are already resolved above
+		// The manager resolves zone IDs for each discovered site.
 		if err := cfManager.Sync(ctx, cfZonePairs); err != nil {
 			log.Error().Err(err).
 				Msg("initial Cloudflare whitelist sync FAILED — Cloudflare IPs will NOT be whitelisted until next tick; false positives possible")
@@ -228,7 +248,7 @@ func runDaemon() error {
 		} else {
 			log.Info().Msg("Cloudflare whitelist initial sync complete")
 		}
-	} else {
+	} else if !cfg.DryRun {
 		// Feature is disabled — drain any policies/TMLs left from a previous run
 		// where it was enabled. Without this, they would remain as orphans in UniFi.
 		drainMgr := whitelist.NewManager(ctrl, cfg.UnifiSites, nil, log)
@@ -255,10 +275,14 @@ func runDaemon() error {
 
 	// Construct LAPI usage-metrics reporter.
 	var recorder bouncer.MetricsRecorder
-	if cfg.LAPIMetricsPushInterval > 0 {
+	if cfg.LAPIMetricsPushInterval > 0 && !cfg.DryRun {
+		lapiClient, err := lapihttp.NewClient(cfg.CrowdSecLAPIVerifyTLS, cfg.CrowdSecLAPICACert, 5*time.Second)
+		if err != nil {
+			return fmt.Errorf("configure LAPI metrics client: %w", err)
+		}
 		reporter := lapi_metrics.NewReporter(
 			cfg.CrowdSecLAPIURL, cfg.CrowdSecLAPIKey, Version,
-			cfg.LAPIMetricsPushInterval, log,
+			cfg.LAPIMetricsPushInterval, log, lapiClient,
 		)
 		go reporter.Run(ctx)
 		recorder = reporter
@@ -267,22 +291,26 @@ func runDaemon() error {
 	}
 
 	bouncer.BinaryVersion = Version
-	bnc, err := bouncer.New(cfg, ctrl, store, fwMgr, recorder, log)
+	bnc, err := bouncer.New(cfg, ctrl, store, fwMgr, recorder, log, claims)
 	if err != nil {
 		return fmt.Errorf("build bouncer: %w", err)
 	}
 
 	// Start external blocklist manager if configured
 	if len(cfg.BlocklistURLs) > 0 {
+		protected, err := decision.ParseWhitelist(cfg.BlockWhitelist)
+		if err != nil {
+			return fmt.Errorf("parse blocklist whitelist: %w", err)
+		}
 		blMgr := blocklist.NewManager(
-			cfg.BlocklistURLs, cfg.BlocklistRefreshInterval, cfg.BlocklistNamePrefix,
-			fwMgr, store, cfg.UnifiSites, log,
+			cfg.BlocklistURLs, cfg.BlocklistRefreshInterval,
+			fwMgr, store, cfg.UnifiSites, protected, claims, cfg.DryRun, log,
 		)
 		go blMgr.Run(ctx)
 	}
 
 	// Start janitor
-	janitor := bouncer.NewJanitor(store, fwMgr, cfg.UnifiSites, cfg.JanitorInterval, log)
+	janitor := bouncer.NewJanitor(store, fwMgr, cfg.UnifiSites, cfg.JanitorInterval, log, claims)
 	go func() {
 		if err := janitor.Run(ctx); err != nil {
 			log.Warn().Err(err).Msg("janitor exited")
@@ -387,7 +415,7 @@ func runPeriodicReconcile(ctx context.Context, fwMgr firewall.Manager, sites []s
 	}
 }
 
-// healthcheckCmd exits 0 if the controller is reachable.
+// healthcheckCmd probes the local health endpoint.
 func healthcheckCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "healthcheck",
@@ -399,24 +427,40 @@ func healthcheckCmd() *cobra.Command {
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 			defer cancel()
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+cfg.HealthAddr+"/healthz", nil)
+			healthURL, err := localHealthURL(cfg.HealthAddr)
+			if err != nil {
+				return err
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
 			if err != nil {
 				return err
 			}
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "healthcheck failed: %v\n", err)
-				os.Exit(1)
+				return fmt.Errorf("healthcheck failed: %w", err)
 			}
 			defer resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
-				fmt.Fprintf(os.Stderr, "healthcheck returned %d\n", resp.StatusCode)
-				os.Exit(1)
+				return fmt.Errorf("healthcheck returned %d", resp.StatusCode)
 			}
 			fmt.Println("healthy")
 			return nil
 		},
 	}
+}
+
+func localHealthURL(addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("invalid HEALTH_ADDR: %w", err)
+	}
+	switch host {
+	case "", "0.0.0.0":
+		host = "127.0.0.1"
+	case "::":
+		host = "::1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/healthz", nil
 }
 
 // versionCmd prints the version, commit, and build date, then exits.
@@ -452,23 +496,25 @@ func reconcileCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 
-			store, err := storage.NewBboltStore(cfg.DataDir, log, cfg.HistoryMaxEvents)
+			store, err := openStore(cfg, log)
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
 			ctrl, err := controller.NewClient(ctx, controller.ClientConfig{
-				BaseURL:      cfg.UnifiURL,
-				Username:     cfg.UnifiUsername,
-				Password:     cfg.UnifiPassword,
-				APIKey:       cfg.UnifiAPIKey,
-				VerifyTLS:    cfg.UnifiVerifyTLS,
-				CACertPath:   cfg.UnifiCACert,
-				Timeout:      cfg.UnifiHTTPTimeout,
-				Debug:        cfg.UnifiAPIDebug,
-				ReauthMinGap: cfg.SessionReauthMinGap,
-				EnableIPv6:   cfg.EnableIPv6,
+				BaseURL:       cfg.UnifiURL,
+				Username:      cfg.UnifiUsername,
+				Password:      cfg.UnifiPassword,
+				APIKey:        cfg.UnifiAPIKey,
+				VerifyTLS:     cfg.UnifiVerifyTLS,
+				CACertPath:    cfg.UnifiCACert,
+				Timeout:       cfg.UnifiHTTPTimeout,
+				Debug:         cfg.UnifiAPIDebug,
+				ReauthMinGap:  cfg.SessionReauthMinGap,
+				ReauthTimeout: cfg.SessionReauthTimeout,
+				DryRun:        cfg.DryRun,
+				EnableIPv6:    cfg.EnableIPv6,
 			}, log)
 			if err != nil {
 				return err
@@ -500,13 +546,13 @@ func reconcileCmd() *cobra.Command {
 
 // statusCmd prints a read-only summary of the bbolt database state.
 // It opens the database in read-only mode and prints ban counts, group info,
-// and policy info. Zero API calls are made; safe to run while daemon is running.
+// and policy info. It makes no API calls and needs the daemon's database lock released.
 func statusCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Print a read-only summary of bbolt state (no API calls)",
 		Long: `Print ban counts, shard groups, and firewall policies stored in bbolt.
-Opens the database in read-only mode — safe to run while the daemon is running.`,
+Opens the database in read-only mode. Stop the daemon first to release its database lock.`,
 	}
 
 	defaultDataDir := os.Getenv("DATA_DIR")
@@ -626,23 +672,12 @@ Opens the database in read-only mode — safe to run while the daemon is running
 				})
 			}
 
-			// Sort
-			for i := 1; i < len(rows); i++ {
-				for j := i; j > 0; j-- {
-					swap := false
-					switch sortBy {
-					case "ip":
-						swap = rows[j].ip < rows[j-1].ip
-					default: // recorded_at, newest first
-						swap = rows[j].recordedAt.After(rows[j-1].recordedAt)
-					}
-					if swap {
-						rows[j], rows[j-1] = rows[j-1], rows[j]
-					} else {
-						break
-					}
+			sort.Slice(rows, func(i, j int) bool {
+				if sortBy == "ip" {
+					return rows[i].ip < rows[j].ip
 				}
-			}
+				return rows[i].recordedAt.After(rows[j].recordedAt)
+			})
 
 			if top > 0 && len(rows) > top {
 				rows = rows[:top]
@@ -685,12 +720,12 @@ Opens the database in read-only mode — safe to run while the daemon is running
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 
-			banList, err := store.BanList()
+			entry, err := store.BanGet(ip)
 			if err != nil {
-				return fmt.Errorf("list bans: %w", err)
+				return fmt.Errorf("get ban: %w", err)
 			}
 			now := time.Now()
-			if entry, ok := banList[ip]; ok {
+			if entry != nil {
 				expired := !entry.ExpiresAt.IsZero() && entry.ExpiresAt.Before(now)
 				expiresStr := "never"
 				if !entry.ExpiresAt.IsZero() {
@@ -799,23 +834,25 @@ Requires either --force or --dry-run for safety.`,
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 
-		store, err := storage.NewBboltStore(cfg.DataDir, log, cfg.HistoryMaxEvents)
+		store, err := openStore(cfg, log)
 		if err != nil {
 			return fmt.Errorf("open storage: %w", err)
 		}
 		defer store.Close()
 
 		ctrl, err := controller.NewClient(ctx, controller.ClientConfig{
-			BaseURL:      cfg.UnifiURL,
-			Username:     cfg.UnifiUsername,
-			Password:     cfg.UnifiPassword,
-			APIKey:       cfg.UnifiAPIKey,
-			VerifyTLS:    cfg.UnifiVerifyTLS,
-			CACertPath:   cfg.UnifiCACert,
-			Timeout:      cfg.UnifiHTTPTimeout,
-			Debug:        cfg.UnifiAPIDebug,
-			ReauthMinGap: cfg.SessionReauthMinGap,
-			EnableIPv6:   cfg.EnableIPv6,
+			BaseURL:       cfg.UnifiURL,
+			Username:      cfg.UnifiUsername,
+			Password:      cfg.UnifiPassword,
+			APIKey:        cfg.UnifiAPIKey,
+			VerifyTLS:     cfg.UnifiVerifyTLS,
+			CACertPath:    cfg.UnifiCACert,
+			Timeout:       cfg.UnifiHTTPTimeout,
+			Debug:         cfg.UnifiAPIDebug,
+			ReauthMinGap:  cfg.SessionReauthMinGap,
+			ReauthTimeout: cfg.SessionReauthTimeout,
+			DryRun:        cfg.DryRun,
+			EnableIPv6:    cfg.EnableIPv6,
 		}, log)
 		if err != nil {
 			return fmt.Errorf("init UniFi client: %w", err)
@@ -827,12 +864,9 @@ Requires either --force or --dry-run for safety.`,
 			return err
 		}
 
-		// EnsureInfrastructure is needed so shard managers are populated before Drain.
-		if !dryRun {
-			log.Info().Strs("sites", cfg.UnifiSites).Msg("loading firewall infrastructure state")
-			if err := fwMgr.EnsureInfrastructure(ctx, cfg.UnifiSites); err != nil {
-				return fmt.Errorf("ensure infrastructure: %w", err)
-			}
+		log.Info().Strs("sites", cfg.UnifiSites).Msg("loading firewall infrastructure state")
+		if err := fwMgr.PrepareDrain(ctx, cfg.UnifiSites); err != nil {
+			return fmt.Errorf("prepare drain: %w", err)
 		}
 
 		if err := fwMgr.Drain(ctx, cfg.UnifiSites); err != nil {
@@ -857,7 +891,7 @@ func banCmd() *cobra.Command {
 			return runManualBan(args[0], dur)
 		},
 	}
-	cmd.Flags().Duration("duration", 24*time.Hour, "Ban duration (0 = permanent/BAN_TTL cap applies)")
+	cmd.Flags().Duration("duration", 24*time.Hour, "Ban duration (0 = BAN_TTL; longer durations are capped at BAN_TTL)")
 	return cmd
 }
 
@@ -874,16 +908,24 @@ func unbanCmd() *cobra.Command {
 }
 
 func runManualBan(ip string, dur time.Duration) error {
+	var parseErr error
+	ip, _, parseErr = decision.ParseAndSanitize(ip)
+	if parseErr != nil {
+		return parseErr
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 	log := buildLogger(cfg)
+	if dur < 0 {
+		return fmt.Errorf("ban duration must not be negative")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	store, err := storage.NewBboltStore(cfg.DataDir, log, cfg.HistoryMaxEvents)
+	store, err := openStore(cfg, log)
 	if err != nil {
 		return fmt.Errorf("open storage: %w", err)
 	}
@@ -892,7 +934,8 @@ func runManualBan(ip string, dur time.Duration) error {
 	ctrl, err := controller.NewClient(ctx, controller.ClientConfig{
 		BaseURL: cfg.UnifiURL, Username: cfg.UnifiUsername, Password: cfg.UnifiPassword,
 		APIKey: cfg.UnifiAPIKey, VerifyTLS: cfg.UnifiVerifyTLS, CACertPath: cfg.UnifiCACert,
-		Timeout: cfg.UnifiHTTPTimeout, ReauthMinGap: cfg.SessionReauthMinGap, EnableIPv6: cfg.EnableIPv6,
+		Timeout: cfg.UnifiHTTPTimeout, ReauthMinGap: cfg.SessionReauthMinGap, ReauthTimeout: cfg.SessionReauthTimeout,
+		DryRun: cfg.DryRun, EnableIPv6: cfg.EnableIPv6,
 	}, log)
 	if err != nil {
 		return fmt.Errorf("init UniFi client: %w", err)
@@ -907,31 +950,29 @@ func runManualBan(ip string, dur time.Duration) error {
 		return fmt.Errorf("ensure infrastructure: %w", err)
 	}
 
-	var expiresAt time.Time
-	if dur > 0 {
-		expiresAt = time.Now().Add(dur)
+	if dur == 0 || dur > cfg.BanTTL {
+		dur = cfg.BanTTL
 	}
-	isIPv6 := strings.Contains(ip, ":")
+	expiresAt := time.Now().Add(dur)
+	isIPv6 := decision.IsIPv6(ip)
 
-	for _, site := range cfg.UnifiSites {
-		if err := fwMgr.ApplyBan(ctx, site, ip, isIPv6); err != nil {
-			return fmt.Errorf("ban %s on site %s: %w", ip, site, err)
-		}
+	claims := banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun)
+	if _, err := claims.Claim(ctx, ip, isIPv6, "manual", expiresAt); err != nil {
+		return fmt.Errorf("ban %s: %w", ip, err)
 	}
-	if err := store.BanRecord(ip, expiresAt, isIPv6); err != nil {
-		return fmt.Errorf("record ban in storage: %w", err)
+	if err := fwMgr.SyncDirty(ctx, cfg.UnifiSites); err != nil {
+		return fmt.Errorf("flush manual ban to UniFi: %w", err)
 	}
-	fmt.Printf("banned %s across %d site(s) (expires: %s)\n", ip, len(cfg.UnifiSites),
-		func() string {
-			if expiresAt.IsZero() {
-				return "never (BAN_TTL cap applies)"
-			}
-			return expiresAt.Format(time.RFC3339)
-		}())
+	fmt.Printf("banned %s across %d site(s) (expires: %s)\n", ip, len(cfg.UnifiSites), expiresAt.Format(time.RFC3339))
 	return nil
 }
 
 func runManualUnban(ip string) error {
+	var parseErr error
+	ip, _, parseErr = decision.ParseAndSanitize(ip)
+	if parseErr != nil {
+		return parseErr
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -941,7 +982,7 @@ func runManualUnban(ip string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	store, err := storage.NewBboltStore(cfg.DataDir, log, cfg.HistoryMaxEvents)
+	store, err := openStore(cfg, log)
 	if err != nil {
 		return fmt.Errorf("open storage: %w", err)
 	}
@@ -950,7 +991,8 @@ func runManualUnban(ip string) error {
 	ctrl, err := controller.NewClient(ctx, controller.ClientConfig{
 		BaseURL: cfg.UnifiURL, Username: cfg.UnifiUsername, Password: cfg.UnifiPassword,
 		APIKey: cfg.UnifiAPIKey, VerifyTLS: cfg.UnifiVerifyTLS, CACertPath: cfg.UnifiCACert,
-		Timeout: cfg.UnifiHTTPTimeout, ReauthMinGap: cfg.SessionReauthMinGap, EnableIPv6: cfg.EnableIPv6,
+		Timeout: cfg.UnifiHTTPTimeout, ReauthMinGap: cfg.SessionReauthMinGap, ReauthTimeout: cfg.SessionReauthTimeout,
+		DryRun: cfg.DryRun, EnableIPv6: cfg.EnableIPv6,
 	}, log)
 	if err != nil {
 		return fmt.Errorf("init UniFi client: %w", err)
@@ -965,14 +1007,12 @@ func runManualUnban(ip string) error {
 		return fmt.Errorf("ensure infrastructure: %w", err)
 	}
 
-	isIPv6 := strings.Contains(ip, ":")
-	for _, site := range cfg.UnifiSites {
-		if err := fwMgr.ApplyUnban(ctx, site, ip, isIPv6); err != nil {
-			return fmt.Errorf("unban %s on site %s: %w", ip, site, err)
-		}
+	claims := banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun)
+	if _, err := claims.ReleaseAll(ctx, ip, decision.IsIPv6(ip)); err != nil {
+		return fmt.Errorf("unban %s: %w", ip, err)
 	}
-	if err := store.BanDelete(ip); err != nil {
-		return fmt.Errorf("remove ban from storage: %w", err)
+	if err := fwMgr.SyncDirty(ctx, cfg.UnifiSites); err != nil {
+		return fmt.Errorf("flush manual unban to UniFi: %w", err)
 	}
 	fmt.Printf("unbanned %s from %d site(s)\n", ip, len(cfg.UnifiSites))
 	return nil
@@ -1001,6 +1041,10 @@ func buildFWManager(ctx context.Context, cfg *config.Config,
 	if err != nil {
 		return nil, fmt.Errorf("parse zone pairs: %w", err)
 	}
+	connectionStates, err := cfg.ParseFirewallConnectionStates()
+	if err != nil {
+		return nil, err
+	}
 
 	return firewall.NewManager(firewall.ManagerConfig{
 		FirewallMode:                cfg.FirewallMode,
@@ -1026,10 +1070,11 @@ func buildFWManager(ctx context.Context, cfg *config.Config,
 			APIWriteDelay:    cfg.FirewallAPIShardDelay,
 		},
 		ZoneCfg: firewall.ZoneConfig{
-			ZonePairs:     zonePairs,
-			Description:   cfg.ObjectDescription,
-			LogDrops:      cfg.FirewallLogDrops,
-			APIWriteDelay: cfg.FirewallAPIShardDelay,
+			ZonePairs:        zonePairs,
+			Description:      cfg.ObjectDescription,
+			LogDrops:         cfg.FirewallLogDrops,
+			ConnectionStates: connectionStates,
+			APIWriteDelay:    cfg.FirewallAPIShardDelay,
 		},
 	}, ctrl, store, namer, log), nil
 }
@@ -1044,6 +1089,18 @@ func resolveCapacities(cfg *config.Config) (v4Cap, v6Cap int) {
 	v6Cap = cfg.FirewallGroupCapacityV6
 	if v6Cap == 0 {
 		v6Cap = v4Cap
+	}
+	// SHARD_LIMIT is the controller's hard ceiling for each managed list.
+	// Per-family capacity settings may lower it but must not exceed it.
+	limit := cfg.ShardLimit
+	if limit == 0 {
+		limit = firewall.ShardLimit
+	}
+	if v4Cap == 0 || v4Cap > limit {
+		v4Cap = limit
+	}
+	if v6Cap == 0 || v6Cap > limit {
+		v6Cap = limit
 	}
 	return v4Cap, v6Cap
 }
@@ -1133,7 +1190,6 @@ Exits 0 when all checks pass, 1 if any check fails.`,
 			var checks []diagCheck
 			allPass := true
 
-			// --- Phase 1: config ---
 			cfg, err := config.Load()
 			if err != nil {
 				checks = append(checks, diagCheck{"config_valid", "FAIL", err.Error()})
@@ -1148,47 +1204,52 @@ Exits 0 when all checks pass, 1 if any check fails.`,
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			// --- Phase 2: LAPI reachability ---
 			lapiURL := cfg.CrowdSecLAPIURL + "/v1/decisions?limit=1"
-			lapiClient := &http.Client{Timeout: 10 * time.Second}
-			lapiReq, lapiReqErr := http.NewRequestWithContext(ctx, http.MethodGet, lapiURL, nil)
-			if lapiReqErr != nil {
-				checks = append(checks, diagCheck{"lapi_reachable", "FAIL", lapiReqErr.Error()})
+			lapiClient, lapiClientErr := lapihttp.NewClient(cfg.CrowdSecLAPIVerifyTLS, cfg.CrowdSecLAPICACert, 10*time.Second)
+			if lapiClientErr != nil {
+				checks = append(checks, diagCheck{"lapi_reachable", "FAIL", lapiClientErr.Error()})
 				allPass = false
 			} else {
-				lapiReq.Header.Set("X-Api-Key", cfg.CrowdSecLAPIKey)
-				lapiResp, lapiErr := lapiClient.Do(lapiReq)
-				if lapiErr != nil {
-					checks = append(checks, diagCheck{"lapi_reachable", "FAIL", lapiErr.Error()})
+				lapiReq, lapiReqErr := http.NewRequestWithContext(ctx, http.MethodGet, lapiURL, nil)
+				if lapiReqErr != nil {
+					checks = append(checks, diagCheck{"lapi_reachable", "FAIL", lapiReqErr.Error()})
 					allPass = false
 				} else {
-					_ = lapiResp.Body.Close()
-					detail := fmt.Sprintf("%s → %d %s", cfg.CrowdSecLAPIURL, lapiResp.StatusCode, http.StatusText(lapiResp.StatusCode))
-					switch {
-					case lapiResp.StatusCode == http.StatusUnauthorized:
-						checks = append(checks, diagCheck{"lapi_reachable", "FAIL",
-							detail + " — authentication failed; check CROWDSEC_LAPI_KEY"})
+					lapiReq.Header.Set("X-Api-Key", cfg.CrowdSecLAPIKey)
+					lapiResp, lapiErr := lapiClient.Do(lapiReq)
+					if lapiErr != nil {
+						checks = append(checks, diagCheck{"lapi_reachable", "FAIL", lapiErr.Error()})
 						allPass = false
-					case lapiResp.StatusCode >= 200 && lapiResp.StatusCode < 300:
-						checks = append(checks, diagCheck{"lapi_reachable", "PASS", detail})
-					default:
-						checks = append(checks, diagCheck{"lapi_reachable", "WARN", detail})
+					} else {
+						_ = lapiResp.Body.Close()
+						detail := fmt.Sprintf("%s → %d %s", cfg.CrowdSecLAPIURL, lapiResp.StatusCode, http.StatusText(lapiResp.StatusCode))
+						switch {
+						case lapiResp.StatusCode == http.StatusUnauthorized:
+							checks = append(checks, diagCheck{"lapi_reachable", "FAIL",
+								detail + " — authentication failed; check CROWDSEC_LAPI_KEY"})
+							allPass = false
+						case lapiResp.StatusCode >= 200 && lapiResp.StatusCode < 300:
+							checks = append(checks, diagCheck{"lapi_reachable", "PASS", detail})
+						default:
+							checks = append(checks, diagCheck{"lapi_reachable", "WARN", detail})
+						}
 					}
 				}
 			}
 
-			// --- Phase 3: UniFi reachability ---
 			diagLog := zerolog.Nop()
 			ctrl, ctrlErr := controller.NewClient(ctx, controller.ClientConfig{
-				BaseURL:      cfg.UnifiURL,
-				Username:     cfg.UnifiUsername,
-				Password:     cfg.UnifiPassword,
-				APIKey:       cfg.UnifiAPIKey,
-				VerifyTLS:    cfg.UnifiVerifyTLS,
-				CACertPath:   cfg.UnifiCACert,
-				Timeout:      cfg.UnifiHTTPTimeout,
-				ReauthMinGap: cfg.SessionReauthMinGap,
-				EnableIPv6:   cfg.EnableIPv6,
+				BaseURL:       cfg.UnifiURL,
+				Username:      cfg.UnifiUsername,
+				Password:      cfg.UnifiPassword,
+				APIKey:        cfg.UnifiAPIKey,
+				VerifyTLS:     cfg.UnifiVerifyTLS,
+				CACertPath:    cfg.UnifiCACert,
+				Timeout:       cfg.UnifiHTTPTimeout,
+				ReauthMinGap:  cfg.SessionReauthMinGap,
+				ReauthTimeout: cfg.SessionReauthTimeout,
+				DryRun:        cfg.DryRun,
+				EnableIPv6:    cfg.EnableIPv6,
 			}, diagLog)
 			if ctrlErr != nil {
 				checks = append(checks, diagCheck{"unifi_reachable", "FAIL", ctrlErr.Error()})

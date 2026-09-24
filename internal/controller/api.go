@@ -58,30 +58,31 @@ type apiV1Page struct {
 // apiFirewallZoneV1 is the zone wire type for the integration v1 API.
 // The id field is a UUID (not a MongoDB ObjectID).
 type apiFirewallZoneV1 struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Metadata struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	NetworkIDs []string `json:"networkIds"`
+	Metadata   struct {
 		Origin string `json:"origin"`
 	} `json:"metadata"`
 }
 
 // apiTMLItemV1 is one entry in an integration v1 TML.
 type apiTMLItemV1 struct {
-	Type  string      `json:"type"`   // "IP_ADDRESS", "SUBNET", "PORT_NUMBER"
-	Value interface{} `json:"value"`  // string for IPs/subnets, int for ports
+	Type  string      `json:"type"`  // "IP_ADDRESS", "SUBNET", "PORT_NUMBER"
+	Value interface{} `json:"value"` // string for IPs/subnets, int for ports
 }
 
 // apiTMLV1 is the integration v1 Traffic Matching List wire type.
 type apiTMLV1 struct {
 	ID    string         `json:"id,omitempty"`
-	Type  string         `json:"type"`  // "IPV4_ADDRESSES", "IPV6_ADDRESSES", "PORTS"
+	Type  string         `json:"type"` // "IPV4_ADDRESSES", "IPV6_ADDRESSES", "PORTS"
 	Name  string         `json:"name"`
 	Items []apiTMLItemV1 `json:"items"`
 }
 
 // apiTMLV1Update is the wire type for TML PUT requests (excludes id field per UniFi API).
 type apiTMLV1Update struct {
-	Type  string         `json:"type"`  // "IPV4_ADDRESSES", "IPV6_ADDRESSES", "PORTS"
+	Type  string         `json:"type"` // "IPV4_ADDRESSES", "IPV6_ADDRESSES", "PORTS"
 	Name  string         `json:"name"`
 	Items []apiTMLItemV1 `json:"items"`
 }
@@ -93,7 +94,7 @@ type apiV1PolicyAction struct {
 }
 
 type apiV1IPAddressFilter struct {
-	Type                  string `json:"type"`                            // "TRAFFIC_MATCHING_LIST"
+	Type                  string `json:"type"` // "TRAFFIC_MATCHING_LIST"
 	MatchOpposite         bool   `json:"matchOpposite"`
 	TrafficMatchingListID string `json:"trafficMatchingListId,omitempty"`
 }
@@ -102,7 +103,7 @@ type apiV1IPAddressFilter struct {
 // It is always nested inside trafficFilter — the UniFi POST endpoint rejects
 // portFilter at the top level of source or destination.
 type apiV1PortFilter struct {
-	Type                  string `json:"type"`                            // "TRAFFIC_MATCHING_LIST"
+	Type                  string `json:"type"` // "TRAFFIC_MATCHING_LIST"
 	MatchOpposite         bool   `json:"matchOpposite"`
 	TrafficMatchingListID string `json:"trafficMatchingListId,omitempty"`
 }
@@ -132,7 +133,7 @@ type apiV1Policy struct {
 	Enabled               bool              `json:"enabled"`
 	Name                  string            `json:"name"`
 	Description           string            `json:"description,omitempty"`
-	Index                 int               `json:"index,omitempty"`
+	Index                 *int              `json:"index,omitempty"`
 	Action                apiV1PolicyAction `json:"action"`
 	Source                apiV1PolicySrc    `json:"source"`
 	Destination           apiV1PolicyDst    `json:"destination"`
@@ -200,6 +201,9 @@ func doGET(ctx context.Context, c *unifiClient, url, endpoint string) ([]json.Ra
 		if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodyBytes)).Decode(&body); err != nil {
 			return fmt.Errorf("decode response: %w", err)
 		}
+		if err := checkLegacyResponse(body.Meta.RC, body.Meta.Msg); err != nil {
+			return err
+		}
 		result = body.Data
 		return nil
 	})
@@ -226,12 +230,25 @@ func doPOST(ctx context.Context, c *unifiClient, url, endpoint string, payload i
 		if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodyBytes)).Decode(&body); err != nil {
 			return fmt.Errorf("decode response: %w", err)
 		}
+		if err := checkLegacyResponse(body.Meta.RC, body.Meta.Msg); err != nil {
+			return err
+		}
 		if len(body.Data) > 0 {
 			result = body.Data[0]
 		}
 		return nil
 	})
 	return result, err
+}
+
+func checkLegacyResponse(code, message string) error {
+	if code == "" || code == "ok" {
+		return nil
+	}
+	if message == "" {
+		message = code
+	}
+	return fmt.Errorf("UniFi API error: %s", message)
 }
 
 func doPOSTv2(ctx context.Context, c *unifiClient, url, endpoint string, payload interface{}) (json.RawMessage, error) {
@@ -436,6 +453,9 @@ func listAllV1Pages(ctx context.Context, c *unifiClient, endpointURL, metricEndp
 		if len(page.Data) == 0 || (page.TotalCount > 0 && offset+page.Count >= page.TotalCount) {
 			break
 		}
+		if page.Count <= 0 {
+			return nil, fmt.Errorf("%s pagination returned %d items with count %d at offset %d", metricEndpoint, len(page.Data), page.Count, offset)
+		}
 		offset += page.Count
 	}
 	return all, nil
@@ -512,7 +532,7 @@ func listFirewallZones(ctx context.Context, c *unifiClient, siteID string) ([]Zo
 		if err := json.Unmarshal(raw, &z); err != nil {
 			continue
 		}
-		zones = append(zones, Zone{ID: z.ID, Name: z.Name, Origin: z.Metadata.Origin})
+		zones = append(zones, Zone{ID: z.ID, Name: z.Name, NetworkIDs: z.NetworkIDs, Origin: z.Metadata.Origin})
 	}
 	return zones, nil
 }
@@ -736,6 +756,7 @@ func v1PolicyToModel(p apiV1Policy) ZonePolicy {
 	return ZonePolicy{
 		ID:                     p.ID,
 		Name:                   p.Name,
+		Index:                  p.Index,
 		Description:            p.Description,
 		Enabled:                p.Enabled,
 		Action:                 p.Action.Type,
@@ -860,4 +881,3 @@ func modelToV1PolicyUpdate(p ZonePolicy) apiV1PolicyUpdate {
 		LoggingEnabled:        p.LoggingEnabled,
 	}
 }
-

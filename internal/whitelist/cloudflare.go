@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 )
@@ -27,15 +28,15 @@ func NewCloudflareProvider(ipv4URL, ipv6URL string) *CloudflareProvider {
 
 // FetchIPv4 returns the current list of Cloudflare IPv4 CIDRs.
 func (p *CloudflareProvider) FetchIPv4(ctx context.Context) ([]string, error) {
-	return p.fetch(ctx, p.IPv4URL)
+	return p.fetch(ctx, p.IPv4URL, false)
 }
 
 // FetchIPv6 returns the current list of Cloudflare IPv6 CIDRs.
 func (p *CloudflareProvider) FetchIPv6(ctx context.Context) ([]string, error) {
-	return p.fetch(ctx, p.IPv6URL)
+	return p.fetch(ctx, p.IPv6URL, true)
 }
 
-func (p *CloudflareProvider) fetch(ctx context.Context, url string) ([]string, error) {
+func (p *CloudflareProvider) fetch(ctx context.Context, url string, ipv6 bool) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request for %s: %w", url, err)
@@ -50,9 +51,13 @@ func (p *CloudflareProvider) fetch(ctx context.Context, url string) ([]string, e
 		return nil, fmt.Errorf("fetch %s: HTTP %d", url, resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	const maxFeedBytes = 64 * 1024
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", url, err)
+	}
+	if len(body) > maxFeedBytes {
+		return nil, fmt.Errorf("cloudflare feed %s exceeds %d bytes", url, maxFeedBytes)
 	}
 
 	var result []string
@@ -61,7 +66,14 @@ func (p *CloudflareProvider) fetch(ctx context.Context, url string) ([]string, e
 		if cidr == "" || strings.HasPrefix(cidr, "#") {
 			continue
 		}
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil || prefix.Addr().Is6() != ipv6 {
+			return nil, fmt.Errorf("invalid Cloudflare CIDR %q in %s", cidr, url)
+		}
 		result = append(result, cidr)
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("cloudflare feed %s contains no CIDRs", url)
 	}
 	return result, nil
 }

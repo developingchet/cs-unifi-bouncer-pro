@@ -19,7 +19,7 @@ Automatically translates CrowdSec ban decisions into UniFi firewall rules — bl
 
 - **Dual firewall modes** — Auto-detects zone-based (UniFi Network ≥ 8.x) or legacy WAN_IN rules; no manual configuration required in most deployments
 - **Multi-site** — Apply bans to multiple UniFi sites simultaneously with a single bouncer instance
-- **Batch sync** — IP changes are accumulated and flushed in batch at configurable intervals (default 10s), with bin-packing to fill shards before creating new ones
+- **Batch sync** — IP changes are flushed after decision batches and retried at configurable intervals (default 30s), with bin-packing to fill shards before creating new ones
 - **Shard management** — Automatic creation of multiple Firewall Groups / Traffic Matching Lists when IP count exceeds capacity (10,000 per shard)
 - **ACID persistence** — bbolt-backed ban tracking with TTL-aware auto-expiry; bans survive container restarts and are never double-applied
 - **Template-based naming** — Go templates for all managed object names; prevents conflicts in multi-instance deployments
@@ -29,7 +29,6 @@ Automatically translates CrowdSec ban decisions into UniFi firewall rules — bl
 - **External blocklist import** — Fetch plain-text IP/CIDR lists from external URLs on a configurable interval; bans auto-expire if the URL becomes unreachable
 - **Webhook notifications** — POST JSON alerts to a webhook URL when the circuit breaker opens/closes or reconcile drift is detected
 - **Per-scenario duration overrides** — Override `BAN_TTL` for specific CrowdSec scenarios via `BLOCK_SCENARIO_DURATION_MAP`
-- **Per-scenario zone routing** — Route bans from specific scenarios to different zone pairs via `ZONE_PAIRS_SCENARIO_MAP`
 - **Destination IP filtering** — Scope block policies to specific destination hosts or subnets via `@ip` suffix on zone pairs (`External->Dmz@10.0.1.0/24`)
 - **Decision rate limiter** — Token-bucket rate limiter (`DECISION_RATE_LIMIT`) to throttle decision processing during ban waves
 - **RedactWriter** — Automatically masks passwords, API keys, and Bearer tokens from all log output
@@ -57,7 +56,7 @@ cat > .env <<'EOF'
 UNIFI_URL=https://192.168.1.1
 UNIFI_API_KEY=your-api-key-here        # Settings → Control Plane → API Keys
 CROWDSEC_LAPI_KEY=paste-key-here       # from step 1
-# Ensure CROWDSEC_LAPI_URL is reachable from the container (defaults to http://crowdsec:8080)
+# Set CROWDSEC_LAPI_URL to a reachable HTTPS endpoint, or explicitly allow HTTP on a trusted local network.
 EOF
 
 # 4. Start
@@ -88,7 +87,8 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `UNIFI_USERNAME` | **required** ¹ | Local admin username (fallback if no API key) |
 | `UNIFI_PASSWORD` | **required** ¹ | Local admin password (fallback if no API key) |
 | `UNIFI_SITES` | `default` | Comma-separated list of site names to manage |
-| `UNIFI_VERIFY_TLS` | `false` | Verify the controller's TLS certificate |
+| `UNIFI_VERIFY_TLS` | `true` | Verify the controller's TLS certificate; use `UNIFI_CA_CERT` for a private CA |
+| `UNIFI_REQUIRE_HTTPS` | `true` | Require an HTTPS controller URL; set `false` explicitly to use HTTP |
 | `UNIFI_CA_CERT` | — | Path to a custom CA certificate file |
 | `UNIFI_HTTP_TIMEOUT` | `120s` | Per-request HTTP timeout |
 | `UNIFI_API_DEBUG` | `false` | Log raw HTTP request/response bodies |
@@ -101,8 +101,10 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CROWDSEC_LAPI_KEY` | **required** | Bouncer API key from `cscli bouncers add` |
-| `CROWDSEC_LAPI_URL` | `http://crowdsec:8080` | CrowdSec LAPI base URL |
+| `CROWDSEC_LAPI_URL` | `https://crowdsec:8080` | CrowdSec LAPI base URL |
 | `CROWDSEC_LAPI_VERIFY_TLS` | `true` | Verify the LAPI TLS certificate |
+| `CROWDSEC_LAPI_CA_CERT` | — | CA bundle for a private LAPI certificate |
+| `CROWDSEC_LAPI_ALLOW_HTTP` | `false` | Explicitly allow non-loopback plaintext HTTP on a trusted local network |
 | `CROWDSEC_POLL_INTERVAL` | `30s` | How often to poll LAPI when SSE is unavailable |
 | `CROWDSEC_ORIGINS` | — | Comma-separated allowed origins; empty = all |
 | `LAPI_METRICS_PUSH_INTERVAL` | `30m` | Interval for pushing metrics to LAPI `/v1/usage-metrics`; `0` disables; minimum enforced value is `10m` |
@@ -111,10 +113,10 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BLOCK_WHITELIST` | — | Comma-separated IPs/CIDRs to never block |
+| `BLOCK_WHITELIST` | — | Comma-separated IPs/CIDRs to never block. Add your public WAN IP; private ranges are skipped automatically. |
 | `BLOCK_SCENARIO_EXCLUDE` | — | Comma-separated scenario substrings to skip |
 | `BLOCK_MIN_DURATION` | — | Ignore bans shorter than this duration, e.g. `1h` |
-| `BLOCK_SCENARIO_DURATION_MAP` | — | Per-scenario ban duration overrides. Semicolon-separated `key=duration` pairs matched as substrings. Example: `ssh-bf=168h;http-probing=24h` |
+| `BLOCK_SCENARIO_DURATION_MAP` | — | Per-scenario ban duration overrides. Comma- or semicolon-separated `key=duration` pairs matched as substrings. The longest matching key wins and may exceed `BAN_TTL`. Example: `ssh-bf=168h;http-probing=24h` |
 
 ### Firewall
 
@@ -129,8 +131,9 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `FIREWALL_API_SHARD_DELAY` | `250ms` | Minimum pause between consecutive UniFi API write calls. Prevents the controller stacking back-to-back ruleset regenerations. `0` disables. |
 | `FIREWALL_FLUSH_CONCURRENCY` | `1` | Maximum concurrent group `PUT` calls in-flight. `1` = fully serialized (recommended). Increase only for multi-site setups. |
 | `FIREWALL_LOG_DROPS` | `false` | Enable logging rules on the firewall objects |
+| `FIREWALL_CONNECTION_STATES` | `NEW,INVALID` | Zone block policy connection states. `ALL` also blocks established and related traffic, including replies to connections initiated inside the network. |
 | `FIREWALL_RECONCILE_ON_START` | `true` | Sync UniFi state with bbolt on startup |
-| `FIREWALL_RECONCILE_INTERVAL` | `0s` | Periodic reconcile interval; `0s` = disabled |
+| `FIREWALL_RECONCILE_INTERVAL` | `10m` | Periodically repair membership and missing policies/rules; `0s` = disabled |
 | `SYNC_INTERVAL` | `30s` | How often dirty shards are flushed to UniFi after a decision block. Also the retry interval for failed flushes. Minimum: `5s` |
 | `SHARD_LIMIT` | `10000` | Max IPs per shard before creating a new one |
 | `CIRCUIT_BREAKER_THRESHOLD` | `5` | Number of consecutive sync failures before the circuit breaker opens and suspends syncs |
@@ -150,7 +153,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ZONE_PAIRS` | `External->Dmz` | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. Zone names are auto-resolved to UUIDs at startup; standard UUIDs and MongoDB ObjectIDs are accepted directly. `External`/`Internal` are the default UniFi 8.x names — check Settings → Firewall → Zones if you renamed them. Optional colon-separated port lists restrict which ports the block policies match (empty = any). Optional `@ip1,ip2,...` suffix on the destination side scopes the policy to specific destination hosts or subnets. |
-| `ZONE_PAIRS_SCENARIO_MAP` | — | Per-scenario zone pair overrides. Semicolon-separated `key=pairs` entries where `key` matches as a substring of the scenario name. Overrides `ZONE_PAIRS` for matching bans. Example: `ssh-bf=External:22->Internal:22;http-probing=External->Internal:80,443` |
+| `ZONE_PAIRS_SCENARIO_MAP` | — | Unsupported; configuration validation rejects it because separate firewall policies are not provisioned. |
 
 ### Cloudflare whitelist
 
@@ -200,7 +203,6 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 |----------|---------|-------------|
 | `BLOCKLIST_URLS` | — | Comma-separated URLs of plain-text IP/CIDR blocklists to fetch |
 | `BLOCKLIST_REFRESH_INTERVAL` | `24h` | How often to re-fetch each URL |
-| `BLOCKLIST_NAME_PREFIX` | `ext-blocklist` | Scenario prefix used in the audit trail for blocklist bans |
 
 ### Webhook notifications
 
@@ -255,6 +257,7 @@ LEGACY_RULE_INDEX_START_V4=22000
 Creates zone firewall policies for each configured source → destination pair via the UniFi integration v1 API. Requires UniFi Network ≥ 8.x.
 
 Zone names are auto-resolved to UUIDs at startup. Standard UUIDs (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) and MongoDB ObjectIDs (24-char hex) are also accepted and passed through without a lookup. If a zone name cannot be found the bouncer exits with an error listing available zones.
+When UniFi reports network membership, the bouncer rejects configured zones with an empty network list, except External and Gateway. Verify that each destination zone contains the intended networks in UniFi before relying on its policies.
 
 ```bash
 FIREWALL_MODE=zone
@@ -276,6 +279,9 @@ ZONE_PAIRS=External->Dmz@10.0.1.0/24
 
 # Combine port and destination IP filters
 ZONE_PAIRS=External->Internal:443@10.0.0.5,10.0.0.6
+
+# Separate pairs with semicolons when either pair includes comma-separated ports or IPs
+ZONE_PAIRS=External->Internal:80,443;External->DMZ@10.0.0.5,10.0.0.6
 ```
 
 ### Policy Ordering
@@ -284,7 +290,7 @@ UniFi zone firewall evaluates policies in ascending index order — lower index 
 
 Correct evaluation order (allow before block) is therefore established entirely by creation sequence. Block shard policies are created lazily: a new zone policy is only provisioned when a shard becomes active with IPs to block, via an activation callback triggered on the first ban that fills the shard. The Cloudflare whitelist ALLOW policies are created during startup (by the whitelist sync step) before the bouncer loop begins processing CrowdSec decisions. On a fresh deployment, this means ALLOW policies are assigned lower indices and are therefore evaluated before any block shard policy.
 
-After a `drain` + redeploy, the startup sequence re-establishes the same ordering automatically: ALLOW policies are recreated by the whitelist sync, and block shard policies are recreated lazily as bans are re-applied. No manual ordering configuration is required or supported.
+After a `drain` + redeploy, Cloudflare ALLOW policies are created before block shard policies. Each whitelist sync checks the controller's policy indices and reports a conflicting BLOCK policy. Other existing ALLOW policies may still be evaluated first and bypass a CrowdSec block. Check policy order in UniFi for each zone pair, especially after changing pairs or recreating policies; the bouncer cannot pin its system-defined policies through the ordering API.
 
 ---
 
@@ -303,10 +309,9 @@ processStream() goroutine
     ▼
 Job handler (inline, synchronous per decision batch)
     │
-    ├── 1. Idempotency check       (bbolt bans bucket)
-    ├── 2. bbolt write (ban path)  (BanRecord persisted BEFORE UniFi write — crash-safe)
-    ├── 3. Firewall manager        (ApplyBan / ApplyUnban → marks shards dirty)
-    └── 4. bbolt cleanup (delete)  (BanDelete after UniFi confirms removal — skipped in DRY_RUN)
+    ├── 1. Update the decision's source claim in bbolt
+    ├── 2. Apply the firewall transition when the first claim arrives or last claim leaves
+    └── 3. Remove the ban record after the firewall confirms removal
     │
     ▼
 SyncDirty() — flush all dirty shards to UniFi
@@ -428,7 +433,8 @@ Available at `:8081` (configurable via `HEALTH_ADDR`):
 | `run` | Start the daemon (default) |
 | `healthcheck` | Exit 0 if healthy; exit 1 otherwise. Used by Docker `HEALTHCHECK`. |
 | `reconcile` | Connect to UniFi and CrowdSec, run a one-shot full reconcile, then exit |
-| `status` | Read-only bbolt inspection — prints ban counts, group/policy counts, DB size. Zero API calls; safe to run while the daemon is running |
+| `status` | Read-only bbolt inspection — prints ban counts, group/policy counts, DB size. Stop the daemon first to release the database lock. |
+| `status bans`, `status ip`, `status history` | Inspect bans and event history offline after stopping the daemon. |
 | `drain` | Remove all managed firewall objects (policies, rules, shard groups) from UniFi and clean up bbolt. Requires `--force` or `--dry-run`. |
 | `validate` | Load and validate configuration from environment variables — no API calls. Exits 0 on success, 1 on error. Prints a summary table of resolved config values. Safe to run in CI. |
 | `diagnose` | Three-phase connectivity check: (1) config validation, (2) CrowdSec LAPI probe, (3) UniFi controller ping and zone discovery. Exits 0 when all checks pass. |
@@ -440,13 +446,13 @@ Available at `:8081` (configurable via `HEALTH_ADDR`):
 cs-unifi-bouncer-pro run          # Start the daemon
 cs-unifi-bouncer-pro healthcheck  # Exit 0 if healthy (used by Docker HEALTHCHECK)
 cs-unifi-bouncer-pro reconcile    # One-shot full reconcile then exit
-cs-unifi-bouncer-pro status       # Inspect bbolt state without API calls
+cs-unifi-bouncer-pro status       # Inspect bbolt state after stopping the daemon
 cs-unifi-bouncer-pro drain --dry-run   # Preview what drain would remove
 cs-unifi-bouncer-pro drain --force     # Actually remove all managed objects
 cs-unifi-bouncer-pro validate     # Validate configuration (no API calls; CI-safe)
 cs-unifi-bouncer-pro diagnose     # Run connectivity checks and zone discovery
 cs-unifi-bouncer-pro ban 1.2.3.4              # Ban for 24h (default)
-cs-unifi-bouncer-pro ban 1.2.3.4 --duration 0 # Ban permanently (capped by BAN_TTL)
+cs-unifi-bouncer-pro ban 1.2.3.4 --duration 0 # Ban for BAN_TTL
 cs-unifi-bouncer-pro unban 1.2.3.4            # Remove ban
 cs-unifi-bouncer-pro version      # Print version and build information
 ```
@@ -466,6 +472,7 @@ last_group_update  2026-02-24T12:00:00Z
 ```
 
 The `--data-dir` flag overrides the data directory (default: `DATA_DIR` env or `/data`).
+All `status` subcommands require the daemon to be stopped because bbolt holds an exclusive lock while it runs. With Docker Compose, use `docker compose stop cs-unifi-bouncer-pro`, then `docker compose run --rm --no-deps cs-unifi-bouncer-pro status`, and restart with `docker compose up -d`.
 
 ### `drain` subcommand
 
@@ -524,7 +531,7 @@ Manually bans a single IP address across all sites listed in `UNIFI_SITES`. The 
 
 ```bash
 cs-unifi-bouncer-pro ban 203.0.113.42               # Ban for 24h (default)
-cs-unifi-bouncer-pro ban 203.0.113.42 --duration 0  # Permanent (capped by BAN_TTL at expiry)
+cs-unifi-bouncer-pro ban 203.0.113.42 --duration 0  # Expires after BAN_TTL
 cs-unifi-bouncer-pro ban 2001:db8::1   --duration 1h
 ```
 
@@ -549,22 +556,27 @@ Sending `SIGHUP` to the running daemon triggers a live reload of the zone-pair c
 
 ```bash
 # Docker
-docker exec cs-unifi-bouncer-pro kill -HUP 1
+docker kill --signal=HUP cs-unifi-bouncer-pro
 
 # systemd — ExecReload=/bin/kill -HUP $MAINPID maps to the SIGHUP handler
 systemctl reload cs-unifi-bouncer-pro
 
-# Kubernetes
-kubectl -n crowdsec exec -it deploy/cs-unifi-bouncer-pro -- kill -HUP 1
+# Kubernetes: restart to load changed environment variables
+kubectl -n crowdsec rollout restart deployment/cs-unifi-bouncer-pro
 ```
 
 On receipt, the daemon performs a **validate-then-commit** reload:
 
+SIGHUP reloads the process's current environment. Changes to `.env` or a Kubernetes Secret require a container or pod restart.
+
 1. Re-reads the configuration from environment variables
 2. Invalidates the stale zone ID cache so the next resolution hits the API
 3. Resolves all new zone names → UUIDs into a **staging map** against the live controller
-4. If every zone resolves successfully, atomically commits the new pairs and updated cache
-5. If any resolution fails (zone name not found, controller unreachable), the **existing configuration stays active** and an error is logged — no partial updates are applied
+4. Creates the required port and destination IP filters, then commits the new pairs and cache
+5. Reconciles block policies immediately, creating missing policies and removing policies for deleted pairs
+6. If zone or filter setup fails, the **existing configuration stays active** and an error is logged
+
+Filter changes stage a new block policy before removing the old one. If policy reconciliation fails after the configuration commits, the error is logged and the next reconciliation retries; some pairs may already have updated.
 
 Only zone pair changes (`ZONE_PAIRS`) are applied via SIGHUP. All other config changes require a restart. In legacy mode, SIGHUP is a no-op (logged as a warning).
 
@@ -575,7 +587,7 @@ Only zone pair changes (`ZONE_PAIRS`) are applied via SIGHUP. All other config c
 - Runs as UID 65532 (`nonroot`) in a distroless container — no shell, no package manager
 - `cap_drop: ALL` in `docker-compose.yml` — all Linux capabilities dropped
 - `read_only: true` — root filesystem is immutable; only `/tmp` and the data volume are writable
-- Custom seccomp profile (`security/seccomp-unifi.json`) — 78-syscall allowlist, all others return `EPERM`
+- Custom seccomp profile (`security/seccomp-unifi.json`) — only listed syscalls are allowed; all others return `EPERM`
 - `no-new-privileges:true` — prevents privilege escalation via setuid binaries
 - `RedactWriter` masks all secrets from logs before they are written to stdout
 - `_FILE` variants for all sensitive config — compatible with Docker secrets and Kubernetes secrets

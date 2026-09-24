@@ -1,6 +1,3 @@
-# ==============================================================================
-# cs-unifi-bouncer-pro — .gitignore
-# ==============================================================================
 .env
 .env.*
 !.env.example
@@ -10,7 +7,6 @@ docker-compose.override.yml
 *.db
 *.db.lock
 /data/
-!data/.gitkeep
 /cs-unifi-bouncer-pro
 /cs-unifi-bouncer-pro.exe
 /bouncer
@@ -25,10 +21,18 @@ dist/
 *.test.exe
 coverage.out
 coverage.html
+coverage/
+*.cover
 *.prof
 cpu.prof
 mem.prof
 vendor/
+/.go-cache/
+/.cache/
+/test-results/
+/.review/
+review-output*
+*.log
 docker-compose.local.yml
 docker-compose.secrets.yml
 .vscode/
@@ -40,21 +44,6 @@ docker-compose.secrets.yml
 *~
 \#*\#
 .\#*
-CLAUDE.md
-.claude/
-.cursor/
-.aider*
-.aider.conf.yml
-.copilot/
-.github/copilot-instructions.md
-.windsurf/
-GEMINI.md
-.gemini/
-.openai/
-.qodo/
-.aws/amazonq/
-AI_NOTES.md
-ai-notes.md
 .DS_Store
 .AppleDouble
 .LSOverride
@@ -64,13 +53,10 @@ Thumbs.db
 ehthumbs.db
 $RECYCLE.BIN/
 *.lnk
-.nfs* ------------------------------------------------------------------------------
+.nfs*
 *.tmp
 *.bak
 *.orig
 *.rej
 scratch/
 tmp/
-smoke-test-output.txt
-scripts/smoke-test.sh
-legacy/

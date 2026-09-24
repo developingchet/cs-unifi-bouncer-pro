@@ -48,11 +48,11 @@
    kubectl -n crowdsec logs -l app=cs-unifi-bouncer-pro -f
    ```
 
-## Hot-Reload
+## Configuration Reload
 
-Zone pair configuration can be reloaded without a full pod restart by sending SIGHUP:
+Restart the pod after changing its Secret or environment variables:
 ```bash
-kubectl -n crowdsec exec -it deploy/cs-unifi-bouncer-pro -- kill -HUP 1
+kubectl -n crowdsec rollout restart deployment/cs-unifi-bouncer-pro
 ```
 
 ## Prometheus Scraping

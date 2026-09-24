@@ -8,11 +8,71 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
 )
+
+func TestDryRunClientRefusesControllerWrites(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	ctrl, err := NewClient(context.Background(), ClientConfig{
+		BaseURL: server.URL, APIKey: "test", VerifyTLS: true,
+		Timeout: time.Second, DryRun: true,
+	}, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ctrl.Close()
+	_, err = ctrl.CreateFirewallGroup(context.Background(), "default", FirewallGroup{Name: "blocked"})
+	if err == nil || !strings.Contains(err.Error(), "dry run") {
+		t.Fatalf("write was not rejected: %v", err)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("dry run sent %d controller requests", requests.Load())
+	}
+}
+
+func TestControllerRedirectDoesNotForwardCredentials(t *testing.T) {
+	var redirected atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirected.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+
+	t.Run("API key", func(t *testing.T) {
+		ctrl, err := NewClient(context.Background(), ClientConfig{BaseURL: source.URL, APIKey: "secret", Timeout: time.Second}, zerolog.Nop())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ctrl.Close()
+		if err := ctrl.Ping(context.Background()); err == nil {
+			t.Fatal("redirected controller request should fail")
+		}
+	})
+	t.Run("login", func(t *testing.T) {
+		ctrl, err := NewClient(context.Background(), ClientConfig{BaseURL: source.URL, Username: "admin", Password: "secret", Timeout: time.Second}, zerolog.Nop())
+		if err == nil {
+			ctrl.Close()
+			t.Fatal("redirected login should fail")
+		}
+	})
+	if got := redirected.Load(); got != 0 {
+		t.Fatalf("redirect target received %d requests", got)
+	}
+}
 
 // newTestClient builds a *unifiClient directly, skipping EnsureAuth.
 // It is shared by client_test.go, version_test.go, and api_test.go.
@@ -381,23 +441,19 @@ func TestPing_Success(t *testing.T) {
 	}
 }
 
-// TestPing_ReturnsError verifies that Ping surfaces errors when /api/self fails.
+// TestPing_ReturnsError verifies unhandled HTTP failures cannot be mistaken
+// for successful controller writes or a healthy controller.
 func TestPing_ReturnsError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Return 500 — not a typed API error, but not 200 either.
-		// apiDo passes 5xx through to the caller, so Ping should get a non-nil
-		// response with status 500. However, since apiDo only translates
-		// 401/404/429/409, a 500 is returned as a successful resp.
-		// Ping does not inspect the status beyond what apiDo filters,
-		// so to get an error we use 401 which becomes ErrUnauthorized,
-		// then re-auth also fails (returning 401), so withReauth returns an error.
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer srv.Close()
-
-	c := newTestClient(srv.URL, "api-key")
-	err := c.Ping(context.Background())
-	if err == nil {
-		t.Fatal("expected Ping to return an error, got nil")
+	for _, status := range []int{http.StatusForbidden, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+			c := newTestClient(srv.URL, "api-key")
+			if err := c.Ping(context.Background()); err == nil {
+				t.Fatalf("Ping returned nil for HTTP %d", status)
+			}
+		})
 	}
 }

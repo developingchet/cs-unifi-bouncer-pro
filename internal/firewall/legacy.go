@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
@@ -39,8 +40,8 @@ func NewLegacyManager(cfg LegacyConfig, namer *Namer, ctrl controller.Controller
 
 // EnsureRules idempotently creates drop rules for each group shard.
 // If the rule already exists (from bbolt policy cache), it verifies and updates it.
-// After ensuring active shards, it sweeps for orphaned rules: any rule bearing
-// the managed description that is no longer for a current shard is deleted.
+// After ensuring active shards, it sweeps for orphaned rules with the managed
+// description and ownership evidence from the cache or static name prefix.
 // This catches rules left by removed shards, mode switches, or a wiped bbolt.
 func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards, v6Shards *ShardManager) error {
 	// Fetch ALL existing rules once for all families (avoids one GET per family).
@@ -48,9 +49,9 @@ func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards,
 	if err != nil {
 		return err
 	}
-	existingByID := make(map[string]bool, len(existingRules))
+	existingByID := make(map[string]controller.FirewallRule, len(existingRules))
 	for _, r := range existingRules {
-		existingByID[r.ID] = true
+		existingByID[r.ID] = r
 	}
 
 	// Build the set of rule names expected by the current config before ensuring,
@@ -63,8 +64,8 @@ func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards,
 		if entry.sm == nil {
 			continue
 		}
-		for i := range entry.sm.GroupIDs() {
-			name, nameErr := lm.namer.RuleName(NameData{Family: Family(entry.ipv6), Index: i, Site: site})
+		for _, ref := range entry.sm.GroupRefs() {
+			name, nameErr := lm.namer.RuleName(NameData{Family: Family(entry.ipv6), Index: ref.Index, Site: site})
 			if nameErr == nil {
 				expectedRuleNames[name] = true
 			}
@@ -80,8 +81,8 @@ func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards,
 		}
 	}
 
-	// API-level orphan sweep: delete any pre-existing rule with our description
-	// that isn't for a currently-active shard. Uses existingRules (the snapshot
+	// API-level orphan sweep: delete owned pre-existing rules that are no longer
+	// for an active shard. Uses existingRules (the snapshot
 	// taken before any creates above) so newly-created rules are never swept.
 	// Guards: description, action, ruleset, and non-empty source group must all
 	// match what the bouncer creates — a rule the bouncer couldn't have made is
@@ -89,6 +90,15 @@ func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards,
 	for _, r := range existingRules {
 		if r.Description != lm.cfg.Description {
 			continue
+		}
+		if prefix := lm.namer.RulePrefix(); prefix == "" || !strings.HasPrefix(r.Name, prefix) {
+			cached, err := getCachedPolicy(lm.store, site, r.Name)
+			if err != nil {
+				return fmt.Errorf("check rule ownership %s: %w", r.Name, err)
+			}
+			if cached == nil || cached.UnifiID != r.ID || cached.Site != site || cached.Mode != "legacy" {
+				continue
+			}
 		}
 		if r.Action != lm.cfg.BlockAction {
 			continue // the bouncer only creates rules with the configured block action
@@ -105,16 +115,19 @@ func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards,
 		if delErr := lm.ctrl.DeleteFirewallRule(ctx, site, r.ID); delErr != nil {
 			lm.log.Warn().Err(delErr).Str("rule", r.Name).Str("site", site).
 				Msg("failed to delete API-orphaned legacy rule")
+			continue
 		} else {
 			lm.log.Info().Str("rule", r.Name).Str("site", site).
 				Msg("deleted API-orphaned legacy rule (matches managed description, not in current config)")
 		}
-		_ = lm.store.DeletePolicy(r.Name)
+		if err := deleteCachedPolicy(lm.store, site, r.Name); err != nil {
+			return fmt.Errorf("remove orphaned rule %s from cache: %w", r.Name, err)
+		}
 	}
 	return nil
 }
 
-func (lm *LegacyManager) ensureRulesForFamily(ctx context.Context, site string, ipv6 bool, existingByID map[string]bool, sm *ShardManager) error {
+func (lm *LegacyManager) ensureRulesForFamily(ctx context.Context, site string, ipv6 bool, existingByID map[string]controller.FirewallRule, sm *ShardManager) error {
 	family := Family(ipv6)
 	ruleset := lm.cfg.RulesetV4
 	indexStart := lm.cfg.RuleIndexStartV4
@@ -123,23 +136,57 @@ func (lm *LegacyManager) ensureRulesForFamily(ctx context.Context, site string, 
 		indexStart = lm.cfg.RuleIndexStartV6
 	}
 
-	groupIDs := sm.GroupIDs()
+	groupRefs := sm.GroupRefs()
 
 	firstCreate := true
-	for i, groupID := range groupIDs {
+	for _, ref := range groupRefs {
+		i, groupID := ref.Index, ref.ID
 		ruleName, err := lm.namer.RuleName(NameData{Family: family, Index: i, Site: site})
 		if err != nil {
 			return err
 		}
 
-		existing, lookupErr := lm.store.GetPolicy(ruleName)
+		existing, lookupErr := getCachedPolicy(lm.store, site, ruleName)
 		if lookupErr != nil {
 			return fmt.Errorf("lookup policy %s: %w", ruleName, lookupErr)
 		}
+		if existing == nil || existing.UnifiID == "" || existingByID[existing.UnifiID].ID == "" {
+			for _, candidate := range existingByID {
+				if candidate.Name != ruleName {
+					continue
+				}
+				if candidate.Description != lm.cfg.Description {
+					return fmt.Errorf("rule %s exists with a different description", ruleName)
+				}
+				if err := setCachedPolicy(lm.store, site, ruleName, storage.PolicyRecord{UnifiID: candidate.ID, Site: site, Mode: "legacy"}); err != nil {
+					return fmt.Errorf("cache existing rule %s: %w", ruleName, err)
+				}
+				existing = &storage.PolicyRecord{UnifiID: candidate.ID, Site: site, Mode: "legacy"}
+				break
+			}
+		}
 
-		if existing != nil && existing.UnifiID != "" && existingByID[existing.UnifiID] {
-			lm.log.Debug().Str("rule", ruleName).Msg("legacy rule already exists")
-			continue
+		if existing != nil && existing.UnifiID != "" {
+			if apiRule, found := existingByID[existing.UnifiID]; found {
+				if apiRule.Name != ruleName {
+					return fmt.Errorf("cached rule %s points to different API rule %s", ruleName, apiRule.Name)
+				}
+				if legacyRuleNeedsUpdate(apiRule, groupID, indexStart+i, ruleset, lm.cfg) {
+					apiRule.Enabled = true
+					apiRule.RuleIndex = indexStart + i
+					apiRule.Action = lm.cfg.BlockAction
+					apiRule.Ruleset = ruleset
+					apiRule.Description = lm.cfg.Description
+					apiRule.Logging = lm.cfg.LogDrops
+					apiRule.Protocol = "all"
+					apiRule.SrcFirewallGroupIDs = []string{groupID}
+					if err := lm.ctrl.UpdateFirewallRule(ctx, site, apiRule); err != nil {
+						return fmt.Errorf("update legacy rule %s: %w", ruleName, err)
+					}
+					existingByID[apiRule.ID] = apiRule
+				}
+				continue
+			}
 		}
 
 		// Apply delay between consecutive creates (not before the first one)
@@ -172,18 +219,18 @@ func (lm *LegacyManager) ensureRulesForFamily(ctx context.Context, site string, 
 				if id := lm.findExistingRuleByName(ctx, site, ruleName); id != "" {
 					lm.log.Warn().Str("rule", ruleName).Str("id", id).
 						Msg("legacy rule already exists (409 conflict); recovering existing ID")
-					if storeErr := lm.store.SetPolicy(ruleName, storage.PolicyRecord{UnifiID: id, Site: site, Mode: "legacy"}); storeErr != nil {
+					if storeErr := setCachedPolicy(lm.store, site, ruleName, storage.PolicyRecord{UnifiID: id, Site: site, Mode: "legacy"}); storeErr != nil {
 						lm.log.Warn().Err(storeErr).Str("rule", ruleName).Msg("failed to cache recovered rule in bbolt")
 					}
-					existingByID[id] = true
+					existingByID[id] = controller.FirewallRule{ID: id, Name: ruleName}
 					continue
 				}
 			}
 			return fmt.Errorf("create legacy rule %s: %w", ruleName, err)
 		}
-		existingByID[created.ID] = true
+		existingByID[created.ID] = created
 
-		if err := lm.store.SetPolicy(ruleName, storage.PolicyRecord{
+		if err := setCachedPolicy(lm.store, site, ruleName, storage.PolicyRecord{
 			UnifiID: created.ID,
 			Site:    site,
 			Mode:    "legacy",
@@ -194,6 +241,13 @@ func (lm *LegacyManager) ensureRulesForFamily(ctx context.Context, site string, 
 		lm.log.Info().Str("name", ruleName).Str("id", created.ID).Int("index", rule.RuleIndex).Msg("created legacy firewall rule")
 	}
 	return nil
+}
+
+func legacyRuleNeedsUpdate(rule controller.FirewallRule, groupID string, index int, ruleset string, cfg LegacyConfig) bool {
+	return !rule.Enabled || rule.RuleIndex != index || rule.Action != cfg.BlockAction ||
+		rule.Ruleset != ruleset || rule.Description != cfg.Description ||
+		rule.Logging != cfg.LogDrops || rule.Protocol != "all" ||
+		len(rule.SrcFirewallGroupIDs) != 1 || rule.SrcFirewallGroupIDs[0] != groupID
 }
 
 // EnsureRuleForShard creates the firewall rule for a single new shard if it doesn't already exist.
@@ -212,7 +266,7 @@ func (lm *LegacyManager) EnsureRuleForShard(ctx context.Context, site, groupID s
 		return err
 	}
 
-	existing, lookupErr := lm.store.GetPolicy(ruleName)
+	existing, lookupErr := getCachedPolicy(lm.store, site, ruleName)
 	if lookupErr != nil {
 		return fmt.Errorf("lookup policy %s: %w", ruleName, lookupErr)
 	}
@@ -250,7 +304,7 @@ func (lm *LegacyManager) EnsureRuleForShard(ctx context.Context, site, groupID s
 			if id := lm.findExistingRuleByName(ctx, site, ruleName); id != "" {
 				lm.log.Warn().Str("rule", ruleName).Str("id", id).
 					Msg("legacy rule already exists (409 conflict); recovering existing ID")
-				if storeErr := lm.store.SetPolicy(ruleName, storage.PolicyRecord{UnifiID: id, Site: site, Mode: "legacy"}); storeErr != nil {
+				if storeErr := setCachedPolicy(lm.store, site, ruleName, storage.PolicyRecord{UnifiID: id, Site: site, Mode: "legacy"}); storeErr != nil {
 					lm.log.Warn().Err(storeErr).Str("rule", ruleName).Msg("failed to cache recovered rule in bbolt")
 				}
 				lm.log.Info().Str("name", ruleName).Str("id", id).
@@ -261,7 +315,7 @@ func (lm *LegacyManager) EnsureRuleForShard(ctx context.Context, site, groupID s
 		return fmt.Errorf("create legacy rule %s: %w", ruleName, err)
 	}
 
-	if err := lm.store.SetPolicy(ruleName, storage.PolicyRecord{
+	if err := setCachedPolicy(lm.store, site, ruleName, storage.PolicyRecord{
 		UnifiID: created.ID,
 		Site:    site,
 		Mode:    "legacy",
@@ -284,7 +338,7 @@ func (lm *LegacyManager) DeleteRuleForShard(ctx context.Context, site string, ip
 		return err
 	}
 
-	existing, lookupErr := lm.store.GetPolicy(ruleName)
+	existing, lookupErr := getCachedPolicy(lm.store, site, ruleName)
 	if lookupErr != nil {
 		return fmt.Errorf("lookup policy %s: %w", ruleName, lookupErr)
 	}
@@ -297,7 +351,7 @@ func (lm *LegacyManager) DeleteRuleForShard(ctx context.Context, site string, ip
 		return fmt.Errorf("delete legacy rule %s: %w", ruleName, err)
 	}
 
-	if err := lm.store.DeletePolicy(ruleName); err != nil {
+	if err := deleteCachedPolicy(lm.store, site, ruleName); err != nil {
 		lm.log.Warn().Err(err).Str("rule", ruleName).Msg("failed to delete policy from bbolt")
 	}
 
@@ -311,19 +365,23 @@ func (lm *LegacyManager) DeleteRules(ctx context.Context, site string) error {
 	if err != nil {
 		return err
 	}
+	var errs []error
 	for name, rec := range policies {
 		if rec.Site != site || rec.Mode != "legacy" {
 			continue
 		}
 		if err := lm.ctrl.DeleteFirewallRule(ctx, site, rec.UnifiID); err != nil {
-			lm.log.Warn().Err(err).Str("rule", name).Msg("failed to delete legacy rule")
-			continue
+			var missing *controller.ErrNotFound
+			if !errors.As(err, &missing) {
+				errs = append(errs, fmt.Errorf("delete legacy rule %s: %w", name, err))
+				continue
+			}
 		}
 		if err := lm.store.DeletePolicy(name); err != nil {
-			lm.log.Warn().Err(err).Str("rule", name).Msg("failed to delete policy from bbolt")
+			errs = append(errs, fmt.Errorf("remove legacy rule %s from storage: %w", name, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // findExistingRuleByName queries the UniFi API for a firewall rule with the given name.

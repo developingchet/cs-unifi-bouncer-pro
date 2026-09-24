@@ -53,12 +53,14 @@ func IsIPv6(value string) bool {
 // IsPrivate returns true if the IP/CIDR is RFC1918, loopback, link-local, or ULA.
 func IsPrivate(value string) bool {
 	var ip net.IP
+	var network *net.IPNet
 	if strings.Contains(value, "/") {
-		parsedIP, _, err := net.ParseCIDR(value)
+		parsedIP, parsedNetwork, err := net.ParseCIDR(value)
 		if err != nil {
 			return false
 		}
 		ip = parsedIP
+		network = parsedNetwork
 	} else {
 		ip = net.ParseIP(value)
 	}
@@ -70,7 +72,7 @@ func IsPrivate(value string) bool {
 	ip16 := ip.To16()
 
 	for _, block := range privateBlocks {
-		if block.Contains(ip16) {
+		if block.Contains(ip16) || (network != nil && networksOverlap(network, block)) {
 			return true
 		}
 	}
@@ -112,13 +114,14 @@ var privateBlocks = func() []*net.IPNet {
 // IsWhitelisted checks if ip is covered by any of the whitelist CIDR entries.
 func IsWhitelisted(ip string, whitelist []*net.IPNet) bool {
 	var parsed net.IP
+	var network *net.IPNet
 	if strings.Contains(ip, "/") {
-		// For CIDR decisions, check if the network address is whitelisted
-		p, _, err := net.ParseCIDR(ip)
+		p, parsedNetwork, err := net.ParseCIDR(ip)
 		if err != nil {
 			return false
 		}
 		parsed = p
+		network = parsedNetwork
 	} else {
 		parsed = net.ParseIP(ip)
 		if parsed == nil {
@@ -127,11 +130,17 @@ func IsWhitelisted(ip string, whitelist []*net.IPNet) bool {
 	}
 
 	for _, wl := range whitelist {
-		if wl.Contains(parsed) {
+		if wl.Contains(parsed) || (network != nil && networksOverlap(network, wl)) {
 			return true
 		}
 	}
 	return false
+}
+
+// networksOverlap reports whether either network contains the other's base IP.
+// CIDR blocks are contiguous, so this detects every overlap for like families.
+func networksOverlap(a, b *net.IPNet) bool {
+	return a.Contains(b.IP) || b.Contains(a.IP)
 }
 
 // ParseWhitelist parses a slice of IP/CIDR strings into net.IPNet entries.

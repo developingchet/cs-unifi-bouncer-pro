@@ -142,3 +142,26 @@ func TestFetchIPv4_IgnoresEmptyLines(t *testing.T) {
 		t.Errorf("expected 2 CIDRs, got %d", len(cidrs))
 	}
 }
+
+func TestCloudflareProviderRejectsInvalidFeed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "invalid CIDR", body: "not-an-ip\n"},
+		{name: "wrong family", body: "2001:db8::/32\n"},
+		{name: "empty", body: "# no ranges\n"},
+		{name: "oversized", body: strings.Repeat("#", 64*1024+1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			provider := NewCloudflareProvider(srv.URL, "")
+			if _, err := provider.FetchIPv4(context.Background()); err == nil {
+				t.Fatal("expected invalid feed to be rejected")
+			}
+		})
+	}
+}

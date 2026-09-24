@@ -612,9 +612,8 @@ func TestFakeServer_CSRFTokenRotation(t *testing.T) {
 	}
 }
 
-// TestFakeServer_PolicyWithTrafficFilter verifies that a ZonePolicy created
-// with a TrafficMatchingListID survives a full Create→List round-trip
-// (validates Phase B fakePolicy TrafficFilter preservation).
+// TestFakeServer_PolicyWithTrafficFilter checks that the list endpoint returns
+// the traffic filter saved during policy creation.
 func TestFakeServer_PolicyWithTrafficFilter(t *testing.T) {
 	s := testutil.NewFakeUnifiServer()
 	defer s.Close()

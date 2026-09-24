@@ -107,6 +107,74 @@ func TestLegacyManager_EnsureRules_Idempotent(t *testing.T) {
 	}
 }
 
+func TestLegacyManager_RepairsSparseShardRuleReference(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	ctrl.SetGroups(testSite, []controller.FirewallGroup{
+		{ID: "group-0", Name: "crowdsec-block-v4-0", GroupMembers: []string{"1.1.1.1"}},
+		{ID: "group-3", Name: "crowdsec-block-v4-3", GroupMembers: []string{"2.2.2.2"}},
+	})
+	ctrl.SetRules(testSite, []controller.FirewallRule{{
+		ID: "rule-3", Name: "crowdsec-drop-v4-3", Enabled: true,
+		RuleIndex: 22003, Action: "drop", Ruleset: "WAN_IN", Description: "test",
+		Protocol: "all", SrcFirewallGroupIDs: []string{"group-0"},
+	}})
+	if err := store.SetPolicy("crowdsec-drop-v4-3", storage.PolicyRecord{UnifiID: "rule-3", Site: testSite, Mode: "legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	v4 := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
+	if err := v4.EnsureShards(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lm := newTestLegacyManager(ctrl, store, testNamer(t))
+	if err := lm.EnsureRules(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := ctrl.ListFirewallRules(ctx, testSite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range rules {
+		if rule.Name == "crowdsec-drop-v4-3" {
+			if len(rule.SrcFirewallGroupIDs) != 1 || rule.SrcFirewallGroupIDs[0] != "group-3" {
+				t.Fatalf("sparse shard rule still points at wrong group: %+v", rule)
+			}
+			return
+		}
+	}
+	t.Fatal("missing rule for sparse shard 3")
+}
+
+func TestLegacyManager_AdoptsAndRepairsRuleWithoutCache(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	ctrl.SetGroups(testSite, []controller.FirewallGroup{{
+		ID: "group-3", Name: "crowdsec-block-v4-3", GroupMembers: []string{"2.2.2.2"},
+	}})
+	ctrl.SetRules(testSite, []controller.FirewallRule{{
+		ID: "rule-3", Name: "crowdsec-drop-v4-3", Description: "test",
+		Enabled: true, RuleIndex: 22003, Action: "drop", Ruleset: "WAN_IN",
+		Protocol: "all", SrcFirewallGroupIDs: []string{"old-group"},
+	}})
+	v4 := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
+	if err := v4.EnsureShards(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lm := newTestLegacyManager(ctrl, store, testNamer(t))
+	if err := lm.EnsureRules(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := ctrl.ListFirewallRules(ctx, testSite)
+	if err != nil || len(rules) != 1 || len(rules[0].SrcFirewallGroupIDs) != 1 || rules[0].SrcFirewallGroupIDs[0] != "group-3" {
+		t.Fatalf("rule was not repaired: %+v, %v", rules, err)
+	}
+	if ctrl.Calls("CreateFirewallRule") != 0 {
+		t.Fatal("existing rule was recreated")
+	}
+}
+
 func TestLegacyManager_EnsureRules_RecreatesDeleted(t *testing.T) {
 	ctrl := testutil.NewMockController()
 	store := newBboltStore(t)
@@ -350,7 +418,15 @@ func TestLegacyManager_EnsureRules_UnmanagedAPIRule_Preserved(t *testing.T) {
 		Ruleset:     "WAN_IN",
 		Action:      "drop",
 	}
-	ctrl.SetRules(testSite, []controller.FirewallRule{userRule})
+	otherRule := controller.FirewallRule{
+		ID:                  "unrelated-rule-id",
+		Name:                "unrelated-rule",
+		Description:         "test",
+		Ruleset:             "WAN_IN",
+		Action:              "drop",
+		SrcFirewallGroupIDs: []string{"some-group-id"},
+	}
+	ctrl.SetRules(testSite, []controller.FirewallRule{userRule, otherRule})
 
 	if err := lm.EnsureRules(context.Background(), testSite, v4, nil); err != nil {
 		t.Fatalf("EnsureRules: %v", err)

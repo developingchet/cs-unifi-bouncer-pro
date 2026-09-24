@@ -112,7 +112,7 @@ All three must be set and non-empty. `UNIFI_URL` and `CROWDSEC_LAPI_URL` must in
    ```bash
    curl -k https://192.168.1.1 -o /dev/null -w "%{http_code}"
    ```
-2. `UNIFI_VERIFY_TLS` defaults to `false` (most controllers use self-signed certs). If you have enabled it, either set it back to `false` or provide a valid CA bundle via `UNIFI_CA_CERT`.
+2. `UNIFI_VERIFY_TLS` defaults to `true`. For a private controller certificate, provide its CA bundle via `UNIFI_CA_CERT`.
 
 ---
 
@@ -384,11 +384,12 @@ Common causes and fixes:
 **Fix:**
 
 ```bash
-# 1. Drain all managed policies
-docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro drain --force
+# 1. Stop the daemon to release the bbolt lock, then drain managed objects
+docker compose stop cs-unifi-bouncer-pro
+docker compose run --rm --no-deps cs-unifi-bouncer-pro drain --force
 
 # 2. Restart — ALLOW policies are created first (startup sync), then block shard policies
-docker compose up -d --force-recreate cs-unifi-bouncer-pro
+docker compose up -d cs-unifi-bouncer-pro
 ```
 
 ### Port filter TML not applied to whitelist policy
@@ -403,7 +404,7 @@ docker logs cs-unifi-bouncer-pro | grep -E "cloudflare.*port|ensure.*port TML"
 
 If you see `ensure src port TML failed` or `ensure dst port TML failed`, the port TML creation failed. Check for controller connectivity errors.
 
-**Fix:** If the TML could not be created, the ALLOW policy is still created but without a port filter. Restart the bouncer to retry TML creation.
+**Fix:** A failed port TML creation stops whitelist sync before an ALLOW policy is created. Correct the controller error and restart the bouncer to retry.
 
 ---
 
@@ -485,7 +486,9 @@ docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro validate
 docker logs cs-unifi-bouncer-pro | grep '"action":"unban"'
 
 # Force a reconcile
-docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro reconcile
+docker compose stop cs-unifi-bouncer-pro
+docker compose run --rm --no-deps cs-unifi-bouncer-pro reconcile
+docker compose up -d cs-unifi-bouncer-pro
 ```
 
 The reconcile command compares bbolt state with the current UniFi firewall state and removes any IPs not in the active ban list.
@@ -498,12 +501,12 @@ The reconcile command compares bbolt state with the current UniFi firewall state
 
 **Cause:** In versions before v1.1.2 the bouncer did not sweep for orphaned managed objects. Starting with v1.1.2, orphan cleanup runs automatically. v1.2.2 extends this with API-level sweeps that work even when the bbolt database has no record of the object.
 
-- **Block policies** (`ZONE_PAIRS`): at every `EnsurePolicies` call, policies tracked in bbolt for the site but no longer produced by the current config are deleted from UniFi and removed from bbolt. Since v1.2.2, a second API-level pass also sweeps any policy bearing the managed description and `BLOCK` action that is not in the expected set — catching orphans from a wiped database, a mode switch (zone→legacy or back), or a prior installation.
-- **Legacy rules**: since v1.2.2, `EnsureRules` sweeps for orphaned rules with the managed description, the configured block action (drop/reject), a ruleset in `WAN_IN`/`WANv6_IN`, and a non-empty source group — the combination of fields the bouncer always sets when creating a rule.
+- **Block policies** (`ZONE_PAIRS`): at every `EnsurePolicies` call, policies tracked in bbolt for the site but no longer produced by the current config are deleted from UniFi and removed from bbolt. An API-level pass also sweeps unmatched `BLOCK` policies with the managed description and static name prefix. Templates without a static prefix rely on the bbolt record for ownership.
+- **Legacy rules**: `EnsureRules` sweeps orphaned rules with the managed description, static name prefix or matching bbolt record, configured block action, managed ruleset, and a non-empty source group.
 - **Cloudflare ALLOW policies** (`CLOUDFLARE_ZONE_PAIRS`): at every Cloudflare sync, policies with the managed description and naming prefix (`crowdsec-whitelist-cloudflare-`) that are no longer in `CLOUDFLARE_ZONE_PAIRS` are deleted. Since v1.1.8, orphan detection is ID-based: only the exact policy returned by the ensure call is protected, so stale duplicate-named policies are also correctly removed. Since v1.2.2, setting `CLOUDFLARE_WHITELIST_ENABLED=false` automatically drains **all** Cloudflare whitelist policies and TMLs on startup — no manual cleanup needed when disabling the feature.
 - **Port-filter TMLs** (both `ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS`): TMLs named `crowdsec-ports-src-*`, `crowdsec-ports-dst-*`, `crowdsec-whitelist-cloudflare-srcports-*`, and `crowdsec-whitelist-cloudflare-dstports-*` that no longer correspond to a configured zone pair are deleted.
 
-The cleanup only targets objects that bear the bouncer's managed description **and** match the structural signature of what the bouncer creates (action, ruleset, source group). User-created policies are never touched.
+The cleanup requires ownership evidence from the cache or a static name prefix along with the managed description and expected rule shape. Keep custom name templates distinct from names used for manual policies.
 
 **Action (upgrade from < v1.1.2):** Restart the bouncer after upgrading. The orphan sweep runs at startup and will remove the stale objects automatically. No manual deletion is needed.
 
@@ -518,7 +521,7 @@ The cleanup only targets objects that bear the bouncer's managed description **a
 **Fix:**
 
 1. Delete the old firewall groups and rules manually from the UniFi console
-2. Run `docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro reconcile` to rebuild under the new names
+2. Stop the daemon, run `docker compose run --rm --no-deps cs-unifi-bouncer-pro reconcile`, then restart with `docker compose up -d cs-unifi-bouncer-pro`
 
 ---
 

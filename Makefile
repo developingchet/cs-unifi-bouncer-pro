@@ -17,7 +17,7 @@ clean:
 	rm -rf dist/
 
 docker-build:
-	docker compose build
+	docker build -t cs-unifi-bouncer-pro:local .
 
 docker-test: docker-build
 	@echo "==> Seccomp sanity check (Alpine)..."
@@ -40,7 +40,7 @@ docker-test: docker-build
 	  -e UNIFI_API_KEY=test-api-key \
 	  -e CROWDSEC_LAPI_URL=http://no-such-host:8080 \
 	  -e CROWDSEC_LAPI_KEY=test-lapi-key \
-	  developingchet/cs-unifi-bouncer-pro:latest 2>&1) || true; \
+	  cs-unifi-bouncer-pro:local 2>&1) || true; \
 	set -e; \
 	echo "$$output"; \
 	if echo "$$output" | grep -qE "reopen exec fifo|error closing exec fds"; then \

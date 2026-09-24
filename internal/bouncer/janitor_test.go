@@ -26,16 +26,19 @@ func newJanitorTestStore(t *testing.T) storage.Store {
 // nopFWManager satisfies firewall.Manager with no-op implementations for janitor tests.
 type nopFWManager struct{}
 
-func (nopFWManager) ApplyBan(_ context.Context, _, _ string, _ bool) error                              { return nil }
-func (nopFWManager) ApplyBanWithZones(_ context.Context, _, _ string, _ bool, _ []config.ZonePair) error { return nil }
-func (nopFWManager) ApplyUnban(_ context.Context, _, _ string, _ bool) error                            { return nil }
+func (nopFWManager) ApplyBan(_ context.Context, _, _ string, _ bool) error { return nil }
+func (nopFWManager) ApplyBanWithZones(_ context.Context, _, _ string, _ bool, _ []config.ZonePair) error {
+	return nil
+}
+func (nopFWManager) ApplyUnban(_ context.Context, _, _ string, _ bool) error { return nil }
 func (nopFWManager) Reconcile(_ context.Context, _ []string) (*firewall.ReconcileResult, error) {
 	return &firewall.ReconcileResult{}, nil
 }
 func (nopFWManager) EnsureInfrastructure(_ context.Context, _ []string) error { return nil }
-func (nopFWManager) SyncDirty(_ context.Context, _ []string) error             { return nil }
-func (nopFWManager) Drain(_ context.Context, _ []string) error                 { return nil }
-func (nopFWManager) ZoneManager() *firewall.ZoneManager                        { return nil }
+func (nopFWManager) PrepareDrain(_ context.Context, _ []string) error         { return nil }
+func (nopFWManager) SyncDirty(_ context.Context, _ []string) error            { return nil }
+func (nopFWManager) Drain(_ context.Context, _ []string) error                { return nil }
+func (nopFWManager) ZoneManager() *firewall.ZoneManager                       { return nil }
 
 func newTestJanitor(store storage.Store, interval time.Duration) *Janitor {
 	return NewJanitor(store, nopFWManager{}, []string{"default"}, interval, zerolog.Nop())

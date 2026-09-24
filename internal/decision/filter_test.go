@@ -21,6 +21,24 @@ func makeDecision(action, scope, value, scenario, origin, duration string) *mode
 	}
 }
 
+func TestFilterMissingRequiredFields(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		decision *models.Decision
+	}{
+		{name: "nil decision"},
+		{name: "missing type", decision: &models.Decision{Scope: strPtr("ip"), Value: strPtr("1.2.3.4")}},
+		{name: "missing scope", decision: &models.Decision{Type: strPtr("ban"), Value: strPtr("1.2.3.4")}},
+		{name: "missing value", decision: &models.Decision{Type: strPtr("ban"), Scope: strPtr("ip")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if Filter(tc.decision, NewFilterConfig(), zerolog.Nop()).Passed {
+				t.Fatal("incomplete decision passed the filter")
+			}
+		})
+	}
+}
+
 func TestStage1_UnsupportedAction(t *testing.T) {
 	cfg := NewFilterConfig()
 	d := makeDecision("captcha", "ip", "1.2.3.4", "test", "crowdsec", "24h")

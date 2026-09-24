@@ -10,10 +10,12 @@ import (
 
 	"github.com/crowdsecurity/crowdsec/pkg/models"
 	csbouncer "github.com/crowdsecurity/go-cs-bouncer"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/lapihttp"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/rs/zerolog"
@@ -34,13 +36,14 @@ type Bouncer struct {
 	filterCfg decision.FilterConfig
 	log       zerolog.Logger
 	streamBnc *csbouncer.StreamBouncer
+	lapiHTTP  *http.Client
 	recorder  MetricsRecorder
 	limiter   *rate.Limiter // nil when rate limiting is disabled
 }
 
 // New constructs a fully wired Bouncer.
 func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
-	fwMgr firewall.Manager, recorder MetricsRecorder, log zerolog.Logger) (*Bouncer, error) {
+	fwMgr firewall.Manager, recorder MetricsRecorder, log zerolog.Logger, shared ...*banstate.Manager) (*Bouncer, error) {
 
 	whitelist, err := decision.ParseWhitelist(cfg.BlockWhitelist)
 	if err != nil {
@@ -54,7 +57,11 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 	filterCfg.MinBanDuration = cfg.BlockMinDuration
 	filterCfg.ScenarioDurationMap = cfg.BlockScenarioDurationMap
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, recorder, log)
+	handler := makeJobHandler(ctrl, store, fwMgr, cfg, recorder, log, shared...)
+	lapiClient, err := lapihttp.NewClient(cfg.CrowdSecLAPIVerifyTLS, cfg.CrowdSecLAPICACert, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("configure LAPI HTTP client: %w", err)
+	}
 
 	// StreamBouncer.TickerInterval is a string like "30s"
 	tickerStr := cfg.CrowdSecPollInterval.String()
@@ -62,6 +69,7 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 	streamBnc := &csbouncer.StreamBouncer{
 		APIKey:              cfg.CrowdSecLAPIKey,
 		APIUrl:              cfg.CrowdSecLAPIURL,
+		CAPath:              cfg.CrowdSecLAPICACert,
 		TickerInterval:      tickerStr,
 		InsecureSkipVerify:  &skipVerify,
 		UserAgent:           "crowdsec-unifi-bouncer/v" + BinaryVersion,
@@ -77,6 +85,7 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 		filterCfg: filterCfg,
 		log:       log,
 		streamBnc: streamBnc,
+		lapiHTTP:  lapiClient,
 		recorder:  recorder,
 	}
 	if cfg.DecisionRateLimit > 0 {
@@ -170,11 +179,20 @@ func (b *Bouncer) processStream(ctx context.Context) error {
 }
 
 func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.DecisionsStreamResponse) {
+	if decisions == nil {
+		b.log.Warn().Msg("ignoring empty CrowdSec decision block")
+		return
+	}
 	source := "stream"
 
 	for _, d := range decisions.New {
 		result := decision.Filter(d, b.filterCfg, b.log)
 		if !result.Passed {
+			continue
+		}
+		decisionID := decisionSource(d)
+		if decisionID == "" {
+			b.log.Warn().Str("ip", result.Value).Msg("skipping CrowdSec decision without ID or UUID")
 			continue
 		}
 		metrics.DecisionsProcessed.WithLabelValues("ban", source).Inc()
@@ -201,14 +219,16 @@ func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.Dec
 
 		metrics.DecisionsInFlight.Inc()
 		err := b.handler(ctx, SyncJob{
-			Action:          "ban",
-			IP:              result.Value,
-			IPv6:            result.IPv6,
-			ExpiresAt:       expiresAt(result.Duration),
-			Origin:          origin,
-			RemediationType: remType,
-			Scenario:        scenario,
-			ReceivedAt:      time.Now(),
+			Action:           "ban",
+			Source:           decisionID,
+			IP:               result.Value,
+			IPv6:             result.IPv6,
+			ExpiresAt:        expiresAt(result.Duration),
+			DurationOverride: result.DurationOverride,
+			Origin:           origin,
+			RemediationType:  remType,
+			Scenario:         scenario,
+			ReceivedAt:       time.Now(),
 		})
 		metrics.DecisionsInFlight.Dec()
 		if err != nil {
@@ -219,6 +239,11 @@ func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.Dec
 	for _, d := range decisions.Deleted {
 		result := decision.Filter(d, b.filterCfg, b.log)
 		if !result.Passed {
+			continue
+		}
+		decisionID := decisionSource(d)
+		if decisionID == "" {
+			b.log.Warn().Str("ip", result.Value).Msg("skipping CrowdSec deletion without ID or UUID")
 			continue
 		}
 		metrics.DecisionsProcessed.WithLabelValues("unban", source).Inc()
@@ -238,6 +263,7 @@ func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.Dec
 		metrics.DecisionsInFlight.Inc()
 		err := b.handler(ctx, SyncJob{
 			Action:   "delete",
+			Source:   decisionID,
 			IP:       result.Value,
 			IPv6:     result.IPv6,
 			Scenario: scenario,
@@ -247,6 +273,16 @@ func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.Dec
 			b.log.Error().Err(err).Str("ip", result.Value).Msg("failed to apply unban")
 		}
 	}
+}
+
+func decisionSource(d *models.Decision) string {
+	if d.ID != 0 {
+		return fmt.Sprintf("crowdsec:id:%d", d.ID)
+	}
+	if d.UUID != "" {
+		return "crowdsec:uuid:" + d.UUID
+	}
+	return ""
 }
 
 // serveMetrics runs the Prometheus HTTP server.
@@ -277,32 +313,7 @@ func (b *Bouncer) serveHealth(ctx context.Context) error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		if err := b.ctrl.Ping(r.Context()); err != nil {
-			b.log.Warn().Err(err).Msg("readyz: controller ping failed")
-			http.Error(w, "not ready", http.StatusServiceUnavailable)
-			return
-		}
-		if b.cfg.HealthCheckLAPI {
-			lapiURL := strings.TrimRight(b.cfg.CrowdSecLAPIURL, "/") + "/v1/ping"
-			lapiReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, lapiURL, nil)
-			if err == nil {
-				lapiReq.Header.Set("X-Api-Key", b.cfg.CrowdSecLAPIKey)
-				lapiClient := &http.Client{Timeout: 5 * time.Second}
-				lapiResp, lapiErr := lapiClient.Do(lapiReq)
-				if lapiErr != nil || lapiResp.StatusCode >= 500 {
-					if lapiResp != nil {
-						lapiResp.Body.Close()
-					}
-					http.Error(w, "lapi: unreachable", http.StatusServiceUnavailable)
-					return
-				}
-				lapiResp.Body.Close()
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ready"))
-	})
+	mux.HandleFunc("/readyz", b.ready)
 
 	srv := &http.Server{
 		Addr:              b.cfg.HealthAddr,
@@ -322,6 +333,35 @@ func (b *Bouncer) serveHealth(ctx context.Context) error {
 		return fmt.Errorf("health server: %w", err)
 	}
 	return nil
+}
+
+func (b *Bouncer) ready(w http.ResponseWriter, r *http.Request) {
+	if err := b.ctrl.Ping(r.Context()); err != nil {
+		b.log.Warn().Err(err).Msg("readyz: controller ping failed")
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return
+	}
+	if b.cfg.HealthCheckLAPI {
+		lapiURL := strings.TrimRight(b.cfg.CrowdSecLAPIURL, "/") + "/v1/decisions?limit=1"
+		lapiReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, lapiURL, nil)
+		if err != nil {
+			http.Error(w, "lapi: invalid URL", http.StatusServiceUnavailable)
+			return
+		}
+		lapiReq.Header.Set("X-Api-Key", b.cfg.CrowdSecLAPIKey)
+		lapiResp, err := b.lapiHTTP.Do(lapiReq)
+		if err != nil {
+			http.Error(w, "lapi: unreachable", http.StatusServiceUnavailable)
+			return
+		}
+		defer lapiResp.Body.Close()
+		if lapiResp.StatusCode != http.StatusOK {
+			http.Error(w, "lapi: unexpected status", http.StatusServiceUnavailable)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ready"))
 }
 
 func expiresAt(dur time.Duration) time.Time {

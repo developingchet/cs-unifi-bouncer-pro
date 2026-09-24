@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -52,12 +53,15 @@ func hasFeature(ctx context.Context, c *unifiClient, site, feature string) (bool
 }
 
 // detectZoneFirewall probes the integration v1 firewall zones endpoint.
-// Returns false if the site UUID cannot be resolved or the endpoint is unavailable.
+// Returns false only when integration v1 is unavailable.
 func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool, error) {
 	siteID, err := getSiteID(ctx, c, site)
 	if err != nil {
-		// Cannot resolve site UUID — integration v1 not available; fall back to legacy.
-		return false, nil //nolint:nilerr
+		var notFound *ErrNotFound
+		if errors.As(err, &notFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("resolve integration site %s: %w", site, err)
 	}
 
 	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/zones?limit=1",
@@ -181,7 +185,7 @@ func getZoneID(ctx context.Context, c *unifiClient, site, zoneName string) (stri
 		"zone %q not found on this controller.%s "+
 			"Available zones: [%s]. "+
 			"Zone names are case-sensitive — use exact names as shown in the UniFi UI, "+
-			"or provide zone UUIDs directly (e.g. ZONE_PAIRS=<src-uuid>-><dst-uuid>).",
+			"or provide zone UUIDs directly (e.g. ZONE_PAIRS=<src-uuid>-><dst-uuid>)",
 		zoneName, suggestion, strings.Join(available, ", "),
 	)
 }
@@ -204,7 +208,7 @@ func isStandardUUID(s string) bool {
 				return false
 			}
 		default:
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			if !isHexDigit(c) {
 				return false
 			}
 		}
@@ -218,9 +222,13 @@ func isMongoObjectID(s string) bool {
 		return false
 	}
 	for _, c := range s {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+		if !isHexDigit(c) {
 			return false
 		}
 	}
 	return true
+}
+
+func isHexDigit(c rune) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
 }

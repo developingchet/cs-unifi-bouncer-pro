@@ -2,12 +2,14 @@ package firewall
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/testutil"
 	"github.com/rs/zerolog"
 )
@@ -42,6 +44,116 @@ func newTestManager(t *testing.T, cfg ManagerConfig) (Manager, *testutil.MockCon
 	namer := managerTestNamer(t)
 	mgr := NewManager(cfg, ctrl, store, namer, zerolog.Nop())
 	return mgr, ctrl, store
+}
+
+func TestDrainRetainsFailedPolicyAndGroup(t *testing.T) {
+	ctx := context.Background()
+	mgr, ctrl, store := newTestManager(t, defaultManagerConfig())
+	groupName := "crowdsec-block-v4-0"
+	ruleName := "crowdsec-drop-v4-0"
+	ctrl.SetGroups(testSite, []controller.FirewallGroup{{ID: "group-1", Name: groupName, GroupType: "address-group", GroupMembers: []string{"198.51.100.10"}}})
+	ctrl.SetRules(testSite, []controller.FirewallRule{{ID: "rule-1", Name: ruleName}})
+	if err := store.SetGroup(groupName, storage.GroupRecord{UnifiID: "group-1", Site: testSite, Members: []string{"198.51.100.10"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetPolicy(ruleName, storage.PolicyRecord{UnifiID: "rule-1", Site: testSite, Mode: "legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.PrepareDrain(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl.SetError("DeleteFirewallRule", errors.New("controller unavailable"))
+	if err := mgr.Drain(ctx, []string{testSite}); err == nil {
+		t.Fatal("expected drain failure")
+	}
+	if got := ctrl.Calls("DeleteFirewallGroup"); got != 0 {
+		t.Fatalf("deleted %d groups while a rule still references them", got)
+	}
+	if rec, _ := store.GetPolicy(ruleName); rec == nil {
+		t.Fatal("failed policy lost from storage")
+	}
+	groups, err := store.ListGroups()
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("group lost from storage after failed drain: %+v, %v", groups, err)
+	}
+	if err := mgr.Drain(ctx, []string{testSite}); err != nil {
+		t.Fatalf("retry drain: %v", err)
+	}
+	if rec, _ := store.GetPolicy(ruleName); rec != nil {
+		t.Fatal("deleted policy remains in storage")
+	}
+	groups, err = store.ListGroups()
+	if err != nil || len(groups) != 0 {
+		t.Fatalf("deleted group remains in storage: %+v, %v", groups, err)
+	}
+}
+
+func TestDrainDeletesGroupFromPreviousMode(t *testing.T) {
+	ctx := context.Background()
+	mgr, ctrl, _ := newTestManager(t, defaultManagerConfig())
+	impl := mgr.(*managerImpl)
+	impl.siteMode[testSite] = "zone"
+	ctrl.SetGroups(testSite, []controller.FirewallGroup{{ID: "legacy-group", Name: "crowdsec-block-v4-0"}})
+	ctrl.SetError("DeleteTrafficMatchingList", &controller.ErrNotFound{})
+	if err := impl.deleteDrainGroup(ctx, testSite, "legacy-group"); err != nil {
+		t.Fatalf("delete prior-mode group: %v", err)
+	}
+	groups, err := ctrl.ListFirewallGroups(ctx, testSite)
+	if err != nil || len(groups) != 0 {
+		t.Fatalf("legacy group remains: %+v, %v", groups, err)
+	}
+}
+
+func TestPrepareDrainDoesNotCreateObjects(t *testing.T) {
+	ctx := context.Background()
+	cfg := defaultManagerConfig()
+	cfg.DryRun = true
+	mgr, ctrl, _ := newTestManager(t, cfg)
+	ctrl.SetGroups(testSite, []controller.FirewallGroup{{ID: "group-1", Name: "crowdsec-block-v4-0", GroupType: "address-group", GroupMembers: []string{"198.51.100.10"}}})
+	if err := mgr.PrepareDrain(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Drain(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{"CreateFirewallRule", "CreateFirewallGroup", "DeleteFirewallRule", "DeleteFirewallGroup"} {
+		if got := ctrl.Calls(method); got != 0 {
+			t.Errorf("%s called %d times during preview", method, got)
+		}
+	}
+}
+
+func TestOrphanCleanupKeepsUnownedReferences(t *testing.T) {
+	ctx := context.Background()
+	for _, mode := range []string{"legacy", "zone"} {
+		t.Run(mode, func(t *testing.T) {
+			mgr, ctrl, _ := newTestManager(t, defaultManagerConfig())
+			groupID := "orphan-group"
+			if mode == "legacy" {
+				ctrl.SetRules(testSite, []controller.FirewallRule{
+					{ID: "managed", Name: "crowdsec-drop-v4-0", Action: "drop", Description: "test", SrcFirewallGroupIDs: []string{groupID}},
+					{ID: "user", Name: "custom-rule", Action: "drop", Description: "custom", SrcFirewallGroupIDs: []string{groupID}},
+				})
+			} else {
+				ctrl.SetPolicies(testSite, []controller.ZonePolicy{
+					{ID: "managed", Name: "crowdsec-policy-wan-lan-v4-0", Action: "BLOCK", Description: "test", TrafficMatchingListIDs: []string{groupID}},
+					{ID: "user", Name: "custom-policy", Action: "BLOCK", Description: "custom", TrafficMatchingListIDs: []string{groupID}},
+				})
+			}
+			mgr.(*managerImpl).deleteOrphanedReferencingObjects(ctx, testSite, mode, groupID)
+			if mode == "legacy" {
+				rules, err := ctrl.ListFirewallRules(ctx, testSite)
+				if err != nil || len(rules) != 1 || rules[0].ID != "user" {
+					t.Fatalf("orphan cleanup removed user rule: %+v, %v", rules, err)
+				}
+			} else {
+				policies, err := ctrl.ListZonePolicies(ctx, testSite)
+				if err != nil || len(policies) != 1 || policies[0].ID != "user" {
+					t.Fatalf("orphan cleanup removed user policy: %+v, %v", policies, err)
+				}
+			}
+		})
+	}
 }
 
 // managerTestNamer returns a Namer using the default templates.
@@ -411,6 +523,90 @@ func TestSyncDirty_FlushesAllSites(t *testing.T) {
 	}
 }
 
+func TestSyncDirty_DoesNotDrainDonorBeforeTargetFlush(t *testing.T) {
+	cfg := defaultManagerConfig()
+	mgr, ctrl, store := newTestManager(t, cfg)
+	ctrl.SetGroups(testSite, []controller.FirewallGroup{
+		{ID: "group-0", Name: "crowdsec-block-v4-0", GroupMembers: []string{"1.1.1.1"}},
+		{ID: "group-1", Name: "crowdsec-block-v4-1", GroupMembers: []string{"2.2.2.2"}},
+	})
+	for _, ip := range []string{"1.1.1.1", "2.2.2.2"} {
+		if err := store.BanRecord(ip, time.Time{}, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := context.Background()
+	if err := mgr.EnsureInfrastructure(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl.SetError("UpdateFirewallGroup", errTest("target write failed"))
+	if err := mgr.SyncDirty(ctx, []string{testSite}); err == nil {
+		t.Fatal("expected target flush error")
+	}
+	if got := ctrl.Calls("DeleteFirewallGroup"); got != 0 {
+		t.Fatalf("deleted %d donor groups before target flush", got)
+	}
+	ctrl.SetError("UpdateFirewallGroup", errTest("reconcile target write failed"))
+	if _, err := mgr.Reconcile(ctx, []string{testSite}); err == nil {
+		t.Fatal("expected reconcile flush error")
+	}
+	if got := ctrl.Calls("DeleteFirewallRule"); got != 0 {
+		t.Fatalf("deleted %d donor rules while reconcile target write failed", got)
+	}
+	if err := mgr.SyncDirty(ctx, []string{testSite}); err != nil {
+		t.Fatalf("retry failed: %v", err)
+	}
+	if got := ctrl.Calls("DeleteFirewallGroup"); got != 1 {
+		t.Fatalf("deleted %d donor groups after successful retry, want 1", got)
+	}
+}
+
+func TestSyncDirty_RetriesFailedDonorPolicyDeletion(t *testing.T) {
+	mgr, ctrl, store := newTestManager(t, defaultManagerConfig())
+	ctrl.SetGroups(testSite, []controller.FirewallGroup{
+		{ID: "group-0", Name: "crowdsec-block-v4-0", GroupMembers: []string{"1.1.1.1"}},
+		{ID: "group-1", Name: "crowdsec-block-v4-1", GroupMembers: []string{"2.2.2.2"}},
+	})
+	for _, ip := range []string{"1.1.1.1", "2.2.2.2"} {
+		if err := store.BanRecord(ip, time.Time{}, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := context.Background()
+	if err := mgr.EnsureInfrastructure(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl.SetError("DeleteFirewallRule", errTest("temporary rule deletion failure"))
+	if err := mgr.SyncDirty(ctx, []string{testSite}); err == nil {
+		t.Fatal("expected rule deletion error")
+	}
+	if got := ctrl.Calls("DeleteFirewallGroup"); got != 0 {
+		t.Fatalf("deleted donor group while its rule remains: %d", got)
+	}
+	if err := mgr.SyncDirty(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ctrl.Calls("DeleteFirewallGroup"); got != 1 {
+		t.Fatalf("donor group was not deleted after rule deletion retry: %d", got)
+	}
+}
+
+func TestSyncDirty_HalfOpenBreakerRecoversWithNoDirtyShards(t *testing.T) {
+	mgr, ctrl, _ := newTestManager(t, defaultManagerConfig())
+	mi := mgr.(*managerImpl)
+	mi.cb.mu.Lock()
+	mi.cb.state = circuitOpen
+	mi.cb.failures = mi.cb.threshold
+	mi.cb.openedAt = time.Now().Add(-2 * mi.cb.resetAfter)
+	mi.cb.mu.Unlock()
+	if err := mgr.SyncDirty(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if mi.cb.state != circuitClosed || ctrl.Calls("Ping") != 1 {
+		t.Fatalf("breaker state = %v, Ping calls = %d; want closed and 1", mi.cb.state, ctrl.Calls("Ping"))
+	}
+}
+
 // TestReconcile_ActivationCallbackFires verifies that when reconcile causes a new
 // shard to be created (capacity overflow during the add phase), infrastructure is
 // provisioned via the activation callback (fired during flush), not from the add loop.
@@ -476,8 +672,8 @@ func TestReconcile_ContextCancellation(t *testing.T) {
 	cancel() // cancel immediately
 
 	result, err := mgr.Reconcile(ctx, []string{testSite})
-	if err != nil {
-		t.Fatalf("Reconcile: %v", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Reconcile error = %v, want context.Canceled", err)
 	}
 	// At least one error must be a context cancellation.
 	found := false
@@ -511,11 +707,60 @@ func TestReconcile_FlushErrorSurfaced(t *testing.T) {
 	ctrl.SetError("UpdateFirewallGroup", errTest("simulated flush failure"))
 
 	result, err := mgr.Reconcile(context.Background(), []string{testSite})
-	if err != nil {
-		t.Fatalf("Reconcile returned unexpected top-level error: %v", err)
+	if err == nil {
+		t.Fatal("Reconcile must return the flush error")
 	}
 	if len(result.Errors) == 0 {
 		t.Error("Reconcile.Errors: got empty, want flush error to be surfaced")
+	}
+}
+
+func TestReconcile_RestoresMissingZonePolicy(t *testing.T) {
+	cfg := defaultManagerConfig()
+	cfg.FirewallMode = "zone"
+	cfg.ZoneCfg.ZonePairs = []config.ZonePair{{Src: "wan", Dst: "lan"}}
+	mgr, ctrl, store := newTestManager(t, cfg)
+	ctrl.SetTMLs(testSite, []controller.TrafficMatchingList{{
+		ID: "tml-3", Name: "crowdsec-block-v4-3", Type: "IPV4_ADDRESSES",
+		Items: []controller.TrafficMatchingListItem{{Type: "IP_ADDRESS", Value: "1.2.3.4"}},
+	}})
+	if err := store.BanRecord("1.2.3.4", time.Time{}, false); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := mgr.EnsureInfrastructure(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl.SetPolicies(testSite, nil)
+	if _, err := mgr.Reconcile(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(policies) != 1 || policies[0].Name != "crowdsec-policy-wan-lan-v4-3" {
+		t.Fatalf("reconciled policies = %+v, %v", policies, err)
+	}
+}
+
+func TestReconcile_RemovesUntrackedSparseGroup(t *testing.T) {
+	cfg := defaultManagerConfig()
+	cfg.FirewallMode = "zone"
+	cfg.ZoneCfg.ZonePairs = []config.ZonePair{{Src: "wan", Dst: "lan"}}
+	mgr, ctrl, _ := newTestManager(t, cfg)
+	ctrl.SetTMLs(testSite, []controller.TrafficMatchingList{{
+		ID: "tml-9", Name: "crowdsec-block-v4-9", Type: "IPV4_ADDRESSES",
+		Items: []controller.TrafficMatchingListItem{{Type: "IP_ADDRESS", Value: "1.2.3.4"}},
+	}})
+	ctx := context.Background()
+	if err := mgr.EnsureInfrastructure(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := mgr.Reconcile(ctx, []string{testSite})
+	if err != nil || result.Removed != 1 {
+		t.Fatalf("Reconcile = %+v, %v", result, err)
+	}
+	tmls, err := ctrl.ListTrafficMatchingLists(ctx, testSite)
+	if err != nil || len(tmls) != 0 {
+		t.Fatalf("orphaned group remains: %+v, %v", tmls, err)
 	}
 }
 

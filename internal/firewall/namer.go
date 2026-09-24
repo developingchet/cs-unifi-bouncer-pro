@@ -3,6 +3,7 @@ package firewall
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"text/template"
 )
 
@@ -18,10 +19,13 @@ type NameData struct {
 
 // Namer renders Go-template name strings for managed UniFi objects.
 type Namer struct {
-	groupTmpl   *template.Template
-	ruleTmpl    *template.Template
-	policyTmpl  *template.Template
-	description string
+	groupTmpl    *template.Template
+	groupPrefix  string
+	ruleTmpl     *template.Template
+	rulePrefix   string
+	policyTmpl   *template.Template
+	policyPrefix string
+	description  string
 }
 
 // NewNamer parses and validates the three name templates.
@@ -39,10 +43,13 @@ func NewNamer(groupTmpl, ruleTmpl, policyTmpl, description string) (*Namer, erro
 		return nil, fmt.Errorf("POLICY_NAME_TEMPLATE: %w", err)
 	}
 	return &Namer{
-		groupTmpl:   gt,
-		ruleTmpl:    rt,
-		policyTmpl:  pt,
-		description: description,
+		groupTmpl:    gt,
+		groupPrefix:  strings.SplitN(groupTmpl, "{{", 2)[0],
+		ruleTmpl:     rt,
+		rulePrefix:   strings.SplitN(ruleTmpl, "{{", 2)[0],
+		policyTmpl:   pt,
+		policyPrefix: strings.SplitN(policyTmpl, "{{", 2)[0],
+		description:  description,
 	}, nil
 }
 
@@ -64,6 +71,18 @@ func (n *Namer) PolicyName(d NameData) (string, error) {
 // Description returns the static object description string.
 func (n *Namer) Description() string {
 	return n.description
+}
+
+func (n *Namer) PolicyPrefix() string {
+	return n.policyPrefix
+}
+
+func (n *Namer) RulePrefix() string {
+	return n.rulePrefix
+}
+
+func (n *Namer) GroupPrefix() string {
+	return n.groupPrefix
 }
 
 func render(tmpl *template.Template, data NameData) (string, error) {

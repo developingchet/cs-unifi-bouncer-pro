@@ -2,6 +2,7 @@ package logger
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -92,5 +93,17 @@ func TestRedactXApiKeyHeader(t *testing.T) {
 	got := redact(input)
 	if strings.Contains(got, "my-unifi-key-value-12345678") {
 		t.Errorf("X-Api-Key value should be redacted, got: %q", got)
+	}
+}
+
+func TestRedactPreservesStructuredLog(t *testing.T) {
+	input := `{"password":"secret,with\"quote","status":"ok","api_key":"abcdef1234567890"}`
+	got := redact(input)
+	var fields map[string]string
+	if err := json.Unmarshal([]byte(got), &fields); err != nil {
+		t.Fatalf("redacted output is not JSON: %v; output: %s", err, got)
+	}
+	if fields["password"] != "[REDACTED]" || fields["api_key"] != "[REDACTED]" || fields["status"] != "ok" {
+		t.Fatalf("unexpected redacted output: %s", got)
 	}
 }

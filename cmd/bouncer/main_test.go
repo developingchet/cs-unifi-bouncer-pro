@@ -25,6 +25,24 @@ func buildRoot() *cobra.Command {
 	return root
 }
 
+func TestResolveCapacitiesHonorsShardLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		cfg            config.Config
+		wantV4, wantV6 int
+	}{
+		{name: "default cap", cfg: config.Config{ShardLimit: 9000, FirewallGroupCapacity: 10000}, wantV4: 9000, wantV6: 9000},
+		{name: "family override", cfg: config.Config{ShardLimit: 9000, FirewallGroupCapacity: 10000, FirewallGroupCapacityV4: 4000, FirewallGroupCapacityV6: 5000}, wantV4: 4000, wantV6: 5000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v4, v6 := resolveCapacities(&tc.cfg)
+			if v4 != tc.wantV4 || v6 != tc.wantV6 {
+				t.Fatalf("capacities = %d/%d, want %d/%d", v4, v6, tc.wantV4, tc.wantV6)
+			}
+		})
+	}
+}
+
 // TestRootSubcommands verifies all expected subcommands are registered.
 func TestRootSubcommands(t *testing.T) {
 	root := buildRoot()
@@ -109,5 +127,20 @@ func TestLoadMissingRequired(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "UNIFI_URL") {
 		t.Errorf("expected error message to mention UNIFI_URL; got: %v", err)
+	}
+}
+
+func TestLocalHealthURL(t *testing.T) {
+	for _, tc := range []struct{ addr, want string }{
+		{":8081", "http://127.0.0.1:8081/healthz"},
+		{"0.0.0.0:8081", "http://127.0.0.1:8081/healthz"},
+		{"[::]:8081", "http://[::1]:8081/healthz"},
+	} {
+		t.Run(tc.addr, func(t *testing.T) {
+			got, err := localHealthURL(tc.addr)
+			if err != nil || got != tc.want {
+				t.Fatalf("localHealthURL(%q) = %q, %v; want %q", tc.addr, got, err, tc.want)
+			}
+		})
 	}
 }

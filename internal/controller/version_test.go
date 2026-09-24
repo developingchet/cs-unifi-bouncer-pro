@@ -74,6 +74,30 @@ func TestHasFeature_ZoneFirewall_NotSupported(t *testing.T) {
 	}
 }
 
+func TestHasFeature_SiteLookupFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		status  int
+		wantErr bool
+	}{
+		{name: "integration unavailable", status: http.StatusNotFound},
+		{name: "controller failure", status: http.StatusInternalServerError, wantErr: true},
+		{name: "unauthorized", status: http.StatusUnauthorized, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+			c := newTestClient(srv.URL, "api-key")
+			supported, err := hasFeature(context.Background(), c, "default", FeatureZoneBasedFirewall)
+			if supported || (err != nil) != tc.wantErr {
+				t.Fatalf("HasFeature = (%v, %v), want (false, error=%v)", supported, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestHasFeature_Cached verifies that a second call for the same (site, feature)
 // does not make another HTTP request — the result is served from the cache.
 func TestHasFeature_Cached(t *testing.T) {

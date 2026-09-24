@@ -54,9 +54,9 @@ handleDecisionBlock()
     │  8-stage filter pipeline (synchronous, in-stream)
     ▼
 job handler (inline, per decision)
-    │  1. idempotency check  (bbolt bans bucket)
-    │  2. firewall manager   (ApplyBan / ApplyUnban → mark shard dirty)
-    │  3. bbolt persist      (BanRecord / BanDelete)
+    │  1. update the decision's source claim in bbolt
+    │  2. apply the first-ban or last-unban firewall transition
+    │  3. remove the ban record after confirmed unban
     ▼
 SyncDirty() — flush dirty shards to UniFi (after every decision batch)
     │  periodic SYNC_INTERVAL ticker retries failed flushes
@@ -100,6 +100,7 @@ The `firewall.Manager` interface exposes the following operations:
 ```go
 type Manager interface {
     EnsureInfrastructure(ctx context.Context, sites []string) error
+    PrepareDrain(ctx context.Context, sites []string) error
     ApplyBan(ctx context.Context, site, ip string, ipv6 bool) error
     ApplyBanWithZones(ctx context.Context, site, ip string, ipv6 bool, zonePairs []config.ZonePair) error
     ApplyUnban(ctx context.Context, site, ip string, ipv6 bool) error
@@ -110,9 +111,9 @@ type Manager interface {
 }
 ```
 
-`ApplyBanWithZones` is used by the job handler when `ZONE_PAIRS_SCENARIO_MAP` provides an override for the decision's scenario. In Phase 1 the IP is routed to the default shard while the override pairs are logged; per-scenario shard provisioning is reserved for a future release.
+`ZONE_PAIRS_SCENARIO_MAP` is rejected during configuration validation. Per-scenario routing requires separate address lists and policies, which are not provisioned.
 
-Two concrete implementations sit behind this interface:
+The manager delegates controller operations to two mode-specific components:
 
 - **`legacyManager`** — manipulates firewall address groups and `WAN_IN`/`WANv6_IN` rules
 - **`zoneManager`** — manipulates firewall address groups and zone policies
@@ -131,13 +132,13 @@ The UniFi zone policy API has two portFilter constraints:
 
 When a zone pair is removed from `ZONE_PAIRS` or `CLOUDFLARE_ZONE_PAIRS`, previously managed firewall objects are automatically cleaned up:
 
-- **Block policies**: at `EnsurePolicies` time, two complementary sweeps run. Pass 1 (bbolt-based): any policy recorded in bbolt for the site under mode `zone` whose name is no longer produced by the current config is deleted from UniFi and removed from bbolt — but only if it bears the managed description and `Action == "BLOCK"`. Pass 2 (API-based): any API policy with the managed description and `Action == "BLOCK"` that is not in the expected name set is deleted, even if bbolt has no record of it (wiped database, mode switch, prior installation).
+- **Block policies**: at `EnsurePolicies` time, two complementary sweeps run. Pass 1 (bbolt-based) deletes a tracked policy no longer expected by the current config when its API ID, name, and `BLOCK` action match the cache record. Pass 2 (API-based) deletes an orphan without a cache record only when its name has the configured policy prefix, its description matches the managed description, and its action is `BLOCK`.
 - **Legacy rules**: at `EnsureRules` time, the API-level orphan sweep deletes any pre-existing rule whose `Description`, `Action`, `Ruleset`, and non-empty `SrcFirewallGroupIDs` all match what the bouncer creates, but whose name is not in the currently-expected shard name set.
 - **Block port TMLs**: at `Bootstrap` time, Traffic Matching Lists named `crowdsec-ports-src-*`, `crowdsec-ports-dst-*`, `crowdsec-dstips-v4-*`, and `crowdsec-dstips-v6-*` not required by any current zone pair are deleted.
 - **Cloudflare ALLOW policies**: at each Cloudflare sync, policies with the `crowdsec-whitelist-cloudflare-` prefix not in the current `CLOUDFLARE_ZONE_PAIRS` set are deleted. Policies with our managed description or an empty description (old policies created before description support) are considered bouncer-owned. UniFi's auto-created `(Return)` mirror policies are cleaned up when their corresponding forward policy is orphaned. When `CLOUDFLARE_WHITELIST_ENABLED=false`, `Manager.Drain()` removes all `crowdsec-whitelist-cloudflare-*` policies and TMLs at startup.
 - **Cloudflare port TMLs**: at each Cloudflare sync, TMLs named `crowdsec-whitelist-cloudflare-srcports-*`, `crowdsec-whitelist-cloudflare-dstports-*`, and `crowdsec-whitelist-cloudflare-dstips-*` not required by any current Cloudflare zone pair are deleted.
 
-User-created policies and TMLs are never touched — ownership requires matching both the managed description **and** the structural signature of objects the bouncer creates (action, ruleset, source group).
+Orphan cleanup checks managed names and descriptions or matching cache records before deleting firewall objects. Keep user-created objects outside the configured managed name prefixes.
 
 ### Shard managers
 
@@ -147,34 +148,32 @@ Each (site, family) combination has its own `ShardManager` that tracks in-memory
 
 ## Decision Handling
 
-Ban and unban decisions are processed synchronously per CrowdSec decision batch. The job handler runs inline in the `processStream` goroutine:
+Ban and unban decisions are processed synchronously per CrowdSec decision batch. Each decision ID or UUID owns a claim on its IP. The shared ban manager serializes claim changes from CrowdSec and external blocklists:
 
-1. **Idempotency check** — consult the bbolt `bans` bucket:
-   - Ban job: if the IP is already in `bans`, skip (already applied)
-   - Unban job: if the IP is not in `bans`, skip (nothing to remove)
-2. **Firewall manager** — call `ApplyBan` / `ApplyUnban`, which marks the relevant shard as dirty in memory
-3. **Persist to bbolt** — write `BanRecord` / `BanDelete` (skipped in `DRY_RUN`)
+1. **Ban** — persist the claim before applying the firewall ban. An additional claim for an already banned IP extends its ownership without another firewall transition.
+2. **Delete** — remove that decision's claim. The firewall ban is removed only when no active claims remain; the bbolt record is deleted after the firewall accepts the unban.
+3. **Dry run** — report intended changes without persisting claims or changing the controller.
 
 After all decisions in the batch are processed, `SyncDirty` flushes all dirty shards to the UniFi API. If a flush fails, the shard stays dirty and is retried at the next `SYNC_INTERVAL` tick.
 
-This makes the system safe to restart mid-stream: re-delivered decisions from CrowdSec after reconnect are deduplicated at the idempotency layer.
+Re-delivered decisions update the same claim after reconnect, while distinct decisions and feeds can independently retain the ban.
 
 ---
 
 ## State Management
 
-Persistent state is stored in a single [bbolt](https://github.com/etcd-io/bbolt) database (`bouncer.db`) with three buckets:
+Persistent state is stored in a single [bbolt](https://github.com/etcd-io/bbolt) database (`bouncer.db`) with four buckets:
 
 | Bucket | Key | Value |
 |--------|-----|-------|
-| `bans` | IP string | msgpack-encoded `BanEntry` {RecordedAt, ExpiresAt, IPv6} |
-| `groups` | `site/family/shard` | msgpack-encoded `GroupRecord` {UnifiID, Members, UpdatedAt} |
-| `policies` | `site/family/shard` | msgpack-encoded `PolicyRecord` {UnifiID, RuleID, Mode, Priority, UpdatedAt} |
+| `bans` | IP string | msgpack-encoded `BanEntry` with expiry, source claims, and pending state |
+| `groups` | site and group name | msgpack-encoded `GroupRecord` with UniFi ID, shard index, family, and members |
+| `policies` | site and policy name | msgpack-encoded `PolicyRecord` with UniFi ID and firewall mode |
 | `events` | uint64 big-endian sequence | JSON-encoded `EventEntry` {Action, Origin, Scenario, IP, RecordedAt} |
 
 The `events` bucket is a ring buffer. Keys are auto-incrementing uint64 values encoded as 8-byte big-endian, which guarantees chronological cursor iteration. When the entry count exceeds `HISTORY_MAX_EVENTS`, the oldest entries (lowest keys) are pruned in the same write transaction. The key count is determined by cursor iteration rather than `Stats().KeyN` (which reflects stats at transaction start, not after mid-transaction mutations).
 
-bbolt provides ACID transactions with a single writer at a time. This matches the access pattern well: the ban bucket has many concurrent readers (idempotency checks) and one writer per decision batch (persist step).
+bbolt provides ACID transactions with a single writer at a time. The shared ban manager serializes claim updates and firewall transitions from the decision stream and blocklist refreshes.
 
 ### Startup reconcile
 
@@ -208,12 +207,7 @@ These are used by the `status history` and `status ip` CLI subcommands to surfac
 
 ### External Blocklists
 
-`internal/blocklist.Manager` fetches one or more plain-text IP/CIDR URLs on startup and then on a ticker. For each valid entry:
-
-1. `store.BanRecord(ip, now+2×interval, ipv6)` — writes to bbolt with a self-healing expiry
-2. `fwMgr.ApplyBan(ctx, site, ip, ipv6)` — pushes to UniFi
-
-The 2× interval expiry ensures that bans auto-expire if the feed URL becomes permanently unreachable. IPs from blocklists go through the same idempotency check as CrowdSec decisions.
+`internal/blocklist.Manager` fetches plain-text IP/CIDR URLs on startup and on a ticker. Each URL owns a separate claim for every valid entry. Refreshing a feed extends those claims to `now + 2×interval`; if a feed remains unreachable, its claims expire. The firewall ban remains while any other feed or CrowdSec decision still claims the IP.
 
 ### Webhook Notifications
 
@@ -259,7 +253,7 @@ Template variables include `.Family` (v4/v6), `.Index` (shard), `.Site`, `.SrcZo
 This design allows:
 
 - **Multi-instance deployments** — two bouncers (e.g. production and staging) use distinct name prefixes and coexist on the same controller
-- **Renaming** — operators can change naming schemes between deployments without modifying code
+- **Renaming** — naming schemes can change between deployments without modifying code
 - **Future extensibility** — additional variables can be added without breaking existing templates
 
 ---
@@ -284,7 +278,7 @@ Each push reports a delta window — counters reset after every push:
 - **blocked** — new ban decisions applied per `origin` × `remediation_type` since the last push
 - **processed** — total decisions handled (bans applied + deletions) since the last push
 
-This is distinct from the Prometheus metrics, which are cumulative for operator
+This is distinct from the Prometheus metrics, which are cumulative for process
 dashboards. The LAPI usage-metrics push is CrowdSec's telemetry mechanism for
 tracking bouncer activity across the ecosystem.
 
@@ -330,12 +324,12 @@ All tests are table-driven and run without external services. The test suite cov
 - **`internal/firewall`**: namer template rendering, shard manager operations, port TML creation and idempotency, `needsUpdateZonePolicy` including port TML ID comparison
 - **`internal/controller`**: session management, 401 re-authentication logic, TML wire format conversion (PORT_NUMBER as int), port filter population in policy wire structs
 - **`internal/storage`**: bbolt ban operations, group/policy cache, event ring buffer (record, list, list-by-IP, capacity eviction)
-- **`internal/bouncer/handler`**: job handler idempotency, BAN_TTL cap, dry-run mode, per-site error continuation, auth error short-circuit, per-scenario zone routing (`ZONE_PAIRS_SCENARIO_MAP`) dispatching `ApplyBanWithZones`
+- **`internal/bouncer/handler`**: source-aware ban handling, BAN_TTL cap, dry-run mode, per-site error continuation, auth error short-circuit
 - **`internal/bouncer/janitor`**: expired ban pruning, skip-on-unban-failure
 - **`internal/logger`**: redaction patterns
 - **`internal/lapi_metrics`**: Reporter construction, interval clamping, counter reset behaviour after push, payload structure validation, user-agent and API key headers, concurrent recording under the race detector, shutdown final-push
 - **`internal/capabilities`**: Constant value contracts (`BouncerType`, `Layer`, remediation support flags) and the intentional distinction between `BouncerType` (used in the metrics payload `type` field) and the LAPI user-agent service token (`crowdsec-unifi-bouncer`, used in HTTP headers)
-- **`internal/whitelist`**: TML creation and update idempotency, ALLOW policy creation with IP TML IDs and port TML IDs, no-op when current, delete+recreate triggered when port TML IDs change (portFilter constraint), orphan policy and TML sweep, policy ordering (whitelist ALLOW policies placed before block policies via the ordering API)
+- **`internal/whitelist`**: TML creation and update idempotency, ALLOW policy creation with IP TML IDs and port TML IDs, no-op when current, delete+recreate triggered when port TML IDs change (portFilter constraint), orphan policy and TML sweep, and policy index checks that report a block preceding an allow
 - **`internal/webhook`**: fires on registered events, skips unregistered events, ignores HTTP errors, empty URL disables notifier, payload is valid JSON
 - **`internal/blocklist`**: fetch and apply valid IPs, skip invalid lines, parse CIDRs, handle server errors and timeouts
 

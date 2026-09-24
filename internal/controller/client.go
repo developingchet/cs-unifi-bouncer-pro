@@ -11,6 +11,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptrace"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,16 +22,18 @@ import (
 
 // ClientConfig holds parameters for constructing a UniFi HTTP client.
 type ClientConfig struct {
-	BaseURL      string
-	Username     string
-	Password     string
-	APIKey       string
-	VerifyTLS    bool
-	CACertPath   string
-	Timeout      time.Duration
-	Debug        bool
-	ReauthMinGap time.Duration // thundering-herd guard: skip re-auth if last one was < this ago
-	EnableIPv6   bool          // dial IPv6 — false by default, set true only with working IPv6 path
+	BaseURL       string
+	Username      string
+	Password      string
+	APIKey        string
+	VerifyTLS     bool
+	CACertPath    string
+	Timeout       time.Duration
+	Debug         bool
+	ReauthMinGap  time.Duration // thundering-herd guard: skip re-auth if last one was < this ago
+	ReauthTimeout time.Duration
+	DryRun        bool
+	EnableIPv6    bool // dial IPv6 — false by default, set true only with working IPv6 path
 }
 
 // unifiClient implements Controller using direct HTTPS calls to the UniFi Network API.
@@ -98,6 +101,9 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 		Transport: transport,
 		Timeout:   cfg.Timeout,
 		Jar:       jar,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 
 	c := &unifiClient{
@@ -114,7 +120,7 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 		Username:      cfg.Username,
 		Password:      cfg.Password,
 		APIKey:        cfg.APIKey,
-		ReauthTimeout: cfg.Timeout,
+		ReauthTimeout: cfg.ReauthTimeout,
 		ReauthMinGap:  cfg.ReauthMinGap,
 	}
 	c.session = newSessionManager(authCfg, httpClient, log)
@@ -127,6 +133,9 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 
 // apiDo executes an HTTP request, handling auth, metrics, and typed error translation.
 func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint string) (*http.Response, error) {
+	if c.cfg.DryRun && req.Method != http.MethodGet && req.Method != http.MethodHead {
+		return nil, fmt.Errorf("dry run: refusing %s %s", req.Method, req.URL.Path)
+	}
 	start := time.Now()
 	c.session.SetAuthHeader(req)
 
@@ -228,6 +237,11 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 	case http.StatusConflict:
 		_ = resp.Body.Close()
 		return nil, &ErrConflict{Msg: "HTTP 409 conflict"}
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("UniFi API returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return resp, nil
 }

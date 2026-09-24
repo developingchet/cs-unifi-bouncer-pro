@@ -25,6 +25,7 @@ services:
       UNIFI_URL: https://192.168.1.1
       UNIFI_API_KEY: your-api-key
       CROWDSEC_LAPI_URL: http://crowdsec:8080
+      CROWDSEC_LAPI_ALLOW_HTTP: "true"
       CROWDSEC_LAPI_KEY: your-bouncer-key
       ZONE_PAIRS: External->Dmz
     volumes:
@@ -52,8 +53,7 @@ For full setup including CrowdSec registration, TLS, multi-site, and Docker Secr
 - **Ban history audit trail** — ring-buffer event log (up to 10,000 entries) for every ban, unban, and expiry; queryable via `status bans`, `status ip`, `status history`
 - **External blocklist import** — fetch plain-text IP/CIDR lists from external URLs on a configurable interval; bans auto-expire if the feed goes offline
 - **Webhook notifications** — POST JSON alerts when the circuit breaker trips or reconcile drift is detected
-- **Per-scenario duration overrides** — override `BAN_TTL` per CrowdSec scenario via `BLOCK_SCENARIO_DURATION_MAP`
-- **Per-scenario zone routing** — route bans from specific scenarios to different zone pairs via `ZONE_PAIRS_SCENARIO_MAP`
+- **Per-scenario duration overrides** — set a duration for matching CrowdSec scenarios via `BLOCK_SCENARIO_DURATION_MAP`, including durations longer than `BAN_TTL`
 - **Destination IP filtering** — scope block policies to specific destination hosts or subnets via `@ip1,ip2,...` suffix on zone pairs
 - **Decision rate limiter** — token-bucket throttle for ban waves (`DECISION_RATE_LIMIT`)
 - **Validate and diagnose subcommands** — CI-safe config validation; three-phase connectivity check with zone discovery
@@ -70,7 +70,7 @@ For full setup including CrowdSec registration, TLS, multi-site, and Docker Secr
 |----------|---------|-------------|
 | `UNIFI_URL` | `https://192.168.1.1` | UniFi controller base URL |
 | `UNIFI_API_KEY` | `your-api-key` | API key (Settings → Control Plane → API Keys); or use `UNIFI_USERNAME` + `UNIFI_PASSWORD` |
-| `CROWDSEC_LAPI_URL` | `http://crowdsec:8080` | CrowdSec LAPI URL (default assumes a Docker service named `crowdsec`) |
+| `CROWDSEC_LAPI_URL` | `https://crowdsec:8080` | CrowdSec LAPI URL; allow HTTP explicitly only for a trusted local network |
 | `CROWDSEC_LAPI_KEY` | `your-bouncer-key` | Bouncer key from `cscli bouncers add unifi-bouncer` |
 | `ZONE_PAIRS` | `External->Dmz` | Zone pair(s) for block policies; `src[:sport,...]->dst[:dport,...][@dstIP,...]` — port and destination IP filters are optional |
 
