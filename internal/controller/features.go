@@ -80,7 +80,8 @@ func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool,
 	callErr := c.withReauth(ctx, func() error {
 		resp, err := c.apiDo(ctx, req, "feature/zone-detect")
 		if err != nil {
-			if _, notFound := err.(*ErrNotFound); notFound {
+			var notFound *ErrNotFound
+			if errors.As(err, &notFound) {
 				supported = false
 				return nil
 			}

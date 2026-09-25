@@ -47,6 +47,7 @@ func (s *dryRunStore) BanList() (map[string]BanEntry, error) {
 }
 func (s *dryRunStore) BanRecord(string, time.Time, bool) error { return nil }
 func (s *dryRunStore) BanPut(string, BanEntry) error           { return nil }
+func (s *dryRunStore) BanPutMany(map[string]BanEntry) error    { return nil }
 func (s *dryRunStore) BanDelete(string) error                  { return nil }
 
 func (s *dryRunStore) GetGroup(name string) (*GroupRecord, error) {

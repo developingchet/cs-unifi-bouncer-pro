@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -261,7 +262,8 @@ func (c *unifiClient) withReauth(ctx context.Context, fn func() error) error {
 	if err == nil {
 		return nil
 	}
-	if _, ok := err.(*ErrUnauthorized); !ok {
+	var unauthorized *ErrUnauthorized
+	if !errors.As(err, &unauthorized) {
 		return err
 	}
 	if authErr := c.session.EnsureAuth(ctx); authErr != nil {

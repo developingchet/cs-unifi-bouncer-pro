@@ -120,6 +120,29 @@ func (s *bboltStore) BanPut(ip string, entry BanEntry) error {
 	})
 }
 
+func (s *bboltStore) BanPutMany(entries map[string]BanEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	encoded := make(map[string][]byte, len(entries))
+	for ip, entry := range entries {
+		data, err := msgpack.Marshal(entry)
+		if err != nil {
+			return fmt.Errorf("marshal BanEntry for %s: %w", ip, err)
+		}
+		encoded[ip] = data
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(bucketBans))
+		for ip, data := range encoded {
+			if err := bucket.Put([]byte(ip), data); err != nil {
+				return fmt.Errorf("put ban %s: %w", ip, err)
+			}
+		}
+		return nil
+	})
+}
+
 func (s *bboltStore) BanDelete(ip string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket([]byte(bucketBans)).Delete([]byte(ip))

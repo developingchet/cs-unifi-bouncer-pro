@@ -46,6 +46,8 @@ type Store interface {
 	BanRecord(ip string, expiresAt time.Time, ipv6 bool) error
 	BanGet(ip string) (*BanEntry, error)
 	BanPut(ip string, entry BanEntry) error
+	// BanPutMany writes every entry in one transaction.
+	BanPutMany(entries map[string]BanEntry) error
 	BanDelete(ip string) error
 	BanList() (map[string]BanEntry, error)
 

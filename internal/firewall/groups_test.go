@@ -167,7 +167,7 @@ func TestEnsureShards_RecoversSparseAPIOnlyGroups(t *testing.T) {
 	if err := sm.AddIP(context.Background(), "3.3.3.3", "v4"); err != nil {
 		t.Fatal(err)
 	}
-	if pending, _ := sm.findShardByIndexLocked(sm.families[sm.family], 4); pending == nil {
+	if pending := sm.findShardByIndexLocked(sm.families[sm.family], 4); pending == nil {
 		t.Fatal("overflow must allocate index 4 after sparse index 3")
 	}
 }

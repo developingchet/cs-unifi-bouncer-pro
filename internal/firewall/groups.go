@@ -266,13 +266,13 @@ func (sm *ShardManager) familyStateLocked(ipFamily string) *ShardFamily {
 	return family
 }
 
-func (sm *ShardManager) findShardByIndexLocked(family *ShardFamily, shardIdx int) (*Shard, int) {
-	for pos, shard := range family.Shards {
+func (sm *ShardManager) findShardByIndexLocked(family *ShardFamily, shardIdx int) *Shard {
+	for _, shard := range family.Shards {
 		if shard.Index == shardIdx {
-			return shard, pos
+			return shard
 		}
 	}
-	return nil, -1
+	return nil
 }
 
 // EnsureShards bootstraps group shards: loads from bbolt cache, then reconciles with API.
@@ -558,7 +558,7 @@ func (sm *ShardManager) RemoveIP(ip, ipFamily string) {
 		return
 	}
 
-	if shard, _ := sm.findShardByIndexLocked(family, shardIdx); shard != nil {
+	if shard := sm.findShardByIndexLocked(family, shardIdx); shard != nil {
 		shard.IPs.Remove(ip)
 	}
 	delete(family.ipOwner, ip)

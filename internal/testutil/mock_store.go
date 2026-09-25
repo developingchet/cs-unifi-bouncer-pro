@@ -113,6 +113,19 @@ func (m *MockStore) BanPut(ip string, entry storage.BanEntry) error {
 	return nil
 }
 
+func (m *MockStore) BanPutMany(entries map[string]storage.BanEntry) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.check("BanPutMany"); err != nil {
+		return err
+	}
+	for ip, entry := range entries {
+		entry.Claims = copyMap(entry.Claims)
+		m.bans[ip] = entry
+	}
+	return nil
+}
+
 func (m *MockStore) BanDelete(ip string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

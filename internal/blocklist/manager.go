@@ -13,6 +13,7 @@ import (
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
 	"github.com/rs/zerolog"
 )
 
@@ -58,19 +59,22 @@ func (m *Manager) Run(ctx context.Context) {
 func (m *Manager) fetchAndApply(ctx context.Context) {
 	for _, url := range m.urls {
 		if err := m.fetchURL(ctx, url); err != nil {
-			m.log.Error().Err(err).Str("url", url).Msg("blocklist: fetch failed")
+			m.log.Error().Err(err).Str("url", logger.SafeURL(url)).Msg("blocklist: fetch failed")
 		}
 	}
 }
 
+// fetchURL downloads one feed and claims its addresses. Feed URLs often carry
+// an access token, so logs and claim sources use the redacted form.
 func (m *Manager) fetchURL(ctx context.Context, url string) error {
+	display := logger.SafeURL(url)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return fmt.Errorf("create request: %w", logger.SafeURLError(err, display))
 	}
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("fetch: %w", err)
+		return fmt.Errorf("fetch: %w", logger.SafeURLError(err, display))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -87,11 +91,7 @@ func (m *Manager) fetchURL(ctx context.Context, url string) error {
 		return fmt.Errorf("blocklist exceeds %d bytes", maxFeedBytes)
 	}
 
-	type address struct {
-		ip   string
-		ipv6 bool
-	}
-	var entries []address
+	var entries []banstate.ClaimRequest
 	seen := make(map[string]struct{})
 	var skipped int
 	scanner := bufio.NewScanner(bytes.NewReader(body))
@@ -112,25 +112,22 @@ func (m *Manager) fetchURL(ctx context.Context, url string) error {
 			return fmt.Errorf("blocklist exceeds %d unique entries", maxFeedEntries)
 		}
 		seen[ip] = struct{}{}
-		entries = append(entries, address{ip: ip, ipv6: ipv6})
+		entries = append(entries, banstate.ClaimRequest{IP: ip, IPv6: ipv6})
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("scan blocklist: %w", err)
 	}
 	if m.dryRun {
-		m.log.Info().Str("url", url).Int("entries", len(entries)).Msg("[DRY-RUN] would import blocklist")
+		m.log.Info().Str("url", display).Int("entries", len(entries)).Msg("[DRY-RUN] would import blocklist")
 		return nil
 	}
 	expiresAt := time.Now().Add(m.interval * 2)
-	var applied int
-	for _, entry := range entries {
-		if _, err := m.claims.Claim(ctx, entry.ip, entry.ipv6, "blocklist:"+url, expiresAt); err != nil {
-			m.log.Warn().Err(err).Str("ip", entry.ip).Msg("blocklist: failed to apply ban")
-			continue
-		}
-		applied++
+	added, err := m.claims.ClaimMany(ctx, entries, "blocklist:"+display, expiresAt)
+	if err != nil {
+		m.log.Warn().Err(err).Str("url", display).Msg("blocklist: some bans could not be applied yet; reconcile will retry")
 	}
-	m.log.Info().Str("url", url).Int("applied", applied).Int("skipped", skipped).Msg("blocklist: fetch complete")
+	m.log.Info().Str("url", display).Int("entries", len(entries)).Int("new", added).
+		Int("skipped", skipped).Msg("blocklist: fetch complete")
 	return nil
 }
 
