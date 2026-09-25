@@ -511,13 +511,14 @@ Runs three-phase diagnostics and prints a tabular result:
 
 1. **Config** — loads and validates configuration; fails fast if invalid
 2. **LAPI** — probes `CROWDSEC_LAPI_URL/v1/decisions?limit=1` for reachability
-3. **UniFi** — pings the controller; in zone or auto mode, lists discovered zones per configured site
+3. **UniFi** — pings the controller; in auto mode, reports each site's detected firewall mode (`firewall_mode[site]`); for zone-mode sites, lists discovered zones
 
 ```
 CHECK                    STATUS  DETAIL
 config_valid             PASS    mode=zone sites=[default]
 lapi_reachable           PASS    http://crowdsec:8080 → 200 OK
 unifi_reachable          PASS    https://192.168.1.1 ping ok
+firewall_mode[default]   PASS    zone
 zone_discovery[default]  PASS    3 zones found
   External                       id=67a8cc9efe6c6350dfa4dcc7
   Internal                       id=67a8cc9efe6c6350dfa4dcc8

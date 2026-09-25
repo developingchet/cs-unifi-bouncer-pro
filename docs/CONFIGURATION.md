@@ -97,7 +97,7 @@ UNIFI_SITES=default,homelab,iot
 | `FIREWALL_LOG_DROPS` | `false` | No | Enable logging on managed firewall rules and zone policies. Existing zone policies are updated on reconcile. |
 | `FIREWALL_CONNECTION_STATES` | `NEW,INVALID` | No | Connection states matched by zone block policies. Allowed values: `NEW`, `INVALID`, `ESTABLISHED`, or `ALL` for unrestricted matching. `ALL` can block replies to outbound connections. |
 | `FIREWALL_RECONCILE_ON_START` | `true` | No | Run a full reconcile on startup before accepting the CrowdSec stream |
-| `FIREWALL_RECONCILE_INTERVAL` | `10m` | No | Periodically repair shard membership and missing policies/rules. Set `0s` to disable periodic reconcile. |
+| `FIREWALL_RECONCILE_INTERVAL` | `10m` | No | Periodically repair shard membership (including groups edited by hand in UniFi) and missing policies/rules. Set `0s` to disable periodic reconcile. |
 
 ### Traffic Matching List / Shard Management (Integration v1 / Zone Mode)
 

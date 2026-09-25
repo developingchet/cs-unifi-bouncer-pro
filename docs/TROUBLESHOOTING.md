@@ -510,6 +510,18 @@ The reconcile command compares bbolt state with the current UniFi firewall state
 
 ---
 
+### Group edited in the UniFi UI
+
+**Symptom:** Addresses were removed from (or added to) a `crowdsec-block-*` group by hand, and the change seems to stick.
+
+**Behaviour:** Each periodic reconcile (`FIREWALL_RECONCILE_INTERVAL`) compares every managed group with the bouncer's own state and rewrites any group that differs, logging `shard changed outside the bouncer; rewriting it`. Edit bans through CrowdSec (`cscli decisions`) or the `ban`/`unban` subcommands instead; manual group edits are reverted.
+
+### Bans stop applying after the controller restarts
+
+A controller that is shutting down or starting answers every API call with HTTP 404, and a self-hosted controller can take several minutes to start. The bouncer confirms a 404 by listing the controller's groups before treating a group as deleted, so shards are kept and retried until the controller is ready (`shard write returned 404 but the object still exists; controller is likely restarting`). Decisions received during the outage are applied once writes succeed. If the bouncer itself starts while the controller is still starting, it exits with `controller ... is not ready` and your restart policy retries it.
+
+---
+
 ### Stale policies after removing a zone pair
 
 **Symptom:** After removing an entry from `ZONE_PAIRS` or `CLOUDFLARE_ZONE_PAIRS` and restarting, the old block or ALLOW policies (and any associated port-filter Traffic Matching Lists) remain visible in the UniFi console.
