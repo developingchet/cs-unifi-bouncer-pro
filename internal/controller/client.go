@@ -276,9 +276,15 @@ func (c *unifiClient) withReauth(ctx context.Context, fn func() error) error {
 	return fn()
 }
 
-// Ping verifies the controller is reachable.
+// Ping verifies the controller is reachable and accepts the credentials. An
+// API key only authorizes the integration API; the classic /api/self answers
+// 404 to it on UniFi OS, so key-based clients ping the integration site list.
 func (c *unifiClient) Ping(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.networkURL("/api/self"), nil)
+	url := c.networkURL("/api/self")
+	if c.cfg.APIKey != "" {
+		url = c.networkURL("/integration/v1/sites")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}

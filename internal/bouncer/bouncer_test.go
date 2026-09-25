@@ -177,3 +177,15 @@ func TestBouncer_SkipsDecisionsWithoutIdentity(t *testing.T) {
 		t.Fatalf("anonymous decisions reached handler: %+v", jobs)
 	}
 }
+
+func TestUserAgentVersionPrefix(t *testing.T) {
+	for in, want := range map[string]string{
+		"v1.2.3": "crowdsec-unifi-bouncer/v1.2.3",
+		"1.2.3":  "crowdsec-unifi-bouncer/v1.2.3",
+		"dev":    "crowdsec-unifi-bouncer/vdev",
+	} {
+		if got := userAgent(in); got != want {
+			t.Errorf("userAgent(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

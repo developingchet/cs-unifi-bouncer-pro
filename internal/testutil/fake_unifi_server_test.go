@@ -396,7 +396,7 @@ func TestFakeServer_RateLimit(t *testing.T) {
 	defer s.Close()
 	c := newFakeClient(t, s)
 
-	s.InjectFault(http.MethodGet, "/proxy/network/api/self", http.StatusTooManyRequests)
+	s.InjectFault(http.MethodGet, "/proxy/network/integration/v1/sites", http.StatusTooManyRequests)
 
 	err := c.Ping(context.Background())
 	if err == nil {
@@ -514,7 +514,7 @@ func TestFakeServer_RateLimitInject(t *testing.T) {
 	defer s.Close()
 	c := newFakeClient(t, s)
 
-	s.InjectRateLimit(http.MethodGet, "/proxy/network/api/self", 30)
+	s.InjectRateLimit(http.MethodGet, "/proxy/network/integration/v1/sites", 30)
 
 	err := c.Ping(context.Background())
 	if err == nil {

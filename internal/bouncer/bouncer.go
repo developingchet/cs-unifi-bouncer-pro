@@ -26,6 +26,12 @@ import (
 // BinaryVersion is set at startup from the -X main.Version ldflags value.
 var BinaryVersion = "dev"
 
+// userAgent is the LAPI user agent, crowdsec-unifi-bouncer/v<version>.
+// Release tags already start with "v", which used to be doubled ("vv1.2.3").
+func userAgent(version string) string {
+	return "crowdsec-unifi-bouncer/v" + strings.TrimPrefix(version, "v")
+}
+
 // Bouncer wires together the CrowdSec stream, filter pipeline, and firewall manager.
 type Bouncer struct {
 	cfg       *config.Config
@@ -72,7 +78,7 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 		CAPath:              cfg.CrowdSecLAPICACert,
 		TickerInterval:      tickerStr,
 		InsecureSkipVerify:  &skipVerify,
-		UserAgent:           "crowdsec-unifi-bouncer/v" + BinaryVersion,
+		UserAgent:           userAgent(BinaryVersion),
 		RetryInitialConnect: true,
 	}
 

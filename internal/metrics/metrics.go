@@ -55,7 +55,7 @@ var (
 	ActiveBans = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "active_bans",
-		Help:      "Current banned IPs in bbolt per site.",
+		Help:      "Bans the bouncer tracks per site, whether or not they are on the controller yet; see unsynced_ips.",
 	}, []string{"family", "site"})
 
 	// FirewallGroupSize tracks IPs per group shard in UniFi.
@@ -91,8 +91,23 @@ var (
 	ShardIPCount = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "shard_ip_count",
-		Help:      "Current IP count per firewall shard.",
+		Help:      "IPs written to each firewall shard at its last successful sync.",
 	}, []string{"family", "shard", "site"})
+
+	// UnsyncedIPs counts bans held in shards that do not exist on the
+	// controller yet, so they are not enforced.
+	UnsyncedIPs = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "unsynced_ips",
+		Help:      "Bans in shards not yet created on the controller (not enforced).",
+	}, []string{"family", "site"})
+
+	// ShardCreateFailures counts failed attempts to create a shard object.
+	ShardCreateFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "shard_create_failures_total",
+		Help:      "Failed attempts to create a shard object on the controller.",
+	}, []string{"family", "site"})
 
 	// ShardSyncTotal counts shard sync attempts.
 	ShardSyncTotal = promauto.NewCounterVec(prometheus.CounterOpts{

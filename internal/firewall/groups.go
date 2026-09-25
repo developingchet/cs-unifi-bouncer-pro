@@ -72,6 +72,11 @@ type Shard struct {
 	// onDrainedFired is set to true after onDrained has been called once for
 	// this shard. Prevents duplicate policy/rule deletion attempts on retry ticks.
 	onDrainedFired bool
+
+	// createFailures counts consecutive failed creates; createRetryAt is the
+	// earliest time the next create may be attempted.
+	createFailures int
+	createRetryAt  time.Time
 }
 
 // GroupRef keeps a UniFi group ID paired with its actual shard number.
@@ -820,7 +825,11 @@ func (sm *ShardManager) GroupIDs() []string {
 func (sm *ShardManager) updateMetricsLocked() {
 	family := sm.families[sm.family]
 	familyName := Family(sm.ipv6)
+	unsynced := 0
 	for _, s := range family.Shards {
+		if s.ID == "" {
+			unsynced += s.IPs.Len()
+		}
 		name, _ := sm.namer.GroupName(NameData{Family: familyName, Index: s.Index, Site: sm.site})
 		count := float64(s.IPs.Len())
 		metrics.FirewallGroupSize.WithLabelValues(familyName, name, sm.site).Set(count)
@@ -828,6 +837,39 @@ func (sm *ShardManager) updateMetricsLocked() {
 			metrics.ShardOccupancy.WithLabelValues(familyName, name, sm.site).Set(count / float64(sm.shardLimit))
 		}
 	}
+	metrics.UnsyncedIPs.WithLabelValues(familyName, sm.site).Set(float64(unsynced))
+}
+
+const (
+	createBackoffBase = 30 * time.Second
+	createBackoffMax  = 30 * time.Minute
+)
+
+// createBackoffRemaining reports how long to wait before retrying a shard
+// create that has failed before.
+func (sm *ShardManager) createBackoffRemaining(shard *Shard) time.Duration {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return time.Until(shard.createRetryAt)
+}
+
+// recordCreateFailure counts a failed create and schedules the next attempt
+// with exponential backoff, so a controller that keeps refusing the object is
+// not hit every tick. The bans in the shard stay unenforced until it exists,
+// which the unsynced_ips gauge reports.
+func (sm *ShardManager) recordCreateFailure(shard *Shard, ipCount int, err error) {
+	sm.mu.Lock()
+	shard.createFailures++
+	failures := shard.createFailures
+	delay := createBackoffBase << min(failures-1, 6)
+	delay = min(delay, createBackoffMax)
+	shard.createRetryAt = time.Now().Add(delay)
+	sm.mu.Unlock()
+
+	metrics.ShardCreateFailures.WithLabelValues(shard.Family, sm.site).Inc()
+	sm.log.Error().Err(err).Str("shard", shard.Name).Int("unsynced_ips", ipCount).
+		Int("consecutive_failures", failures).Dur("retry_in", delay).
+		Msg("failed to create shard on the controller; its bans are not enforced until it exists")
 }
 
 // countDirty returns the number of shards that currently have dirty IPs.
@@ -902,7 +944,6 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) error {
 
 	start := time.Now()
 	shardLabel := fmt.Sprintf("%d", shard.Index)
-	metrics.ShardIPCount.WithLabelValues(shard.Family, shardLabel, sm.site).Set(float64(len(ips)))
 
 	if sm.dryRun {
 		sm.log.Info().Str("shard", shard.Name).Int("member_count", len(ips)).
@@ -933,13 +974,20 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) error {
 	// Pending→Active transition: POST to create the group first
 	wasCreating := state == ShardStatePending
 	if wasCreating && groupID == "" {
+		if wait := sm.createBackoffRemaining(shard); wait > 0 {
+			sm.log.Debug().Str("shard", shard.Name).Dur("retry_in", wait).Msg("shard create backing off after failures")
+			return nil
+		}
 		createdID, err := sm.doCreateUniFiGroup(ctx, shard.Name)
 		if err != nil {
-			sm.log.Error().Err(err).Str("shard", shard.Name).Msg("failed to create shard in UniFi")
+			sm.recordCreateFailure(shard, len(ips), err)
 			return err
 		}
 		sm.mu.Lock()
 		shard.ID = createdID
+		shard.createFailures = 0
+		shard.createRetryAt = time.Time{}
+		sm.updateMetricsLocked()
 		sm.mu.Unlock()
 		// Cache the newly created shard with empty members (will be updated by the PUT below)
 		if err := sm.store.SetGroup(cacheKey(sm.site, shard.Name), storage.GroupRecord{
@@ -1026,6 +1074,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) error {
 	}
 
 	shard.IPs.CommitFlushed(sentMembers)
+	metrics.ShardIPCount.WithLabelValues(shard.Family, shardLabel, sm.site).Set(float64(len(sentMembers)))
 	if err := sm.store.SetGroup(cacheKey(sm.site, shard.Name), storage.GroupRecord{
 		UnifiID: shard.ID,
 		Site:    sm.site,

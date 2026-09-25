@@ -427,10 +427,11 @@ func TestWithReauth_MaxOneRetry(t *testing.T) {
 	}
 }
 
-// TestPing_Success verifies that Ping returns nil when the Network /api/self returns 200.
+// TestPing_Success verifies that an API-key client pings the integration API.
+// UniFi OS answers /api/self with 404 for API keys, which left /readyz at 503.
 func TestPing_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/proxy/network/api/self" {
+		if r.Method == http.MethodGet && r.URL.Path == "/proxy/network/integration/v1/sites" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -457,6 +458,39 @@ func TestPing_ReturnsError(t *testing.T) {
 			c := newTestClient(srv.URL, "api-key")
 			if err := c.Ping(context.Background()); err == nil {
 				t.Fatalf("Ping returned nil for HTTP %d", status)
+			}
+		})
+	}
+}
+
+// TestWriteErrorsSurfaceStatusAndBody verifies that every rejected write is an
+// error carrying the controller's reason. Releases up to v1.2.5 treated
+// statuses other than 400/401/404/409/429 as success, so a refused create was
+// reported only as "API returned empty ID".
+func TestWriteErrorsSurfaceStatusAndBody(t *testing.T) {
+	const reason = `{"code":"api.firewall.limit","message":"too many entries"}`
+	for _, status := range []int{http.StatusForbidden, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/integration/v1/sites") {
+					_, _ = io.WriteString(w, `{"offset":0,"limit":25,"count":1,"totalCount":1,"data":[{"id":"site-uuid","internalReference":"default","name":"Default"}]}`)
+					return
+				}
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, reason)
+			}))
+			defer srv.Close()
+			c := newTestClient(srv.URL, "api-key")
+			_, err := c.CreateTrafficMatchingList(context.Background(), "default", TrafficMatchingList{Name: "crowdsec-block-v4-8", Type: "IPV4_ADDRESSES"})
+			if err == nil {
+				t.Fatalf("create returned nil for HTTP %d", status)
+			}
+			if !strings.Contains(err.Error(), "too many entries") {
+				t.Errorf("error %q does not carry the controller's reason", err)
+			}
+			err = c.UpdateTrafficMatchingList(context.Background(), "default", TrafficMatchingList{ID: "x", Name: "crowdsec-block-v4-8", Type: "IPV4_ADDRESSES"})
+			if err == nil {
+				t.Fatalf("update returned nil for HTTP %d", status)
 			}
 		})
 	}
