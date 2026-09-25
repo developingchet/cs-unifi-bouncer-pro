@@ -709,45 +709,51 @@ func (sm *ShardManager) allocShard(idx int) *Shard {
 	}
 }
 
-// doCreateUniFiGroup performs the POST API call to create a group (TML in zone mode,
-// FirewallGroup in legacy mode) with the placeholder item.
-// Returns the created group's ID.
+// doCreateUniFiGroup creates the shard object (a TML in zone mode, a firewall
+// group in legacy mode) holding only the placeholder member, and returns its
+// ID. When the controller reports a conflict or answers without an ID, the
+// object may already exist under this name, so it is looked up and adopted
+// rather than created again on every sync.
 func (sm *ShardManager) doCreateUniFiGroup(ctx context.Context, name string) (string, error) {
 	objectKind := sm.shardObjectKind()
-
-	if sm.mode == "zone" {
-		tmlType := "IPV4_ADDRESSES"
-		groupType := "address-group"
-		if sm.ipv6 {
-			tmlType = "IPV6_ADDRESSES"
-			groupType = "ipv6-address-group"
-		}
-		created, err := sm.ctrl.CreateTrafficMatchingList(ctx, sm.site, controller.TrafficMatchingList{
-			Name:      name,
-			Type:      tmlType,
-			GroupType: groupType,
-			Items:     tmlPlaceholderItems(sm.ipv6), // API requires non-empty items on create
-		})
-		if err != nil {
-			var conflict *controller.ErrConflict
-			if errors.As(err, &conflict) {
-				if id := sm.findExistingTMLByName(ctx, name); id != "" {
-					sm.log.Warn().Str("shard", name).Str("id", id).
-						Msg("TML already exists (409 conflict); recovering existing ID")
-					return id, nil
-				}
-			}
-			return "", fmt.Errorf("create %s %s: %w", objectKind, name, err)
-		}
-		if created.ID == "" {
-			return "", fmt.Errorf("create %s %s: API returned empty ID", objectKind, name)
-		}
-		return created.ID, nil
+	id, err := sm.createShardObject(ctx, name)
+	var conflict *controller.ErrConflict
+	if err != nil && !errors.As(err, &conflict) {
+		return "", fmt.Errorf("create %s %s: %w", objectKind, name, err)
+	}
+	if err == nil && id != "" {
+		return id, nil
 	}
 
+	existing, lookupErr := sm.lookupShardObjectByName(ctx, name)
+	switch {
+	case lookupErr != nil:
+		return "", fmt.Errorf("create %s %s: look up existing object: %w", objectKind, name, lookupErr)
+	case existing != "":
+		sm.log.Warn().Str("shard", name).Str("id", existing).
+			Msg("shard object already exists on the controller; adopting it")
+		return existing, nil
+	case err != nil:
+		return "", fmt.Errorf("create %s %s: %w", objectKind, name, err)
+	default:
+		return "", fmt.Errorf("create %s %s: API returned empty ID and no object with that name exists", objectKind, name)
+	}
+}
+
+// createShardObject sends the create request for a shard object.
+func (sm *ShardManager) createShardObject(ctx context.Context, name string) (string, error) {
 	groupType := "address-group"
 	if sm.ipv6 {
 		groupType = "ipv6-address-group"
+	}
+	if sm.mode == "zone" {
+		created, err := sm.ctrl.CreateTrafficMatchingList(ctx, sm.site, controller.TrafficMatchingList{
+			Name:      name,
+			Type:      tmlTypeForFamily(Family(sm.ipv6)),
+			GroupType: groupType,
+			Items:     tmlPlaceholderItems(sm.ipv6), // API requires non-empty items on create
+		})
+		return created.ID, err
 	}
 	placeholder := TMLPlaceholderV4
 	if sm.ipv6 {
@@ -758,21 +764,16 @@ func (sm *ShardManager) doCreateUniFiGroup(ctx context.Context, name string) (st
 		GroupType:    groupType,
 		GroupMembers: []string{placeholder},
 	})
-	if err != nil {
-		var conflict *controller.ErrConflict
-		if errors.As(err, &conflict) {
-			if id := sm.findExistingGroupByName(ctx, name); id != "" {
-				sm.log.Warn().Str("shard", name).Str("id", id).
-					Msg("firewall group already exists (409 conflict); recovering existing ID")
-				return id, nil
-			}
-		}
-		return "", fmt.Errorf("create %s %s: %w", objectKind, name, err)
+	return created.ID, err
+}
+
+// lookupShardObjectByName returns the ID of the shard object named name, ""
+// if there is none, or the listing error.
+func (sm *ShardManager) lookupShardObjectByName(ctx context.Context, name string) (string, error) {
+	if sm.mode == "zone" {
+		return sm.lookupTMLByName(ctx, name)
 	}
-	if created.ID == "" {
-		return "", fmt.Errorf("create %s %s: API returned empty ID", objectKind, name)
-	}
-	return created.ID, nil
+	return sm.lookupGroupByName(ctx, name)
 }
 
 // GroupRefs returns Active group IDs paired with their actual shard indices.
@@ -1077,21 +1078,6 @@ func (sm *ShardManager) provisionShard(ctx context.Context, shard *Shard) error 
 	shard.activationPending = false
 	sm.mu.Unlock()
 	return nil
-}
-
-// findExistingTMLByName queries the UniFi API for a TML with the given name.
-// Used for 409 conflict recovery: if CreateTrafficMatchingList returns ErrConflict,
-// the TML already exists and we can recover its ID to continue without re-creating.
-func (sm *ShardManager) findExistingTMLByName(ctx context.Context, name string) string {
-	id, _ := sm.lookupTMLByName(ctx, name)
-	return id
-}
-
-// findExistingGroupByName queries the UniFi API for a firewall group with the given name.
-// Used for 409 conflict recovery in legacy mode.
-func (sm *ShardManager) findExistingGroupByName(ctx context.Context, name string) string {
-	id, _ := sm.lookupGroupByName(ctx, name)
-	return id
 }
 
 // lookupTMLByName returns the ID of the TML named name, "" if there is none,

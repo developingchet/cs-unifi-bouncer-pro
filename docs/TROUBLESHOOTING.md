@@ -28,6 +28,9 @@ Common issues and solutions for cs-unifi-bouncer-pro.
   - [Invalid port in ZONE_PAIRS or CLOUDFLARE_ZONE_PAIRS](#invalid-port-in-zone_pairs-or-cloudflare_zone_pairs)
 - [State and Reconcile Issues](#state-and-reconcile-issues)
   - [IPs not removed on unban](#ips-not-removed-on-unban)
+  - [Group edited in the UniFi UI](#group-edited-in-the-unifi-ui)
+  - [Bans stop applying after the controller restarts](#bans-stop-applying-after-the-controller-restarts)
+  - [Shard creation fails with "API returned empty ID"](#shard-creation-fails-with-api-returned-empty-id)
   - [Stale policies after removing a zone pair](#stale-policies-after-removing-a-zone-pair)
   - [Duplicate firewall groups after rename](#duplicate-firewall-groups-after-rename)
 - [Performance Issues](#performance-issues)
@@ -519,6 +522,14 @@ The reconcile command compares bbolt state with the current UniFi firewall state
 ### Bans stop applying after the controller restarts
 
 A controller that is shutting down or starting answers every API call with HTTP 404, and a self-hosted controller can take several minutes to start. The bouncer confirms a 404 by listing the controller's groups before treating a group as deleted, so shards are kept and retried until the controller is ready (`shard write returned 404 but the object still exists; controller is likely restarting`). Decisions received during the outage are applied once writes succeed. If the bouncer itself starts while the controller is still starting, it exits with `controller ... is not ready` and your restart policy retries it.
+
+### Shard creation fails with "API returned empty ID"
+
+**Symptom:** A create for a name that already exists, such as `crowdsec-block-v4-8`, fails on every sync; `/readyz` returns 503; `crowdsec_unifi_api_calls_total` counts failed creates; the number of IPs across the `crowdsec-block-*` groups is lower than the number of bans; some groups have no `crowdsec-policy-*` policy.
+
+**Cause:** Releases up to v1.2.5 numbered a new shard by counting shards. Once a shard number was missing (for example `crowdsec-block-v4-1` deleted), the next shard reused a number that was already taken, the controller refused the duplicate name, and every ban that did not fit in the existing shards stayed unapplied. Policies were also numbered by position rather than by shard number, so groups past the gap could be left without a block policy.
+
+**Fix:** Upgrade. A new shard now takes the number after the highest one in use. Every shard gets its policy by its real number. A create that answers without an ID adopts an existing object of that name. The first reconcile after the upgrade creates the missing policies and the overflow shard. No manual cleanup is needed.
 
 ---
 
