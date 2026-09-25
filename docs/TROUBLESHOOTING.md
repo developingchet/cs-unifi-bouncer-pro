@@ -371,6 +371,7 @@ Common causes and fixes:
 
 | Log message | Cause | Fix |
 |-------------|-------|-----|
+| Startup error mentioning `UNIFI_API_KEY` or `FIREWALL_MODE=legacy` | The Cloudflare whitelist needs zone mode and an API key | Set `UNIFI_API_KEY` and leave `FIREWALL_MODE` at `auto` or `zone` |
 | `CLOUDFLARE_ZONE_PAIRS is empty` | `CLOUDFLARE_ZONE_PAIRS` not set | Set `CLOUDFLARE_ZONE_PAIRS=External->Internal` (or your zone names) |
 | `resolve src zone ... not found` | Zone name in `CLOUDFLARE_ZONE_PAIRS` is wrong | Check zone names in Settings → Firewall → Zones; zone names are case-sensitive |
 | `fetch Cloudflare IPv4: ...` | Cannot reach Cloudflare IP list URL | Check outbound internet access from the container; verify `CLOUDFLARE_IPV4_URL` |
@@ -423,6 +424,20 @@ docker logs cs-unifi-bouncer-pro | grep firewall_mode
 The startup log line shows the detected or configured mode.
 
 **Fix:** Override the auto-detection by setting `FIREWALL_MODE=zone` or `FIREWALL_MODE=legacy` explicitly.
+
+### Startup fails: "uses the zone-based firewall, which requires UNIFI_API_KEY"
+
+**Cause:** The site has firewall zones, but the bouncer is logging in with `UNIFI_USERNAME`/`UNIFI_PASSWORD`. Zone policies can only be managed through the UniFi integration API, which does not accept username/password sessions.
+
+**Fix:** Create an API key (**Settings → Control Plane → Integrations**) and set `UNIFI_API_KEY`. To keep username/password and use legacy WAN_IN rules instead, set `FIREWALL_MODE=legacy`.
+
+### Login fails against a self-hosted controller
+
+**Symptom:** `login at /api/login returned HTTP 400` (or 401).
+
+**Check:** The startup line `detected UniFi controller layout` shows `"layout":"standalone"` for the self-hosted Network Application and `"layout":"unifi-os"` for UniFi OS consoles. If the layout is right, the credentials are wrong: use a local admin account, not a UI.com cloud account, and make sure first-run setup has finished in the controller UI.
+
+**Fix:** Correct `UNIFI_USERNAME`/`UNIFI_PASSWORD`. If the layout is wrong, check that `UNIFI_URL` points at the controller itself (e.g. `https://host:8443` for a self-hosted controller) and not at a reverse proxy that rewrites `/`.
 
 ---
 

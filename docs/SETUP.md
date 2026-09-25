@@ -190,6 +190,12 @@ UNIFI_PASSWORD=yourpassword
 # Leave UNIFI_API_KEY unset or commented out
 ```
 
+Username/password works with legacy firewall rules only. If the site uses the zone-based firewall, startup stops and asks for `UNIFI_API_KEY`; set one, or set `FIREWALL_MODE=legacy`.
+
+#### Self-hosted UniFi Network Application
+
+The bouncer also works with a self-hosted controller (for example the `linuxserver/unifi-network-application` Docker image). Point `UNIFI_URL` at its HTTPS port, usually `https://<host>:8443`. The bouncer detects the controller type on startup and logs `"layout":"standalone"`. Self-hosted controllers use a self-signed certificate by default, so set `UNIFI_CA_CERT` to its certificate, or `UNIFI_VERIFY_TLS=false` on a trusted network.
+
 ### Step 4: Ensure Network Connectivity
 
 The bouncer must reach **both** your CrowdSec LAPI and your UniFi controller from inside the container.

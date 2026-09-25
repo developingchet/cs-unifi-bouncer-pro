@@ -18,6 +18,7 @@ Automatically translates CrowdSec ban decisions into UniFi firewall rules — bl
 ## Features
 
 - **Dual firewall modes** — Auto-detects zone-based (UniFi Network ≥ 8.x) or legacy WAN_IN rules; no manual configuration required in most deployments
+- **UniFi OS and self-hosted controllers** — Works with UniFi OS consoles and the self-hosted UniFi Network Application; the controller type is detected on startup
 - **Multi-site** — Apply bans to multiple UniFi sites simultaneously with a single bouncer instance
 - **Batch sync** — IP changes are flushed after decision batches and retried at configurable intervals (default 30s), with bin-packing to fill shards before creating new ones
 - **Shard management** — Automatic creation of multiple Firewall Groups / Traffic Matching Lists when IP count exceeds capacity (10,000 per shard)
@@ -94,7 +95,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `UNIFI_API_DEBUG` | `false` | Log raw HTTP request/response bodies |
 | `ENABLE_IPV6` | `false` | Enable IPv6 TCP dialing to the UniFi controller. Leave `false` unless your controller is reachable over IPv6. This is separate from `FIREWALL_ENABLE_IPV6` which controls IPv6 firewall rule creation. |
 
-¹ Provide either `UNIFI_API_KEY` **or** both `UNIFI_USERNAME` + `UNIFI_PASSWORD`.
+¹ Provide either `UNIFI_API_KEY` **or** both `UNIFI_USERNAME` + `UNIFI_PASSWORD`. Username/password supports legacy firewall rules only; the zone-based firewall and the Cloudflare whitelist require an API key.
 
 ### CrowdSec
 

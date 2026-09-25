@@ -54,6 +54,12 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 
 API key authentication is preferred. If `UNIFI_API_KEY` is set, username/password fields are ignored. API key authentication is available in UniFi Network ≥ 8.1.
 
+Username/password authentication supports legacy firewall mode only. The zone-based firewall and the Cloudflare whitelist use the UniFi integration API, which rejects session logins, so they require `UNIFI_API_KEY`.
+
+### Controller type
+
+The bouncer supports both UniFi OS consoles (UDM, UCG, Cloud Key Gen2+, UniFi OS Server) and the self-hosted UniFi Network Application (Docker images such as `linuxserver/unifi-network-application`, or a package install). It detects which one `UNIFI_URL` points at on startup and logs it as `"layout":"unifi-os"` or `"layout":"standalone"`. The two use different login paths (`/api/auth/login` and `/api/login`) and API prefixes. Self-hosted controllers usually listen on port 8443, e.g. `UNIFI_URL=https://unifi.local:8443`.
+
 ---
 
 ## UniFi Sites
@@ -80,7 +86,7 @@ UNIFI_SITES=default,homelab,iot
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `FIREWALL_MODE` | `auto` | No | `auto`, `legacy`, or `zone` |
+| `FIREWALL_MODE` | `auto` | No | `auto`, `legacy`, or `zone`. `auto` checks each site for firewall zones on startup: with an API key it asks the integration API; with username/password it reads the site's zone list. A site without zones uses legacy mode. A site with zones but no API key stops startup with an error asking for `UNIFI_API_KEY` or `FIREWALL_MODE=legacy`. |
 | `FIREWALL_BLOCK_ACTION` | `drop` | No | Block action for legacy rules: `drop` or `reject` |
 | `FIREWALL_ENABLE_IPV6` | `true` | No | Create separate IPv6 firewall groups and rules. Distinct from `ENABLE_IPV6` which controls HTTP client IPv6 dialing. |
 | `FIREWALL_GROUP_CAPACITY` | `10000` | No | Maximum IPs per firewall group shard (used if family-specific overrides are not set) |
@@ -258,7 +264,7 @@ When enabled, the bouncer periodically fetches current Cloudflare IP ranges and 
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | No | Enable the Cloudflare IP whitelist sync. |
+| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | No | Enable the Cloudflare IP whitelist sync. Requires zone mode and `UNIFI_API_KEY`; startup fails with `FIREWALL_MODE=legacy` or without an API key. |
 | `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | No | How often to re-fetch Cloudflare IP ranges and update the IP TMLs (default: weekly). |
 | `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | No | URL to fetch the current Cloudflare IPv4 CIDR list. |
 | `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | No | URL to fetch the current Cloudflare IPv6 CIDR list. |
@@ -421,7 +427,9 @@ BLOCKLIST_URLS=https://example.com/badips.txt,https://example.net/threatlist.txt
 BLOCKLIST_REFRESH_INTERVAL=12h
 ```
 
-Each feed URL owns a separate ban claim. If CrowdSec or another feed still claims an IP, expiry of one feed's claim does not remove the firewall ban. Feed refreshes extend claim expiry to twice the refresh interval; a failed fetch lets the claim expire. Feed imports are logged by URL and entry count.
+Each feed URL owns a separate ban claim. If CrowdSec or another feed still claims an IP, expiry of one feed's claim does not remove the firewall ban. Feed refreshes extend claim expiry to twice the refresh interval; a failed fetch lets the claim expire. Feed imports are logged with entry, new and skipped counts. Feed URLs often carry an access token, so logs and stored claim sources show the URL without credentials, query string or fragment (`https://example.com/badips.txt?<redacted>`).
+
+Addresses are recorded and applied in batches of 500, so a large feed does not hold up CrowdSec decisions while it imports. Addresses the controller rejects stay recorded as pending and are retried by the next reconcile.
 
 ---
 
@@ -452,7 +460,7 @@ The bouncer can POST a JSON notification to a webhook URL when significant event
 }
 ```
 
-Webhook errors are logged at `warn` level and never cause the bouncer to exit or retry. The HTTP timeout for webhook POSTs is 5 seconds.
+Notifications are delivered in the background, so a slow endpoint never delays syncing. Up to 64 events can be queued; further events are dropped with a `webhook: queue full` warning. On shutdown, queued events get up to 5 seconds to send. Webhook errors are logged at `warn` level and never cause the bouncer to exit or retry. The HTTP timeout for webhook POSTs is 5 seconds. Logs show only the webhook host, because Slack- and Discord-style URLs carry a token in the path.
 
 ```bash
 # Fire a notification when the circuit breaker trips or resets
@@ -467,7 +475,7 @@ WEBHOOK_EVENTS=circuit_breaker_open,circuit_breaker_close,reconcile_drift
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DRY_RUN` | `false` | Safe testing mode. The bouncer connects to both the UniFi controller and CrowdSec LAPI, reads existing state, and logs actions it *would* take. It does not change UniFi configuration or mutate bbolt state. Username/password authentication still sends a login `POST` to create a session; API key authentication does not. Turning off dry run after a dry run session starts cleanly with no phantom bbolt entries. |
-| `LOG_LEVEL` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error` |
+| `LOG_LEVEL` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error`. Messages from the CrowdSec stream client carry `"component":"crowdsec-client"`; its per-poll debug messages appear only at `trace`. |
 | `LOG_FORMAT` | `json` | Log format: `json` (structured, for Loki/Splunk) or `text` (human-readable) |
 | `METRICS_ENABLED` | `true` | Enable the Prometheus metrics HTTP server |
 | `METRICS_ADDR` | `:9090` | Address for the Prometheus metrics endpoint |

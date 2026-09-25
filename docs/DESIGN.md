@@ -118,7 +118,9 @@ The manager delegates controller operations to two mode-specific components:
 - **`legacyManager`** — manipulates firewall address groups and `WAN_IN`/`WANv6_IN` rules
 - **`zoneManager`** — manipulates firewall address groups and zone policies
 
-The `managerImpl` wraps both and selects based on the detected or configured mode. In `auto` mode, feature detection (`internal/controller/features.go`) probes the integration v1 firewall zones endpoint per site and caches the result. A controller without that API (HTTP 404 or an HTML fallback page) is treated as legacy; any other probe error stops startup rather than guessing the mode.
+The `managerImpl` wraps both and selects based on the detected or configured mode. In `auto` mode, feature detection (`internal/controller/features.go`) checks each site for firewall zones and caches the result. With an API key it lists zones through the integration v1 API; with a session login, which that API rejects, it reads `/v2/api/site/<site>/firewall/zone`. A site with no zones, or a controller without the endpoint (HTTP 404 or an HTML fallback page), is treated as legacy. A session-authenticated site that has zones stops startup with an error asking for an API key, because zone policies can only be written through the integration API. Any other probe error also stops startup rather than guessing the mode.
+
+Before feature detection, `internal/controller/layout.go` detects the controller layout from `GET /`: UniFi OS consoles answer it directly, while the self-hosted Network Application redirects to `/manage`. The layout selects the login path (`/api/auth/login` or `/api/login`) and the prefix for classic and v2 API calls (`/proxy/network` or none). The integration API path is the same on both.
 
 #### Zone policy portFilter constraint
 
