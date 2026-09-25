@@ -410,9 +410,7 @@ func Load() (*Config, error) {
 
 	// Load from environment — use "." as delimiter so env vars aren't split
 	// by "_". Our env var names don't contain ".", so they stay flat.
-	if err := k.Load(env.Provider("", ".", func(s string) string {
-		return strings.ToLower(s)
-	}), nil); err != nil {
+	if err := k.Load(env.Provider("", ".", strings.ToLower), nil); err != nil {
 		return nil, fmt.Errorf("load env: %w", err)
 	}
 

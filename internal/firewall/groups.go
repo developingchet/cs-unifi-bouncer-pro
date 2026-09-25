@@ -431,7 +431,8 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 			}
 		}
 
-		if apiID != "" && (len(members) > 0 || cached && len(rec.Members) > 0) {
+		switch {
+		case apiID != "" && (len(members) > 0 || cached && len(rec.Members) > 0):
 			shard = &Shard{ID: apiID, Name: name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet(), State: ShardStateActive}
 			if len(members) > 0 {
 				shard.IPs.Replace(members)
@@ -445,9 +446,9 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 			if err := sm.store.SetGroup(cacheKey(sm.site, name), storage.GroupRecord{UnifiID: apiID, Site: sm.site, Index: idx, Members: members, IPv6: sm.ipv6}); err != nil {
 				return fmt.Errorf("cache recovered shard %s: %w", name, err)
 			}
-		} else if apiID != "" {
+		case apiID != "":
 			sm.orphanedGroups = append(sm.orphanedGroups, orphanedGroup{UnifiID: apiID, Name: name})
-		} else if cached {
+		case cached:
 			// Allocate a Pending shard in-memory without creating in UniFi yet.
 			shard = sm.allocShard(idx)
 			if len(rec.Members) > 0 {
