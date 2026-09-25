@@ -408,7 +408,7 @@ func (s *FakeUnifiServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "/api/auth/login" && r.Method == http.MethodPost:
 		s.handleLogin(w, r)
-	case path == "/api/self":
+	case path == "/proxy/network/api/self":
 		if !s.checkAuth(w, r) {
 			return
 		}

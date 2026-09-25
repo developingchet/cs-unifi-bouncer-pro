@@ -39,7 +39,7 @@ type apiRule struct {
 
 // --- Integration v1 wire types ----------------------------------------------
 
-// apiSiteV1 is returned by GET /proxy/network/integration/v1/sites.
+// apiSiteV1 is returned by GET {network}/integration/v1/sites.
 type apiSiteV1 struct {
 	ID                string `json:"id"`
 	InternalReference string `json:"internalReference"`
@@ -304,7 +304,7 @@ func doDELETE(ctx context.Context, c *unifiClient, url, endpoint string) error {
 // --- Firewall Groups (legacy REST) ------------------------------------------
 
 func listFirewallGroups(ctx context.Context, c *unifiClient, site string) ([]FirewallGroup, error) {
-	data, err := doGET(ctx, c, groupEndpoint(c.cfg.BaseURL, site), "list-groups")
+	data, err := doGET(ctx, c, c.groupEndpoint(site), "list-groups")
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +325,7 @@ func createFirewallGroup(ctx context.Context, c *unifiClient, site string, g Fir
 		GroupType:    g.GroupType,
 		GroupMembers: g.GroupMembers,
 	}
-	raw, err := doPOST(ctx, c, groupEndpoint(c.cfg.BaseURL, site), "create-group", payload)
+	raw, err := doPOST(ctx, c, c.groupEndpoint(site), "create-group", payload)
 	if err != nil {
 		return FirewallGroup{}, err
 	}
@@ -338,19 +338,19 @@ func createFirewallGroup(ctx context.Context, c *unifiClient, site string, g Fir
 
 func updateFirewallGroup(ctx context.Context, c *unifiClient, site string, g FirewallGroup) error {
 	payload := apiGroup(g)
-	u := groupEndpoint(c.cfg.BaseURL, site) + "/" + g.ID
+	u := c.groupEndpoint(site) + "/" + g.ID
 	return doPUT(ctx, c, u, "update-group", payload)
 }
 
 func deleteFirewallGroup(ctx context.Context, c *unifiClient, site, id string) error {
-	u := groupEndpoint(c.cfg.BaseURL, site) + "/" + id
+	u := c.groupEndpoint(site) + "/" + id
 	return ignoreNotFound(doDELETE(ctx, c, u, "delete-group"))
 }
 
 // --- Firewall Rules (legacy REST) -------------------------------------------
 
 func listFirewallRules(ctx context.Context, c *unifiClient, site string) ([]FirewallRule, error) {
-	data, err := doGET(ctx, c, ruleEndpoint(c.cfg.BaseURL, site), "list-rules")
+	data, err := doGET(ctx, c, c.ruleEndpoint(site), "list-rules")
 	if err != nil {
 		return nil, err
 	}
@@ -377,7 +377,7 @@ func createFirewallRule(ctx context.Context, c *unifiClient, site string, r Fire
 		Protocol:            r.Protocol,
 		SrcFirewallGroupIDs: r.SrcFirewallGroupIDs,
 	}
-	raw, err := doPOST(ctx, c, ruleEndpoint(c.cfg.BaseURL, site), "create-rule", payload)
+	raw, err := doPOST(ctx, c, c.ruleEndpoint(site), "create-rule", payload)
 	if err != nil {
 		return FirewallRule{}, err
 	}
@@ -396,12 +396,12 @@ func createFirewallRule(ctx context.Context, c *unifiClient, site string, r Fire
 
 func updateFirewallRule(ctx context.Context, c *unifiClient, site string, r FirewallRule) error {
 	payload := apiRule(r)
-	u := ruleEndpoint(c.cfg.BaseURL, site) + "/" + r.ID
+	u := c.ruleEndpoint(site) + "/" + r.ID
 	return doPUT(ctx, c, u, "update-rule", payload)
 }
 
 func deleteFirewallRule(ctx context.Context, c *unifiClient, site, id string) error {
-	u := ruleEndpoint(c.cfg.BaseURL, site) + "/" + id
+	u := c.ruleEndpoint(site) + "/" + id
 	return ignoreNotFound(doDELETE(ctx, c, u, "delete-rule"))
 }
 
@@ -461,7 +461,7 @@ func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, er
 	}
 	c.cacheMu.RUnlock()
 
-	endpointURL := c.cfg.BaseURL + "/proxy/network/integration/v1/sites"
+	endpointURL := c.networkURL("/integration/v1/sites")
 	data, err := listAllV1Pages(ctx, c, endpointURL, "list-sites")
 	if err != nil {
 		return "", fmt.Errorf("fetch integration v1 sites: %w", err)
@@ -485,9 +485,14 @@ func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, er
 	return "", fmt.Errorf("site %q not found in integration v1 sites list", siteName)
 }
 
-// discoverSites fetches all integration v1 site internalReferences.
+// discoverSites returns the short site names (internalReference) visible to
+// the configured credentials. Session logins cannot read integration v1, so
+// they use the classic site list, whose name field holds the same value.
 func discoverSites(ctx context.Context, c *unifiClient) ([]string, error) {
-	endpointURL := c.cfg.BaseURL + "/proxy/network/integration/v1/sites"
+	if c.cfg.APIKey == "" {
+		return discoverSitesWithSession(ctx, c)
+	}
+	endpointURL := c.networkURL("/integration/v1/sites")
 	data, err := listAllV1Pages(ctx, c, endpointURL, "list-sites")
 	if err != nil {
 		return nil, fmt.Errorf("fetch integration v1 sites: %w", err)
@@ -505,13 +510,32 @@ func discoverSites(ctx context.Context, c *unifiClient) ([]string, error) {
 	return sites, nil
 }
 
+func discoverSitesWithSession(ctx context.Context, c *unifiClient) ([]string, error) {
+	data, err := doGET(ctx, c, c.networkURL("/api/self/sites"), "list-sites")
+	if err != nil {
+		return nil, fmt.Errorf("fetch sites: %w", err)
+	}
+	var sites []string
+	for _, raw := range data {
+		var s struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &s); err != nil {
+			continue
+		}
+		if s.Name != "" {
+			sites = append(sites, s.Name)
+		}
+	}
+	return sites, nil
+}
+
 // --- Firewall Zones (integration v1) ----------------------------------------
 
 // listFirewallZones fetches all zones from the integration v1 API.
 // siteID must be the site UUID (from getSiteID), not the site name.
 func listFirewallZones(ctx context.Context, c *unifiClient, siteID string) ([]Zone, error) {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/zones",
-		c.cfg.BaseURL, siteID)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/zones", siteID)
 	data, err := listAllV1Pages(ctx, c, endpointURL, "list-zones")
 	if err != nil {
 		return nil, err
@@ -530,8 +554,7 @@ func listFirewallZones(ctx context.Context, c *unifiClient, siteID string) ([]Zo
 // --- Traffic Matching Lists (integration v1) ---------------------------------
 
 func listTMLs(ctx context.Context, c *unifiClient, siteID string) ([]TrafficMatchingList, error) {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/traffic-matching-lists",
-		c.cfg.BaseURL, siteID)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/traffic-matching-lists", siteID)
 	data, err := listAllV1Pages(ctx, c, endpointURL, "list-tmls")
 	if err != nil {
 		return nil, err
@@ -548,8 +571,7 @@ func listTMLs(ctx context.Context, c *unifiClient, siteID string) ([]TrafficMatc
 }
 
 func createTML(ctx context.Context, c *unifiClient, siteID string, list TrafficMatchingList) (TrafficMatchingList, error) {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/traffic-matching-lists",
-		c.cfg.BaseURL, siteID)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/traffic-matching-lists", siteID)
 	raw, err := doPOSTv2(ctx, c, endpointURL, "create-tml", tmlToWire(list))
 	if err != nil {
 		return TrafficMatchingList{}, err
@@ -562,14 +584,12 @@ func createTML(ctx context.Context, c *unifiClient, siteID string, list TrafficM
 }
 
 func updateTML(ctx context.Context, c *unifiClient, siteID string, list TrafficMatchingList) error {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/traffic-matching-lists/%s",
-		c.cfg.BaseURL, siteID, list.ID)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/traffic-matching-lists/%s", siteID, list.ID)
 	return doPUT(ctx, c, endpointURL, "update-tml", tmlToWireUpdate(list))
 }
 
 func deleteTML(ctx context.Context, c *unifiClient, siteID, id string) error {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/traffic-matching-lists/%s",
-		c.cfg.BaseURL, siteID, id)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/traffic-matching-lists/%s", siteID, id)
 	return ignoreNotFound(doDELETE(ctx, c, endpointURL, "delete-tml"))
 }
 
@@ -634,8 +654,7 @@ func tmlFromWire(t apiTMLV1) TrafficMatchingList {
 // --- Zone Policies (integration v1) -----------------------------------------
 
 func listZonePoliciesV1(ctx context.Context, c *unifiClient, siteID string) ([]ZonePolicy, error) {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies",
-		c.cfg.BaseURL, siteID)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/policies", siteID)
 	data, err := listAllV1Pages(ctx, c, endpointURL, "list-policies")
 	if err != nil {
 		return nil, err
@@ -652,8 +671,7 @@ func listZonePoliciesV1(ctx context.Context, c *unifiClient, siteID string) ([]Z
 }
 
 func createZonePolicyV1(ctx context.Context, c *unifiClient, siteID string, policy ZonePolicy) (ZonePolicy, error) {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies",
-		c.cfg.BaseURL, siteID)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/policies", siteID)
 	raw, err := doPOSTv2(ctx, c, endpointURL, "create-policy", modelToV1Policy(policy))
 	if err != nil {
 		return ZonePolicy{}, err
@@ -666,14 +684,12 @@ func createZonePolicyV1(ctx context.Context, c *unifiClient, siteID string, poli
 }
 
 func updateZonePolicyV1(ctx context.Context, c *unifiClient, siteID string, policy ZonePolicy) error {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies/%s",
-		c.cfg.BaseURL, siteID, policy.ID)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/policies/%s", siteID, policy.ID)
 	return doPUT(ctx, c, endpointURL, "update-policy", modelToV1PolicyUpdate(policy))
 }
 
 func deleteZonePolicyV1(ctx context.Context, c *unifiClient, siteID, id string) error {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies/%s",
-		c.cfg.BaseURL, siteID, id)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/policies/%s", siteID, id)
 	return ignoreNotFound(doDELETE(ctx, c, endpointURL, "delete-policy"))
 }
 

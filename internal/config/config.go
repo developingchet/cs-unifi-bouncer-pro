@@ -620,6 +620,14 @@ func (c *Config) Validate() error {
 
 	// Validate Cloudflare whitelist config
 	if c.CloudflareWhitelistEnabled {
+		// The whitelist is a set of zone policies managed through the
+		// integration API, which accepts API keys only.
+		if c.FirewallMode == "legacy" {
+			return fmt.Errorf("CLOUDFLARE_WHITELIST_ENABLED requires the zone-based firewall; it cannot be used with FIREWALL_MODE=legacy")
+		}
+		if c.UnifiAPIKey == "" {
+			return fmt.Errorf("CLOUDFLARE_WHITELIST_ENABLED requires UNIFI_API_KEY")
+		}
 		if c.CloudflareRefreshInterval <= 0 {
 			return fmt.Errorf("CLOUDFLARE_REFRESH_INTERVAL must be > 0")
 		}

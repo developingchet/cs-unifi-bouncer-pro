@@ -17,9 +17,11 @@ import (
 )
 
 func TestDryRunClientRefusesControllerWrites(t *testing.T) {
-	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests.Add(1)
+	var writes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writes.Add(1)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -35,8 +37,8 @@ func TestDryRunClientRefusesControllerWrites(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "dry run") {
 		t.Fatalf("write was not rejected: %v", err)
 	}
-	if requests.Load() != 0 {
-		t.Fatalf("dry run sent %d controller requests", requests.Load())
+	if writes.Load() != 0 {
+		t.Fatalf("dry run sent %d controller writes", writes.Load())
 	}
 }
 
@@ -75,7 +77,7 @@ func TestControllerRedirectDoesNotForwardCredentials(t *testing.T) {
 }
 
 // newTestClient builds a *unifiClient directly, skipping EnsureAuth.
-// It is shared by client_test.go, version_test.go, and api_test.go.
+// It is shared by the controller package tests and uses the UniFi OS layout.
 func newTestClient(baseURL, apiKey string) *unifiClient {
 	log := zerolog.Nop()
 	cfg := ClientConfig{
@@ -90,12 +92,14 @@ func newTestClient(baseURL, apiKey string) *unifiClient {
 	httpClient := &http.Client{Transport: transport, Timeout: cfg.Timeout}
 	authCfg := AuthConfig{
 		BaseURL:       baseURL,
+		LoginPath:     layoutUniFiOS.loginPath,
 		APIKey:        apiKey,
 		ReauthTimeout: 5 * time.Second,
 	}
 	return &unifiClient{
 		cfg:          cfg,
 		http:         httpClient,
+		layout:       layoutUniFiOS,
 		session:      newSessionManager(authCfg, httpClient, log),
 		featureCache: make(map[string]map[string]bool),
 		zoneIDCache:  make(map[string]map[string]string),
@@ -423,10 +427,10 @@ func TestWithReauth_MaxOneRetry(t *testing.T) {
 	}
 }
 
-// TestPing_Success verifies that Ping returns nil when /api/self returns 200.
+// TestPing_Success verifies that Ping returns nil when the Network /api/self returns 200.
 func TestPing_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/api/self" {
+		if r.Method == http.MethodGet && r.URL.Path == "/proxy/network/api/self" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}

@@ -50,6 +50,12 @@ func main() {
 	root := &cobra.Command{
 		Use:   "cs-unifi-bouncer-pro",
 		Short: "CrowdSec bouncer for UniFi firewall management",
+		// main prints the error once; usage is only useful for argument errors,
+		// which cobra reports before PersistentPreRun runs.
+		SilenceErrors: true,
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+			cmd.SilenceUsage = true
+		},
 	}
 
 	root.AddCommand(
@@ -235,9 +241,10 @@ func runDaemon() error {
 		} else {
 			log.Info().Msg("Cloudflare whitelist initial sync complete")
 		}
-	} else if !cfg.DryRun {
+	} else if !cfg.DryRun && cfg.UnifiAPIKey != "" {
 		// Feature is disabled — drain any policies/TMLs left from a previous run
 		// where it was enabled. Without this, they would remain as orphans in UniFi.
+		// Those objects can only exist when an API key was used to create them.
 		drainMgr := whitelist.NewManager(ctrl, cfg.UnifiSites, nil, log)
 		if err := drainMgr.Drain(ctx); err != nil {
 			log.Warn().Err(err).Msg("Cloudflare whitelist drain failed — orphaned policies may remain")
@@ -1273,5 +1280,6 @@ func buildLogger(cfg *config.Config) zerolog.Logger {
 		redactWriter := logger.NewRedactWriter(os.Stderr)
 		base = zerolog.New(redactWriter).Level(level).With().Timestamp().Logger()
 	}
+	logger.ForwardLogrus(base)
 	return base
 }

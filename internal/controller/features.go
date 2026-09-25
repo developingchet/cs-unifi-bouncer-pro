@@ -1,10 +1,12 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -52,9 +54,13 @@ func hasFeature(ctx context.Context, c *unifiClient, site, feature string) (bool
 	return result, nil
 }
 
-// detectZoneFirewall probes the integration v1 firewall zones endpoint.
-// Returns false only when integration v1 is unavailable.
+// detectZoneFirewall reports whether site enforces the zone-based firewall.
+// Zone mode is driven through the integration v1 API, which only accepts API
+// keys, so a session login is checked against the classic zone list instead.
 func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool, error) {
+	if c.cfg.APIKey == "" {
+		return detectZoneFirewallWithSession(ctx, c, site)
+	}
 	siteID, err := getSiteID(ctx, c, site)
 	if err != nil {
 		var notFound *ErrNotFound
@@ -64,8 +70,7 @@ func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool,
 		return false, fmt.Errorf("resolve integration site %s: %w", site, err)
 	}
 
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/zones?limit=1",
-		c.cfg.BaseURL, siteID)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/zones?limit=1", siteID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointURL, nil)
 	if err != nil {
 		return false, err
@@ -82,16 +87,60 @@ func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool,
 			return err
 		}
 		defer resp.Body.Close()
-		// Peek at first byte — HTML responses (proxy fallback) start with '<'
-		buf := make([]byte, 1)
-		if n, _ := resp.Body.Read(buf); n > 0 && buf[0] == '<' {
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
+		if err != nil {
+			return fmt.Errorf("read zone probe: %w", err)
+		}
+		// An HTML page means the path fell through to the web UI.
+		if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 && trimmed[0] == '<' {
 			supported = false
 			return nil
 		}
-		supported = resp.StatusCode == http.StatusOK
+		var page apiV1Page
+		if err := json.Unmarshal(body, &page); err != nil {
+			return fmt.Errorf("decode zone probe: %w", err)
+		}
+		// Zone-based sites always carry the built-in zones; a controller
+		// without a gateway answers with an empty list.
+		supported = page.TotalCount > 0 || len(page.Data) > 0
 		return nil
 	})
 	return supported, callErr
+}
+
+// detectZoneFirewallWithSession uses the session-accessible zone list. No
+// zones means legacy WAN_IN rules are enforced. Zones mean the site is
+// zone-based, which this bouncer can only manage through an API key.
+func detectZoneFirewallWithSession(ctx context.Context, c *unifiClient, site string) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.networkURL("/v2/api/site/%s/firewall/zone", site), nil)
+	if err != nil {
+		return false, err
+	}
+	var zones []json.RawMessage
+	callErr := c.withReauth(ctx, func() error {
+		resp, err := c.apiDo(ctx, req, "feature/zone-detect-session")
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodyBytes)).Decode(&zones); err != nil {
+			return fmt.Errorf("decode zone list: %w", err)
+		}
+		return nil
+	})
+	var notFound *ErrNotFound
+	if errors.As(callErr, &notFound) {
+		return false, nil // controller predates zone-based firewall
+	}
+	if callErr != nil {
+		return false, callErr
+	}
+	if len(zones) > 0 {
+		return false, fmt.Errorf("site %s uses the zone-based firewall, which requires UNIFI_API_KEY "+
+			"(integration API); set UNIFI_API_KEY, or FIREWALL_MODE=legacy if legacy rules are still enforced", site)
+	}
+	return false, nil
 }
 
 // --- API helpers for legacy envelope responses ------------------------------
@@ -104,12 +153,12 @@ type apiResponse struct {
 	} `json:"meta"`
 }
 
-func groupEndpoint(base, site string) string {
-	return fmt.Sprintf("%s/proxy/network/api/s/%s/rest/firewallgroup", base, site)
+func (c *unifiClient) groupEndpoint(site string) string {
+	return c.networkURL("/api/s/%s/rest/firewallgroup", site)
 }
 
-func ruleEndpoint(base, site string) string {
-	return fmt.Sprintf("%s/proxy/network/api/s/%s/rest/firewallrule", base, site)
+func (c *unifiClient) ruleEndpoint(site string) string {
+	return c.networkURL("/api/s/%s/rest/firewallrule", site)
 }
 
 // --- Zone ID Resolution (integration v1) ------------------------------------

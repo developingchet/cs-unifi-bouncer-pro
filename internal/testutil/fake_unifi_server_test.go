@@ -380,10 +380,10 @@ func TestFakeServer_ReauthOn401(t *testing.T) {
 	defer s.Close()
 	c := newFakeClient(t, s)
 
-	// Inject a 401 on the next GET /api/self
-	s.InjectFault(http.MethodGet, "/api/self", http.StatusUnauthorized)
+	// Inject a 401 on the next GET /proxy/network/api/self
+	s.InjectFault(http.MethodGet, "/proxy/network/api/self", http.StatusUnauthorized)
 
-	// Ping calls GET /api/self; the first attempt gets 401, client re-auths,
+	// Ping calls GET /proxy/network/api/self; the first attempt gets 401, client re-auths,
 	// second attempt succeeds (fault consumed).
 	if err := c.Ping(context.Background()); err != nil {
 		t.Fatalf("Ping after re-auth: %v", err)
@@ -396,7 +396,7 @@ func TestFakeServer_RateLimit(t *testing.T) {
 	defer s.Close()
 	c := newFakeClient(t, s)
 
-	s.InjectFault(http.MethodGet, "/api/self", http.StatusTooManyRequests)
+	s.InjectFault(http.MethodGet, "/proxy/network/api/self", http.StatusTooManyRequests)
 
 	err := c.Ping(context.Background())
 	if err == nil {
@@ -471,7 +471,7 @@ func TestFakeServer_Reset(t *testing.T) {
 	s.AddZone("site-uuid-1", "zone-1", "External")
 	s.AddTML("site-uuid-1", "tml-1", "IPV4_ADDRESSES", "list-1", nil)
 	s.AddGroup("default", "grp-1", "g1", "address-group", nil)
-	s.InjectFault(http.MethodGet, "/api/self", http.StatusInternalServerError)
+	s.InjectFault(http.MethodGet, "/proxy/network/api/self", http.StatusInternalServerError)
 
 	c := newFakeClient(t, s)
 	// Touch the server so requests are captured.
@@ -514,7 +514,7 @@ func TestFakeServer_RateLimitInject(t *testing.T) {
 	defer s.Close()
 	c := newFakeClient(t, s)
 
-	s.InjectRateLimit(http.MethodGet, "/api/self", 30)
+	s.InjectRateLimit(http.MethodGet, "/proxy/network/api/self", 30)
 
 	err := c.Ping(context.Background())
 	if err == nil {

@@ -40,6 +40,7 @@ type ClientConfig struct {
 type unifiClient struct {
 	cfg          ClientConfig
 	http         *http.Client
+	layout       apiLayout
 	session      *sessionManager
 	featureCache map[string]map[string]bool // site -> feature -> bool
 	cacheMu      sync.RWMutex
@@ -106,9 +107,16 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 		},
 	}
 
+	layout, err := detectLayout(ctx, httpClient, cfg.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	log.Info().Str("layout", layout.name).Msg("detected UniFi controller layout")
+
 	c := &unifiClient{
 		cfg:          cfg,
 		http:         httpClient,
+		layout:       layout,
 		featureCache: make(map[string]map[string]bool),
 		zoneIDCache:  make(map[string]map[string]string),
 		siteIDCache:  make(map[string]string),
@@ -117,6 +125,7 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 
 	authCfg := AuthConfig{
 		BaseURL:       cfg.BaseURL,
+		LoginPath:     layout.loginPath,
 		Username:      cfg.Username,
 		Password:      cfg.Password,
 		APIKey:        cfg.APIKey,
@@ -263,7 +272,7 @@ func (c *unifiClient) withReauth(ctx context.Context, fn func() error) error {
 
 // Ping verifies the controller is reachable.
 func (c *unifiClient) Ping(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.cfg.BaseURL+"/api/self", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.networkURL("/api/self"), nil)
 	if err != nil {
 		return err
 	}

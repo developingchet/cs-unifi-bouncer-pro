@@ -960,6 +960,17 @@ func TestValidateRuntimeLimits(t *testing.T) {
 		{"zero flush concurrency", func(c *Config) { c.FirewallFlushConcurrency = 0 }},
 		{"negative rate limit", func(c *Config) { c.DecisionRateLimit = -1 }},
 		{"rate limit without burst", func(c *Config) { c.DecisionRateLimit = 10; c.DecisionBurstSize = 0 }},
+		{"cloudflare whitelist in legacy mode", func(c *Config) {
+			c.CloudflareWhitelistEnabled = true
+			c.CloudflareZonePairs = []string{"External->Internal"}
+			c.FirewallMode = "legacy"
+		}},
+		{"cloudflare whitelist without API key", func(c *Config) {
+			c.CloudflareWhitelistEnabled = true
+			c.CloudflareZonePairs = []string{"External->Internal"}
+			c.UnifiAPIKey = ""
+			c.UnifiUsername, c.UnifiPassword = "admin", "secret"
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

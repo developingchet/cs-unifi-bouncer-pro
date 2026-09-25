@@ -32,25 +32,76 @@ func zonesEndpointPrefix(siteID string) string {
 	return fmt.Sprintf("/proxy/network/integration/v1/sites/%s/firewall/zones", siteID)
 }
 
-// TestHasFeature_ZoneFirewall_Supported verifies that hasFeature returns true
-// when the zone endpoint responds with HTTP 200.
-func TestHasFeature_ZoneFirewall_Supported(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprint(w, `{"offset":0,"limit":1,"count":0,"totalCount":0,"data":[]}`)
-	}))
-	defer srv.Close()
-
-	c := newTestClient(srv.URL, "api-key")
-	setSiteIDCache(c, "default", testSiteUUID)
-
-	got, err := hasFeature(context.Background(), c, "default", FeatureZoneBasedFirewall)
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
+// TestHasFeature_ZoneFirewall_ZoneCount verifies that detection follows the
+// zone list: built-in zones mean zone-based, an empty list (no gateway) does not.
+func TestHasFeature_ZoneFirewall_ZoneCount(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"zones present", `{"offset":0,"limit":1,"count":1,"totalCount":6,"data":[{"id":"z","name":"Internal"}]}`, true},
+		{"no zones", `{"offset":0,"limit":1,"count":0,"totalCount":0,"data":[]}`, false},
 	}
-	if !got {
-		t.Error("expected hasFeature to return true when server responds 200")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, tt.body)
+			}))
+			defer srv.Close()
+
+			c := newTestClient(srv.URL, "api-key")
+			setSiteIDCache(c, "default", testSiteUUID)
+
+			got, err := hasFeature(context.Background(), c, "default", FeatureZoneBasedFirewall)
+			if err != nil {
+				t.Fatalf("expected no error, got: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("hasFeature = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHasFeature_ZoneFirewall_Session covers username/password logins, which
+// cannot use the integration API and read the classic zone list instead.
+func TestHasFeature_ZoneFirewall_Session(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		wantErr string
+	}{
+		{"no zones means legacy", http.StatusOK, `[]`, ""},
+		{"endpoint missing means legacy", http.StatusNotFound, ``, ""},
+		{"zones require an API key", http.StatusOK, `[{"_id":"z1","name":"Internal"}]`, "requires UNIFI_API_KEY"},
+		{"server error is reported", http.StatusInternalServerError, `boom`, "HTTP 500"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/proxy/network/v2/api/site/default/firewall/zone" {
+					t.Errorf("unexpected request %s", r.URL.Path)
+				}
+				w.WriteHeader(tt.status)
+				_, _ = fmt.Fprint(w, tt.body)
+			}))
+			defer srv.Close()
+
+			c := newTestClient(srv.URL, "")
+			got, err := hasFeature(context.Background(), c, "default", FeatureZoneBasedFirewall)
+			if got {
+				t.Error("session detection must never select zone mode")
+			}
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -235,8 +286,8 @@ func TestHasFeature_Unknown(t *testing.T) {
 	}
 }
 
-// TestHasFeature_UnexpectedResponse verifies that when the server returns HTTP 200
-// with a non-HTML body, hasFeature still returns true (assumes supported).
+// TestHasFeature_UnexpectedResponse verifies that an unreadable 200 body is an
+// error rather than a guess, so auto mode cannot pick the wrong firewall.
 func TestHasFeature_UnexpectedResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -249,12 +300,8 @@ func TestHasFeature_UnexpectedResponse(t *testing.T) {
 	c := newTestClient(srv.URL, "api-key")
 	setSiteIDCache(c, "default", testSiteUUID)
 
-	got, err := hasFeature(context.Background(), c, "default", FeatureZoneBasedFirewall)
-	if err != nil {
-		t.Fatalf("expected no error on non-JSON body, got: %v", err)
-	}
-	if !got {
-		t.Error("expected hasFeature to return true when body is not HTML")
+	if _, err := hasFeature(context.Background(), c, "default", FeatureZoneBasedFirewall); err == nil {
+		t.Fatal("expected an error for a non-JSON body")
 	}
 }
 

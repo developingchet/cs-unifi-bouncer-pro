@@ -16,6 +16,7 @@ import (
 // AuthConfig holds credentials for session management.
 type AuthConfig struct {
 	BaseURL       string
+	LoginPath     string
 	Username      string
 	Password      string
 	APIKey        string
@@ -34,6 +35,9 @@ type sessionManager struct {
 }
 
 func newSessionManager(cfg AuthConfig, httpClient *http.Client, log zerolog.Logger) *sessionManager {
+	if cfg.LoginPath == "" {
+		cfg.LoginPath = layoutUniFiOS.loginPath
+	}
 	return &sessionManager{
 		cfg:  cfg,
 		http: httpClient,
@@ -125,7 +129,7 @@ func (s *sessionManager) login(ctx context.Context) error {
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		s.cfg.BaseURL+"/api/auth/login", bytes.NewReader(body))
+		s.cfg.BaseURL+s.cfg.LoginPath, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build login request: %w", err)
 	}
@@ -138,7 +142,7 @@ func (s *sessionManager) login(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return &ErrUnauthorized{Msg: fmt.Sprintf("login returned HTTP %d", resp.StatusCode)}
+		return &ErrUnauthorized{Msg: fmt.Sprintf("login at %s returned HTTP %d; check UNIFI_USERNAME and UNIFI_PASSWORD", s.cfg.LoginPath, resp.StatusCode)}
 	}
 
 	// The cookie jar keeps the session cookie; write requests also need the
