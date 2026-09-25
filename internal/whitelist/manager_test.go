@@ -1029,20 +1029,40 @@ func TestDrain_DeletesAllWhitelistObjects(t *testing.T) {
 	}
 }
 
-func TestCheckWhitelistOrderReportsPrecedingBlock(t *testing.T) {
-	ctrl := testutil.NewMockController()
-	mgr := NewManager(ctrl, []string{"test-site"}, nil, zerolog.Nop())
-	pair := ZonePairConfig{SrcZoneID: "zone-external", DstZoneID: "zone-dmz"}
-	allowIndex, blockIndex := 200, 100
-	ctrl.SetPolicies("test-site", []controller.ZonePolicy{
-		{ID: "allow", Name: "cloudflare-allow", Enabled: true, Action: "ALLOW", IPVersion: "IPV4", SrcZone: pair.SrcZoneID, DstZone: pair.DstZoneID, Index: &allowIndex},
-		{ID: "block", Name: "crowdsec-block", Enabled: true, Action: "BLOCK", IPVersion: "IPV4", SrcZone: pair.SrcZoneID, DstZone: pair.DstZoneID, Index: &blockIndex},
-	})
-	if err := mgr.checkWhitelistOrder(context.Background(), "test-site", pair, []string{"allow"}); err == nil {
-		t.Fatal("expected an error when the block precedes the allow")
+func TestCheckWhitelistOrder(t *testing.T) {
+	idx := func(i int) *int { return &i }
+	tests := []struct {
+		name       string
+		allowIndex *int
+		blockIndex *int
+		blockIPVer string
+		allowID    string
+		wantErr    bool
+	}{
+		{name: "block precedes allow", allowIndex: idx(200), blockIndex: idx(100), blockIPVer: "IPV4", wantErr: true},
+		{name: "allow precedes block", allowIndex: idx(200), blockIndex: idx(300), blockIPVer: "IPV4"},
+		{name: "block for both families precedes allow", allowIndex: idx(200), blockIndex: idx(100), blockIPVer: "BOTH", wantErr: true},
+		{name: "block for the other family ignored", allowIndex: idx(200), blockIndex: idx(100), blockIPVer: "IPV6"},
+		{name: "order not reported: warn, not fail", blockIPVer: "IPV4"},
+		{name: "allow policy missing", allowIndex: idx(200), blockIndex: idx(300), blockIPVer: "IPV4", allowID: "gone", wantErr: true},
 	}
-	blockIndex = 300
-	if err := mgr.checkWhitelistOrder(context.Background(), "test-site", pair, []string{"allow"}); err != nil {
-		t.Fatalf("correct policy order rejected: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := testutil.NewMockController()
+			mgr := NewManager(ctrl, []string{"test-site"}, nil, zerolog.Nop())
+			pair := ZonePairConfig{SrcZoneID: "zone-external", DstZoneID: "zone-dmz"}
+			ctrl.SetPolicies("test-site", []controller.ZonePolicy{
+				{ID: "allow", Name: "cloudflare-allow", Enabled: true, Action: "ALLOW", IPVersion: "IPV4", SrcZone: pair.SrcZoneID, DstZone: pair.DstZoneID, Index: tt.allowIndex},
+				{ID: "block", Name: "crowdsec-block", Enabled: true, Action: "BLOCK", IPVersion: tt.blockIPVer, SrcZone: pair.SrcZoneID, DstZone: pair.DstZoneID, Index: tt.blockIndex},
+			})
+			allowID := "allow"
+			if tt.allowID != "" {
+				allowID = tt.allowID
+			}
+			err := mgr.checkWhitelistOrder(context.Background(), "test-site", pair, []string{allowID})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("checkWhitelistOrder err = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }

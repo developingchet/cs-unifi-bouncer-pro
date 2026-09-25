@@ -36,6 +36,29 @@ type portTMLIDs struct {
 	DstIPTMLIDs []string // ordered: v4 TML first (if present), v6 TML second; use pickDstIPTML to select
 }
 
+// Name prefixes of the per-pair filter lists. A list is named prefix+"<src>-<dst>".
+const (
+	filterSrcPortsPrefix = "crowdsec-ports-src-"
+	filterDstPortsPrefix = "crowdsec-ports-dst-"
+	filterDstIPsV4Prefix = "crowdsec-dstips-v4-"
+	filterDstIPsV6Prefix = "crowdsec-dstips-v6-"
+)
+
+func filterTMLName(prefix string, pair config.ZonePair) string {
+	return prefix + pair.Src + "-" + pair.Dst
+}
+
+// isFilterTMLName reports whether name belongs to a per-pair filter list,
+// including its content-versioned variants.
+func isFilterTMLName(name string) bool {
+	for _, prefix := range []string{filterSrcPortsPrefix, filterDstPortsPrefix, filterDstIPsV4Prefix, filterDstIPsV6Prefix} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // ZoneManager manages zone-based firewall policies.
 type ZoneManager struct {
 	cfg   ZoneConfig
@@ -157,7 +180,7 @@ func (zm *ZoneManager) ensurePortTMLs(ctx context.Context, site string, pairs []
 		ids := portTMLIDs{}
 
 		if len(pair.SrcPorts) > 0 {
-			name := "crowdsec-ports-src-" + pair.Src + "-" + pair.Dst
+			name := filterTMLName(filterSrcPortsPrefix, pair)
 			id, err := zm.ensurePortTML(ctx, site, name, pair.SrcPorts, existingByName)
 			if err != nil {
 				return nil, fmt.Errorf("ensure src port TML %q: %w", name, err)
@@ -165,7 +188,7 @@ func (zm *ZoneManager) ensurePortTMLs(ctx context.Context, site string, pairs []
 			ids.SrcTMLID = id
 		}
 		if len(pair.DstPorts) > 0 {
-			name := "crowdsec-ports-dst-" + pair.Src + "-" + pair.Dst
+			name := filterTMLName(filterDstPortsPrefix, pair)
 			id, err := zm.ensurePortTML(ctx, site, name, pair.DstPorts, existingByName)
 			if err != nil {
 				return nil, fmt.Errorf("ensure dst port TML %q: %w", name, err)
@@ -175,7 +198,7 @@ func (zm *ZoneManager) ensurePortTMLs(ctx context.Context, site string, pairs []
 		if len(pair.DstIPs) > 0 {
 			v4IPs, v6IPs := classifyIPs(pair.DstIPs)
 			if len(v4IPs) > 0 {
-				name := "crowdsec-dstips-v4-" + pair.Src + "-" + pair.Dst
+				name := filterTMLName(filterDstIPsV4Prefix, pair)
 				id, err := zm.ensureIPTML(ctx, site, name, "IPV4_ADDRESSES", v4IPs, existingByName)
 				if err != nil {
 					return nil, fmt.Errorf("ensure dst IPv4 TML %q: %w", name, err)
@@ -183,7 +206,7 @@ func (zm *ZoneManager) ensurePortTMLs(ctx context.Context, site string, pairs []
 				ids.DstIPTMLIDs = append(ids.DstIPTMLIDs, id)
 			}
 			if len(v6IPs) > 0 {
-				name := "crowdsec-dstips-v6-" + pair.Src + "-" + pair.Dst
+				name := filterTMLName(filterDstIPsV6Prefix, pair)
 				id, err := zm.ensureIPTML(ctx, site, name, "IPV6_ADDRESSES", v6IPs, existingByName)
 				if err != nil {
 					return nil, fmt.Errorf("ensure dst IPv6 TML %q: %w", name, err)
@@ -827,10 +850,7 @@ func (zm *ZoneManager) cleanupOrphanedPortTMLs(ctx context.Context, site string,
 	}
 	var candidates []controller.TrafficMatchingList
 	for _, t := range allTMLs {
-		if !expectedIDs[t.ID] && (strings.HasPrefix(t.Name, "crowdsec-ports-src-") ||
-			strings.HasPrefix(t.Name, "crowdsec-ports-dst-") ||
-			strings.HasPrefix(t.Name, "crowdsec-dstips-v4-") ||
-			strings.HasPrefix(t.Name, "crowdsec-dstips-v6-")) {
+		if !expectedIDs[t.ID] && isFilterTMLName(t.Name) {
 			candidates = append(candidates, t)
 		}
 	}

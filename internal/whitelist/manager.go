@@ -44,6 +44,12 @@ type ZonePairConfig struct {
 	DstIPs    []string // empty = any destination IPs; CIDRs or plain IPs, IPv4 or IPv6
 }
 
+// whitelistName names a per-pair whitelist object:
+// whitelistPrefix + kind + "<src>-<dst>" + suffix.
+func whitelistName(kind string, pair ZonePairConfig, suffix string) string {
+	return whitelistPrefix + kind + pair.SrcName + "-" + pair.DstName + suffix
+}
+
 // Sync fetches current Cloudflare IPs and ensures TMLs are up to date.
 // Call at startup and on each weekly tick.
 func (m *Manager) Sync(ctx context.Context, zonePairs []ZonePairConfig) error {
@@ -116,8 +122,8 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 			pair.DstZoneID = id
 		}
 		var srcPortTMLID, dstPortTMLID string
-		srcPortTMLName := "crowdsec-whitelist-cloudflare-srcports-" + pair.SrcName + "-" + pair.DstName
-		dstPortTMLName := "crowdsec-whitelist-cloudflare-dstports-" + pair.SrcName + "-" + pair.DstName
+		srcPortTMLName := whitelistName("srcports-", pair, "")
+		dstPortTMLName := whitelistName("dstports-", pair, "")
 
 		if len(pair.SrcPorts) > 0 {
 			portItems := portsToItems(pair.SrcPorts)
@@ -144,7 +150,7 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 		if len(pair.DstIPs) > 0 {
 			v4IPs, v6IPs := splitByFamily(pair.DstIPs)
 			if len(v4IPs) > 0 {
-				dstIPv4TMLName := "crowdsec-whitelist-cloudflare-dstips-" + pair.SrcName + "-" + pair.DstName + "-v4"
+				dstIPv4TMLName := whitelistName("dstips-", pair, "-v4")
 				t, ipErr := m.ensureTML(ctx, site, dstIPv4TMLName, "IPV4_ADDRESSES", ipsToItems(v4IPs))
 				if ipErr != nil {
 					return fmt.Errorf("ensure destination IPv4 TML for %s->%s: %w", pair.SrcName, pair.DstName, ipErr)
@@ -153,7 +159,7 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 				expectedTMLNames[dstIPv4TMLName] = true
 			}
 			if len(v6IPs) > 0 {
-				dstIPv6TMLName := "crowdsec-whitelist-cloudflare-dstips-" + pair.SrcName + "-" + pair.DstName + "-v6"
+				dstIPv6TMLName := whitelistName("dstips-", pair, "-v6")
 				t, ipErr := m.ensureTML(ctx, site, dstIPv6TMLName, "IPV6_ADDRESSES", ipsToItems(v6IPs))
 				if ipErr != nil {
 					return fmt.Errorf("ensure destination IPv6 TML for %s->%s: %w", pair.SrcName, pair.DstName, ipErr)
@@ -165,8 +171,8 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 		dstIPTMLIDForV4 := pickDstIPTML(dstIPTMLIDs, false)
 		dstIPTMLIDForV6 := pickDstIPTML(dstIPTMLIDs, true)
 
-		v4Name := "crowdsec-whitelist-cloudflare-" + pair.SrcName + "-" + pair.DstName + "-v4"
-		v6Name := "crowdsec-whitelist-cloudflare-" + pair.SrcName + "-" + pair.DstName + "-v6"
+		v4Name := whitelistName("", pair, "-v4")
+		v6Name := whitelistName("", pair, "-v6")
 		// Register base names so their UniFi-managed (Return) mirrors are preserved.
 		managedBaseNames[v4Name] = true
 		managedBaseNames[v6Name] = true
@@ -186,10 +192,8 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 		pairPolicyIDs = append(pairPolicyIDs, p.ID)
 
 		// Verify that the controller evaluates the allow policies before blocks.
-		if len(pairPolicyIDs) > 0 {
-			if err := m.checkWhitelistOrder(ctx, site, pair, pairPolicyIDs); err != nil {
-				return err
-			}
+		if err := m.checkWhitelistOrder(ctx, site, pair, pairPolicyIDs); err != nil {
+			return err
 		}
 	}
 
@@ -433,16 +437,12 @@ func (m *Manager) checkWhitelistOrder(ctx context.Context, site string, pair Zon
 	if err != nil {
 		return fmt.Errorf("list policies to verify Cloudflare order in site %s: %w", site, err)
 	}
-	allows := make(map[string]controller.ZonePolicy, len(policyIDs))
+	byID := make(map[string]controller.ZonePolicy, len(policies))
 	for _, p := range policies {
-		for _, id := range policyIDs {
-			if p.ID == id {
-				allows[id] = p
-			}
-		}
+		byID[p.ID] = p
 	}
 	for _, id := range policyIDs {
-		allow, found := allows[id]
+		allow, found := byID[id]
 		if !found {
 			return fmt.Errorf("cloudflare allow policy %s missing from site %s after sync", id, site)
 		}
@@ -454,7 +454,11 @@ func (m *Manager) checkWhitelistOrder(ctx context.Context, site string, pair Zon
 				continue
 			}
 			if allow.Index == nil || p.Index == nil {
-				return fmt.Errorf("cannot verify Cloudflare allow policy %s precedes block %s in site %s: policy index missing", allow.Name, p.Name, site)
+				// The controller did not report an order, so it cannot be
+				// checked. That is not evidence of a wrong order.
+				m.log.Warn().Str("allow", allow.Name).Str("block", p.Name).Str("site", site).
+					Msg("cannot verify Cloudflare allow precedes block: controller did not report policy order")
+				continue
 			}
 			if *p.Index <= *allow.Index {
 				return fmt.Errorf("cloudflare allow policy %s follows block %s in site %s; recreate the block after the allow policy", allow.Name, p.Name, site)
