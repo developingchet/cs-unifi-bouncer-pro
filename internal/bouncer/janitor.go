@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/rs/zerolog"
@@ -18,12 +17,7 @@ type Janitor struct {
 	log      zerolog.Logger
 }
 
-func NewJanitor(store storage.Store, fwMgr firewall.Manager, sites []string,
-	interval time.Duration, log zerolog.Logger, shared ...*banstate.Manager) *Janitor {
-	claims := banstate.New(store, fwMgr, sites, false)
-	if len(shared) > 0 && shared[0] != nil {
-		claims = shared[0]
-	}
+func NewJanitor(store storage.Store, claims *banstate.Manager, interval time.Duration, log zerolog.Logger) *Janitor {
 	return &Janitor{store: store, claims: claims, interval: interval, log: log}
 }
 

@@ -132,10 +132,6 @@ type Config struct {
 	WebhookURL    string   `koanf:"webhook_url"`
 	WebhookEvents []string `koanf:"-"` // parsed from WEBHOOK_EVENTS CSV
 
-	// Zone routing by scenario
-	// Parsed from ZONE_PAIRS_SCENARIO_MAP
-	ZonePairsScenarioMap map[string][]ZonePair `koanf:"-"`
-
 	// DeprecationWarnings holds warnings about deprecated env vars that were
 	// used. Callers should log these after building the logger.
 	DeprecationWarnings []string `koanf:"-"`
@@ -441,10 +437,12 @@ func Load() (*Config, error) {
 	cfg.BlocklistURLs = splitCSV(k.String("blocklist_urls"))
 	cfg.WebhookEvents = splitCSV(k.String("webhook_events"))
 
-	// Parse BLOCK_SCENARIO_DURATION_MAP
-	cfg.BlockScenarioDurationMap = parseScenarioDurationMap(k.String("block_scenario_duration_map"))
+	durationMap, err := parseScenarioDurationMap(k.String("block_scenario_duration_map"))
+	if err != nil {
+		return nil, fmt.Errorf("BLOCK_SCENARIO_DURATION_MAP: %w", err)
+	}
+	cfg.BlockScenarioDurationMap = durationMap
 
-	// Parse ZONE_PAIRS_SCENARIO_MAP
 	if raw := strings.TrimSpace(k.String("zone_pairs_scenario_map")); raw != "" {
 		return nil, fmt.Errorf("ZONE_PAIRS_SCENARIO_MAP is not supported: per-scenario firewall policies are not provisioned")
 	}
@@ -566,8 +564,8 @@ func (c *Config) Validate() error {
 	if lapiURL.Scheme == "http" && !isLoopbackHost(lapiURL.Hostname()) && !c.CrowdSecLAPIAllowHTTP {
 		return fmt.Errorf("CROWDSEC_LAPI_URL uses plaintext HTTP outside loopback; set CROWDSEC_LAPI_ALLOW_HTTP=true only on a trusted local network")
 	}
-	if len(c.ZonePairsScenarioMap) > 0 {
-		return fmt.Errorf("ZONE_PAIRS_SCENARIO_MAP is not supported: per-scenario firewall policies are not provisioned")
+	if len(c.UnifiSites) == 0 && !c.UnifiSitesAuto {
+		return fmt.Errorf("UNIFI_SITES must list at least one site, or set UNIFI_SITES_AUTO=true")
 	}
 
 	for _, capacity := range []struct {
@@ -599,6 +597,22 @@ func (c *Config) Validate() error {
 	}
 	if c.ShardMergeThreshold < -1 {
 		return fmt.Errorf("SHARD_MERGE_THRESHOLD must be >= -1 (got %d); use -1 to disable rebalancing", c.ShardMergeThreshold)
+	}
+	if c.CrowdSecPollInterval <= 0 {
+		return fmt.Errorf("CROWDSEC_POLL_INTERVAL must be > 0; got %s", c.CrowdSecPollInterval)
+	}
+	if c.ShutdownGracePeriod <= 0 {
+		return fmt.Errorf("SHUTDOWN_GRACE_PERIOD must be > 0; got %s", c.ShutdownGracePeriod)
+	}
+	if c.FirewallFlushConcurrency < 1 {
+		return fmt.Errorf("FIREWALL_FLUSH_CONCURRENCY must be >= 1; got %d", c.FirewallFlushConcurrency)
+	}
+	if c.DecisionRateLimit < 0 {
+		return fmt.Errorf("DECISION_RATE_LIMIT must be >= 0; got %d", c.DecisionRateLimit)
+	}
+	// A zero burst makes every rate-limited wait fail immediately.
+	if c.DecisionRateLimit > 0 && c.DecisionBurstSize < 1 {
+		return fmt.Errorf("DECISION_BURST_SIZE must be >= 1 when DECISION_RATE_LIMIT is set; got %d", c.DecisionBurstSize)
 	}
 	if len(c.BlocklistURLs) > 0 && c.BlocklistRefreshInterval <= 0 {
 		return fmt.Errorf("BLOCKLIST_REFRESH_INTERVAL must be > 0 when BLOCKLIST_URLS is set")
@@ -736,8 +750,8 @@ func splitZonePairList(s string) []string {
 		parts := strings.Split(s, ";")
 		result := make([]string, 0, len(parts))
 		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			result = append(result, p)
+			// Keep empty entries so a stray separator is reported, not ignored.
+			result = append(result, strings.TrimSpace(p))
 		}
 		return result
 	}
@@ -768,12 +782,11 @@ func splitZonePairList(s string) []string {
 }
 
 // parseScenarioDurationMap parses comma- or semicolon-separated scenario durations.
-// Example: "ssh-bf=168h;http-probing=24h"
-// Returns nil map on empty input; invalid entries are silently skipped.
-func parseScenarioDurationMap(s string) map[string]time.Duration {
+// Example: "ssh-bf=168h;http-probing=24h". Returns nil on empty input.
+func parseScenarioDurationMap(s string) (map[string]time.Duration, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return nil
+		return nil, nil
 	}
 	result := make(map[string]time.Duration)
 	for _, part := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ';' }) {
@@ -781,25 +794,19 @@ func parseScenarioDurationMap(s string) map[string]time.Duration {
 		if part == "" {
 			continue
 		}
-		idx := strings.Index(part, "=")
-		if idx < 1 {
-			continue
-		}
-		key := strings.TrimSpace(part[:idx])
-		valStr := strings.TrimSpace(part[idx+1:])
-		if key == "" || valStr == "" {
-			continue
+		key, valStr, found := strings.Cut(part, "=")
+		key = strings.TrimSpace(key)
+		valStr = strings.TrimSpace(valStr)
+		if !found || key == "" || valStr == "" {
+			return nil, fmt.Errorf("entry %q must be scenario=duration", part)
 		}
 		d, err := time.ParseDuration(valStr)
 		if err != nil || d <= 0 {
-			continue
+			return nil, fmt.Errorf("entry %q must use a positive duration such as 24h", part)
 		}
 		result[key] = d
 	}
-	if len(result) == 0 {
-		return nil
-	}
-	return result
+	return result, nil
 }
 
 // rawProvider implements koanf.Provider for a map[string]interface{}.

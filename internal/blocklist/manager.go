@@ -13,8 +13,6 @@ import (
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/rs/zerolog"
 )
 
@@ -33,15 +31,11 @@ type Manager struct {
 	client    *http.Client
 }
 
-func NewManager(urls []string, interval time.Duration,
-	fwMgr firewall.Manager, store storage.Store, sites []string,
-	protected []*net.IPNet, shared *banstate.Manager, dryRun bool, log zerolog.Logger,
+func NewManager(urls []string, interval time.Duration, claims *banstate.Manager,
+	protected []*net.IPNet, dryRun bool, log zerolog.Logger,
 ) *Manager {
-	if shared == nil {
-		shared = banstate.New(store, fwMgr, sites, dryRun)
-	}
 	return &Manager{
-		urls: urls, interval: interval, claims: shared,
+		urls: urls, interval: interval, claims: claims,
 		protected: protected, dryRun: dryRun, log: log,
 		client: &http.Client{Timeout: 30 * time.Second},
 	}

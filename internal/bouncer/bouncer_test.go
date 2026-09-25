@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/crowdsecurity/crowdsec/pkg/models"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/testutil"
 	"github.com/rs/zerolog"
@@ -19,7 +20,7 @@ func newTestBouncer(t *testing.T, cfg *config.Config) *Bouncer {
 	store := testutil.NewMockStore()
 	ctrl := testutil.NewMockController()
 	fwMgr := &mockFirewallManager{}
-	b, err := New(cfg, ctrl, store, fwMgr, nopRecorder{}, zerolog.Nop())
+	b, err := New(cfg, ctrl, store, fwMgr, banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun), nopRecorder{}, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -146,7 +147,7 @@ func TestBouncer_InFlightGauge_IncDec(t *testing.T) {
 	store := testutil.NewMockStore()
 	ctrl := testutil.NewMockController()
 	fwMgr := &mockFirewallManager{}
-	b, err := New(cfg, ctrl, store, fwMgr, nopRecorder{}, zerolog.Nop())
+	b, err := New(cfg, ctrl, store, fwMgr, banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun), nopRecorder{}, zerolog.Nop())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

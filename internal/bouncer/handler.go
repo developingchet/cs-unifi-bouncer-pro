@@ -8,8 +8,6 @@ import (
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -37,22 +35,13 @@ type SyncJob struct {
 type JobHandler func(ctx context.Context, job SyncJob) error
 
 func makeJobHandler(
-	_ controller.Controller,
 	store storage.Store,
-	fwMgr firewall.Manager,
+	claims *banstate.Manager,
 	cfg *config.Config,
 	recorder MetricsRecorder,
 	log zerolog.Logger,
-	shared ...*banstate.Manager,
 ) JobHandler {
-	claims := banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun)
-	if len(shared) > 0 && shared[0] != nil {
-		claims = shared[0]
-	}
 	return func(ctx context.Context, job SyncJob) error {
-		if len(cfg.ZonePairsScenarioMap) > 0 {
-			return fmt.Errorf("ZONE_PAIRS_SCENARIO_MAP is not supported without separate firewall policies")
-		}
 		if job.Action != "ban" && job.Action != "delete" {
 			return fmt.Errorf("unknown decision action %q", job.Action)
 		}

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/rs/zerolog"
@@ -26,10 +26,7 @@ func newJanitorTestStore(t *testing.T) storage.Store {
 // nopFWManager satisfies firewall.Manager with no-op implementations for janitor tests.
 type nopFWManager struct{}
 
-func (nopFWManager) ApplyBan(_ context.Context, _, _ string, _ bool) error { return nil }
-func (nopFWManager) ApplyBanWithZones(_ context.Context, _, _ string, _ bool, _ []config.ZonePair) error {
-	return nil
-}
+func (nopFWManager) ApplyBan(_ context.Context, _, _ string, _ bool) error   { return nil }
 func (nopFWManager) ApplyUnban(_ context.Context, _, _ string, _ bool) error { return nil }
 func (nopFWManager) Reconcile(_ context.Context, _ []string) (*firewall.ReconcileResult, error) {
 	return &firewall.ReconcileResult{}, nil
@@ -41,7 +38,7 @@ func (nopFWManager) Drain(_ context.Context, _ []string) error                { 
 func (nopFWManager) ZoneManager() *firewall.ZoneManager                       { return nil }
 
 func newTestJanitor(store storage.Store, interval time.Duration) *Janitor {
-	return NewJanitor(store, nopFWManager{}, []string{"default"}, interval, zerolog.Nop())
+	return NewJanitor(store, banstate.New(store, nopFWManager{}, []string{"default"}, false), interval, zerolog.Nop())
 }
 
 func TestJanitor_PrunesExpiredBans(t *testing.T) {
@@ -126,7 +123,7 @@ func TestJanitor_SkipsPruneOnUnbanFailure(t *testing.T) {
 	}
 
 	fwMgr := &errFWManager{failIP: "1.1.1.1"}
-	j := NewJanitor(store, fwMgr, []string{"default"}, 100*time.Millisecond, zerolog.Nop())
+	j := NewJanitor(store, banstate.New(store, fwMgr, []string{"default"}, false), 100*time.Millisecond, zerolog.Nop())
 	j.tick(context.Background())
 
 	// 1.1.1.1 should still be in bbolt (unban failed)
@@ -149,7 +146,7 @@ func TestJanitor_AllSitesFailKeepsIP(t *testing.T) {
 	}
 
 	fwMgr := &errFWManager{failIP: "3.3.3.3"} // fail for all sites
-	j := NewJanitor(store, fwMgr, []string{"site-a", "site-b"}, 100*time.Millisecond, zerolog.Nop())
+	j := NewJanitor(store, banstate.New(store, fwMgr, []string{"site-a", "site-b"}, false), 100*time.Millisecond, zerolog.Nop())
 	j.tick(context.Background())
 
 	exists, _ := store.BanExists("3.3.3.3")
@@ -167,7 +164,7 @@ func TestJanitor_PartialSiteFailKeepsIP(t *testing.T) {
 
 	// Only site-a fails
 	fwMgr := &errFWManager{failIP: "4.4.4.4", failSite: "site-a"}
-	j := NewJanitor(store, fwMgr, []string{"site-a", "site-b"}, 100*time.Millisecond, zerolog.Nop())
+	j := NewJanitor(store, banstate.New(store, fwMgr, []string{"site-a", "site-b"}, false), 100*time.Millisecond, zerolog.Nop())
 	j.tick(context.Background())
 
 	// IP should still be in bbolt since one site failed

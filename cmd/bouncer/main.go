@@ -120,20 +120,7 @@ func runDaemon() error {
 	}
 	defer store.Close()
 
-	ctrl, err := controller.NewClient(context.Background(), controller.ClientConfig{
-		BaseURL:       cfg.UnifiURL,
-		Username:      cfg.UnifiUsername,
-		Password:      cfg.UnifiPassword,
-		APIKey:        cfg.UnifiAPIKey,
-		VerifyTLS:     cfg.UnifiVerifyTLS,
-		CACertPath:    cfg.UnifiCACert,
-		Timeout:       cfg.UnifiHTTPTimeout,
-		Debug:         cfg.UnifiAPIDebug,
-		ReauthMinGap:  cfg.SessionReauthMinGap,
-		ReauthTimeout: cfg.SessionReauthTimeout,
-		DryRun:        cfg.DryRun,
-		EnableIPv6:    cfg.EnableIPv6,
-	}, log)
+	ctrl, err := controller.NewClient(context.Background(), controllerConfig(cfg), log)
 	if err != nil {
 		return fmt.Errorf("init UniFi client: %w", err)
 	}
@@ -291,7 +278,7 @@ func runDaemon() error {
 	}
 
 	bouncer.BinaryVersion = Version
-	bnc, err := bouncer.New(cfg, ctrl, store, fwMgr, recorder, log, claims)
+	bnc, err := bouncer.New(cfg, ctrl, store, fwMgr, claims, recorder, log)
 	if err != nil {
 		return fmt.Errorf("build bouncer: %w", err)
 	}
@@ -302,15 +289,12 @@ func runDaemon() error {
 		if err != nil {
 			return fmt.Errorf("parse blocklist whitelist: %w", err)
 		}
-		blMgr := blocklist.NewManager(
-			cfg.BlocklistURLs, cfg.BlocklistRefreshInterval,
-			fwMgr, store, cfg.UnifiSites, protected, claims, cfg.DryRun, log,
-		)
+		blMgr := blocklist.NewManager(cfg.BlocklistURLs, cfg.BlocklistRefreshInterval, claims, protected, cfg.DryRun, log)
 		go blMgr.Run(ctx)
 	}
 
 	// Start janitor
-	janitor := bouncer.NewJanitor(store, fwMgr, cfg.UnifiSites, cfg.JanitorInterval, log, claims)
+	janitor := bouncer.NewJanitor(store, claims, cfg.JanitorInterval, log)
 	go func() {
 		if err := janitor.Run(ctx); err != nil {
 			log.Warn().Err(err).Msg("janitor exited")
@@ -502,20 +486,7 @@ func reconcileCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			ctrl, err := controller.NewClient(ctx, controller.ClientConfig{
-				BaseURL:       cfg.UnifiURL,
-				Username:      cfg.UnifiUsername,
-				Password:      cfg.UnifiPassword,
-				APIKey:        cfg.UnifiAPIKey,
-				VerifyTLS:     cfg.UnifiVerifyTLS,
-				CACertPath:    cfg.UnifiCACert,
-				Timeout:       cfg.UnifiHTTPTimeout,
-				Debug:         cfg.UnifiAPIDebug,
-				ReauthMinGap:  cfg.SessionReauthMinGap,
-				ReauthTimeout: cfg.SessionReauthTimeout,
-				DryRun:        cfg.DryRun,
-				EnableIPv6:    cfg.EnableIPv6,
-			}, log)
+			ctrl, err := controller.NewClient(ctx, controllerConfig(cfg), log)
 			if err != nil {
 				return err
 			}
@@ -840,20 +811,7 @@ Requires either --force or --dry-run for safety.`,
 		}
 		defer store.Close()
 
-		ctrl, err := controller.NewClient(ctx, controller.ClientConfig{
-			BaseURL:       cfg.UnifiURL,
-			Username:      cfg.UnifiUsername,
-			Password:      cfg.UnifiPassword,
-			APIKey:        cfg.UnifiAPIKey,
-			VerifyTLS:     cfg.UnifiVerifyTLS,
-			CACertPath:    cfg.UnifiCACert,
-			Timeout:       cfg.UnifiHTTPTimeout,
-			Debug:         cfg.UnifiAPIDebug,
-			ReauthMinGap:  cfg.SessionReauthMinGap,
-			ReauthTimeout: cfg.SessionReauthTimeout,
-			DryRun:        cfg.DryRun,
-			EnableIPv6:    cfg.EnableIPv6,
-		}, log)
+		ctrl, err := controller.NewClient(ctx, controllerConfig(cfg), log)
 		if err != nil {
 			return fmt.Errorf("init UniFi client: %w", err)
 		}
@@ -925,30 +883,12 @@ func runManualBan(ip string, dur time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	store, err := openStore(cfg, log)
-	if err != nil {
-		return fmt.Errorf("open storage: %w", err)
-	}
-	defer store.Close()
-
-	ctrl, err := controller.NewClient(ctx, controller.ClientConfig{
-		BaseURL: cfg.UnifiURL, Username: cfg.UnifiUsername, Password: cfg.UnifiPassword,
-		APIKey: cfg.UnifiAPIKey, VerifyTLS: cfg.UnifiVerifyTLS, CACertPath: cfg.UnifiCACert,
-		Timeout: cfg.UnifiHTTPTimeout, ReauthMinGap: cfg.SessionReauthMinGap, ReauthTimeout: cfg.SessionReauthTimeout,
-		DryRun: cfg.DryRun, EnableIPv6: cfg.EnableIPv6,
-	}, log)
-	if err != nil {
-		return fmt.Errorf("init UniFi client: %w", err)
-	}
-	defer ctrl.Close()
-
-	fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log, nil, nil)
+	store, ctrl, fwMgr, err := openManualSession(ctx, cfg, log)
 	if err != nil {
 		return err
 	}
-	if err := fwMgr.EnsureInfrastructure(ctx, cfg.UnifiSites); err != nil {
-		return fmt.Errorf("ensure infrastructure: %w", err)
-	}
+	defer store.Close()
+	defer ctrl.Close()
 
 	if dur == 0 || dur > cfg.BanTTL {
 		dur = cfg.BanTTL
@@ -982,30 +922,12 @@ func runManualUnban(ip string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	store, err := openStore(cfg, log)
-	if err != nil {
-		return fmt.Errorf("open storage: %w", err)
-	}
-	defer store.Close()
-
-	ctrl, err := controller.NewClient(ctx, controller.ClientConfig{
-		BaseURL: cfg.UnifiURL, Username: cfg.UnifiUsername, Password: cfg.UnifiPassword,
-		APIKey: cfg.UnifiAPIKey, VerifyTLS: cfg.UnifiVerifyTLS, CACertPath: cfg.UnifiCACert,
-		Timeout: cfg.UnifiHTTPTimeout, ReauthMinGap: cfg.SessionReauthMinGap, ReauthTimeout: cfg.SessionReauthTimeout,
-		DryRun: cfg.DryRun, EnableIPv6: cfg.EnableIPv6,
-	}, log)
-	if err != nil {
-		return fmt.Errorf("init UniFi client: %w", err)
-	}
-	defer ctrl.Close()
-
-	fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log, nil, nil)
+	store, ctrl, fwMgr, err := openManualSession(ctx, cfg, log)
 	if err != nil {
 		return err
 	}
-	if err := fwMgr.EnsureInfrastructure(ctx, cfg.UnifiSites); err != nil {
-		return fmt.Errorf("ensure infrastructure: %w", err)
-	}
+	defer store.Close()
+	defer ctrl.Close()
 
 	claims := banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun)
 	if _, err := claims.ReleaseAll(ctx, ip, decision.IsIPv6(ip)); err != nil {
@@ -1016,6 +938,47 @@ func runManualUnban(ip string) error {
 	}
 	fmt.Printf("unbanned %s from %d site(s)\n", ip, len(cfg.UnifiSites))
 	return nil
+}
+
+// openManualSession prepares the store, controller, and firewall state used by
+// the one-shot ban and unban commands.
+func openManualSession(ctx context.Context, cfg *config.Config, log zerolog.Logger) (storage.Store, controller.Controller, firewall.Manager, error) {
+	store, err := openStore(cfg, log)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("open storage: %w", err)
+	}
+	ctrl, err := controller.NewClient(ctx, controllerConfig(cfg), log)
+	if err != nil {
+		_ = store.Close()
+		return nil, nil, nil, fmt.Errorf("init UniFi client: %w", err)
+	}
+	fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log, nil, nil)
+	if err == nil {
+		err = fwMgr.EnsureInfrastructure(ctx, cfg.UnifiSites)
+	}
+	if err != nil {
+		_ = ctrl.Close()
+		_ = store.Close()
+		return nil, nil, nil, fmt.Errorf("ensure infrastructure: %w", err)
+	}
+	return store, ctrl, fwMgr, nil
+}
+
+func controllerConfig(cfg *config.Config) controller.ClientConfig {
+	return controller.ClientConfig{
+		BaseURL:       cfg.UnifiURL,
+		Username:      cfg.UnifiUsername,
+		Password:      cfg.UnifiPassword,
+		APIKey:        cfg.UnifiAPIKey,
+		VerifyTLS:     cfg.UnifiVerifyTLS,
+		CACertPath:    cfg.UnifiCACert,
+		Timeout:       cfg.UnifiHTTPTimeout,
+		Debug:         cfg.UnifiAPIDebug,
+		ReauthMinGap:  cfg.SessionReauthMinGap,
+		ReauthTimeout: cfg.SessionReauthTimeout,
+		DryRun:        cfg.DryRun,
+		EnableIPv6:    cfg.EnableIPv6,
+	}
 }
 
 // buildFWManager constructs a firewall.Manager from config, controller, store, and logger.
@@ -1237,20 +1200,7 @@ Exits 0 when all checks pass, 1 if any check fails.`,
 				}
 			}
 
-			diagLog := zerolog.Nop()
-			ctrl, ctrlErr := controller.NewClient(ctx, controller.ClientConfig{
-				BaseURL:       cfg.UnifiURL,
-				Username:      cfg.UnifiUsername,
-				Password:      cfg.UnifiPassword,
-				APIKey:        cfg.UnifiAPIKey,
-				VerifyTLS:     cfg.UnifiVerifyTLS,
-				CACertPath:    cfg.UnifiCACert,
-				Timeout:       cfg.UnifiHTTPTimeout,
-				ReauthMinGap:  cfg.SessionReauthMinGap,
-				ReauthTimeout: cfg.SessionReauthTimeout,
-				DryRun:        cfg.DryRun,
-				EnableIPv6:    cfg.EnableIPv6,
-			}, diagLog)
+			ctrl, ctrlErr := controller.NewClient(ctx, controllerConfig(cfg), zerolog.Nop())
 			if ctrlErr != nil {
 				checks = append(checks, diagCheck{"unifi_reachable", "FAIL", ctrlErr.Error()})
 				allPass = false

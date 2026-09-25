@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/testutil"
@@ -39,15 +39,6 @@ func (m *mockFWManager) ApplyBan(_ context.Context, _, _ string, _ bool) error {
 	return nil
 }
 
-func (m *mockFWManager) ApplyBanWithZones(_ context.Context, _, _ string, _ bool, _ []config.ZonePair) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.banErr != nil {
-		return m.banErr
-	}
-	m.banCalls++
-	return nil
-}
 func (m *mockFWManager) ApplyUnban(_ context.Context, _, _ string, _ bool) error  { return nil }
 func (m *mockFWManager) EnsureInfrastructure(_ context.Context, _ []string) error { return nil }
 func (m *mockFWManager) PrepareDrain(_ context.Context, _ []string) error         { return nil }
@@ -61,7 +52,7 @@ func (m *mockFWManager) ZoneManager() *firewall.ZoneManager            { return 
 func newTestManager(url string) (*Manager, *testutil.MockStore, *mockFWManager) {
 	store := testutil.NewMockStore()
 	fwMgr := &mockFWManager{}
-	mgr := NewManager([]string{url}, 24*time.Hour, fwMgr, store, []string{"default"}, nil, nil, false, zerolog.Nop())
+	mgr := NewManager([]string{url}, 24*time.Hour, banstate.New(store, fwMgr, []string{"default"}, false), nil, false, zerolog.Nop())
 	return mgr, store, fwMgr
 }
 

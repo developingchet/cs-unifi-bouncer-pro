@@ -90,14 +90,21 @@ func (s *sessionManager) SetAuthHeader(req *http.Request) {
 	}
 }
 
-// UpdateFromResponse extracts the CSRF token from the response header and stores it.
-// This is called after every API response to handle CSRF token rotation.
+// UpdateFromResponse stores a rotated CSRF token from an API response.
 func (s *sessionManager) UpdateFromResponse(resp *http.Response) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.storeCSRFToken(resp.Header)
+}
 
-	if token := resp.Header.Get("X-Csrf-Token"); token != "" {
-		s.csrfToken = token
+// storeCSRFToken must be called with s.mu held. UniFi OS returns the token as
+// X-Csrf-Token on login and as X-Updated-Csrf-Token when it rotates.
+func (s *sessionManager) storeCSRFToken(h http.Header) {
+	for _, name := range []string{"X-Updated-Csrf-Token", "X-Csrf-Token"} {
+		if token := h.Get(name); token != "" {
+			s.csrfToken = token
+			return
+		}
 	}
 }
 
@@ -134,7 +141,9 @@ func (s *sessionManager) login(ctx context.Context) error {
 		return &ErrUnauthorized{Msg: fmt.Sprintf("login returned HTTP %d", resp.StatusCode)}
 	}
 
-	// Cookies are automatically managed by the cookie jar (set via Set-Cookie headers).
-	// SetAuthHeader extracts the csrf_token from the jar and sends it as X-CSRF-Token header.
+	// The cookie jar keeps the session cookie; write requests also need the
+	// CSRF token issued with it. A token from the previous session is invalid.
+	s.csrfToken = ""
+	s.storeCSRFToken(resp.Header)
 	return nil
 }

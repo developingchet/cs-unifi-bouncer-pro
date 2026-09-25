@@ -252,8 +252,8 @@ func TestEnsureInfrastructure_AutoMode_Legacy(t *testing.T) {
 	}
 }
 
-// TestEnsureInfrastructure_AutoMode_FeatureError verifies that when HasFeature
-// returns an error, the manager falls back to legacy mode gracefully (with lazy creation).
+// TestEnsureInfrastructure_AutoMode_FeatureError verifies that a failed feature
+// probe stops startup instead of guessing legacy mode on a zone-based controller.
 func TestEnsureInfrastructure_AutoMode_FeatureError(t *testing.T) {
 	cfg := defaultManagerConfig()
 	cfg.FirewallMode = "auto"
@@ -261,14 +261,13 @@ func TestEnsureInfrastructure_AutoMode_FeatureError(t *testing.T) {
 	mgr, ctrl, _ := newTestManager(t, cfg)
 	ctrl.SetError("HasFeature", errTest("feature detection failed"))
 
-	// Should not return an error — falls back to legacy.
-	if err := mgr.EnsureInfrastructure(context.Background(), []string{testSite}); err != nil {
-		t.Fatalf("EnsureInfrastructure: %v", err)
+	if err := mgr.EnsureInfrastructure(context.Background(), []string{testSite}); err == nil {
+		t.Fatal("EnsureInfrastructure: expected error when feature detection fails")
 	}
-
-	// With lazy creation, no rules are created at startup
-	if got := ctrl.Calls("CreateFirewallRule"); got != 0 {
-		t.Errorf("CreateFirewallRule calls: got %d, want 0 (lazy creation)", got)
+	for _, method := range []string{"ListFirewallGroups", "ListTrafficMatchingLists", "CreateFirewallRule"} {
+		if got := ctrl.Calls(method); got != 0 {
+			t.Errorf("%s calls: got %d, want 0", method, got)
+		}
 	}
 }
 

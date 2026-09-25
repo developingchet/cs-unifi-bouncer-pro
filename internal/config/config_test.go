@@ -929,12 +929,51 @@ func TestParseZonePairs_DstIPs_MultiPair(t *testing.T) {
 
 func TestParseScenarioDurationMapSeparators(t *testing.T) {
 	for _, input := range []string{"ssh-bf=168h,http-probing=24h", "ssh-bf=168h;http-probing=24h"} {
-		got := parseScenarioDurationMap(input)
+		got, err := parseScenarioDurationMap(input)
+		if err != nil {
+			t.Fatalf("parse %q: %v", input, err)
+		}
 		if got["ssh-bf"] != 168*time.Hour || got["http-probing"] != 24*time.Hour {
 			t.Errorf("duration map %q parsed as %v", input, got)
 		}
 	}
-	if got := parseScenarioDurationMap("ssh-bf=-1h"); len(got) != 0 {
-		t.Errorf("accepted negative duration: %v", got)
+}
+
+func TestParseScenarioDurationMapRejectsInvalidEntries(t *testing.T) {
+	for _, input := range []string{"ssh-bf=-1h", "ssh-bf=24", "ssh-bf", "=24h", "ssh-bf=24h,http"} {
+		t.Run(input, func(t *testing.T) {
+			if got, err := parseScenarioDurationMap(input); err == nil {
+				t.Errorf("accepted %q as %v", input, got)
+			}
+		})
+	}
+}
+
+func TestValidateRuntimeLimits(t *testing.T) {
+	tests := []struct {
+		name   string
+		modify func(*Config)
+	}{
+		{"empty sites", func(c *Config) { c.UnifiSites = nil }},
+		{"zero poll interval", func(c *Config) { c.CrowdSecPollInterval = 0 }},
+		{"zero shutdown grace", func(c *Config) { c.ShutdownGracePeriod = 0 }},
+		{"zero flush concurrency", func(c *Config) { c.FirewallFlushConcurrency = 0 }},
+		{"negative rate limit", func(c *Config) { c.DecisionRateLimit = -1 }},
+		{"rate limit without burst", func(c *Config) { c.DecisionRateLimit = 10; c.DecisionBurstSize = 0 }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setEnv(t, "UNIFI_URL", "https://192.168.1.1")
+			setEnv(t, "UNIFI_API_KEY", "my-api-key")
+			setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			tc.modify(cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Error("expected validation error")
+			}
+		})
 	}
 }

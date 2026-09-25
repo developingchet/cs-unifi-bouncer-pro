@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
@@ -111,10 +110,6 @@ type Manager interface {
 
 	// ApplyBan adds an IP to the appropriate shard for all given sites.
 	ApplyBan(ctx context.Context, site, ip string, ipv6 bool) error
-
-	// ApplyBanWithZones rejects scenario-specific pairs until separate firewall
-	// policies can be provisioned. Empty zonePairs uses ApplyBan.
-	ApplyBanWithZones(ctx context.Context, site, ip string, ipv6 bool, zonePairs []config.ZonePair) error
 
 	// ApplyUnban removes an IP from its shard for all given sites.
 	ApplyUnban(ctx context.Context, site, ip string, ipv6 bool) error
@@ -469,15 +464,6 @@ func (m *managerImpl) ApplyBan(ctx context.Context, site, ip string, ipv6 bool) 
 	}
 
 	return nil
-}
-
-// ApplyBanWithZones applies a ban only when no scenario-specific zone pairs
-// are requested.
-func (m *managerImpl) ApplyBanWithZones(ctx context.Context, site, ip string, ipv6 bool, zonePairs []config.ZonePair) error {
-	if len(zonePairs) == 0 {
-		return m.ApplyBan(ctx, site, ip, ipv6)
-	}
-	return fmt.Errorf("scenario zone overrides are not supported without separate firewall policies")
 }
 
 // ApplyUnban removes an IP from its shard and schedules a batch flush.
@@ -1153,11 +1139,11 @@ func (m *managerImpl) resolveMode(ctx context.Context, site string) (string, err
 	if m.cfg.FirewallMode != "auto" {
 		return m.cfg.FirewallMode, nil
 	}
-	// Auto-detect
+	// A transient detection failure must not pick legacy mode on a zone-based
+	// controller: the legacy objects would be created but never enforced.
 	hasZone, err := m.ctrl.HasFeature(ctx, site, controller.FeatureZoneBasedFirewall)
 	if err != nil {
-		m.log.Warn().Err(err).Str("site", site).Msg("zone feature detection failed, falling back to legacy")
-		return "legacy", nil
+		return "", fmt.Errorf("detect zone-based firewall support: %w", err)
 	}
 	if hasZone {
 		return "zone", nil

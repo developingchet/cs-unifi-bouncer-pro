@@ -43,7 +43,7 @@ type Bouncer struct {
 
 // New constructs a fully wired Bouncer.
 func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
-	fwMgr firewall.Manager, recorder MetricsRecorder, log zerolog.Logger, shared ...*banstate.Manager) (*Bouncer, error) {
+	fwMgr firewall.Manager, claims *banstate.Manager, recorder MetricsRecorder, log zerolog.Logger) (*Bouncer, error) {
 
 	whitelist, err := decision.ParseWhitelist(cfg.BlockWhitelist)
 	if err != nil {
@@ -57,7 +57,7 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 	filterCfg.MinBanDuration = cfg.BlockMinDuration
 	filterCfg.ScenarioDurationMap = cfg.BlockScenarioDurationMap
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, recorder, log, shared...)
+	handler := makeJobHandler(store, claims, cfg, recorder, log)
 	lapiClient, err := lapihttp.NewClient(cfg.CrowdSecLAPIVerifyTLS, cfg.CrowdSecLAPICACert, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("configure LAPI HTTP client: %w", err)
@@ -290,8 +290,10 @@ func (b *Bouncer) serveMetrics(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metricsHandler())
 	srv := &http.Server{
-		Addr:    b.cfg.MetricsAddr,
-		Handler: mux,
+		Addr:              b.cfg.MetricsAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {
