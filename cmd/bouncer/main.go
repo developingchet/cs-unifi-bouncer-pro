@@ -170,10 +170,15 @@ func runDaemon() error {
 		webhookURL = ""
 	}
 	whNotifier := webhook.New(webhookURL, cfg.WebhookEvents, log)
+	webhookDone := make(chan struct{})
+	go func() {
+		defer close(webhookDone)
+		whNotifier.Run(ctx)
+	}()
 
-	fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log,
-		func() { whNotifier.Fire(ctx, "circuit_breaker_open", nil) },
-		func() { whNotifier.Fire(ctx, "circuit_breaker_close", nil) },
+	fwMgr, err := buildFWManager(cfg, ctrl, store, log,
+		func() { whNotifier.Fire("circuit_breaker_open", nil) },
+		func() { whNotifier.Fire("circuit_breaker_close", nil) },
 	)
 	if err != nil {
 		return err
@@ -349,6 +354,11 @@ func runDaemon() error {
 	defer shutdownCancel()
 	select {
 	case err := <-done:
+		// Give queued webhook events their bounded drain before exiting.
+		select {
+		case <-webhookDone:
+		case <-shutdownCtx.Done():
+		}
 		return err
 	case <-shutdownCtx.Done():
 		log.Warn().Dur("grace_period", cfg.ShutdownGracePeriod).
@@ -396,7 +406,7 @@ func runPeriodicReconcile(ctx context.Context, fwMgr firewall.Manager, sites []s
 				log.Info().Int("added", result.Added).Int("removed", result.Removed).
 					Dur("elapsed", result.Elapsed).Msg("periodic reconcile complete")
 				if result.Added+result.Removed >= reconcileDriftThreshold {
-					notifier.Fire(ctx, "reconcile_drift", map[string]any{
+					notifier.Fire("reconcile_drift", map[string]any{
 						"added":   result.Added,
 						"removed": result.Removed,
 					})
@@ -499,7 +509,7 @@ func reconcileCmd() *cobra.Command {
 			}
 			defer ctrl.Close()
 
-			fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log, nil, nil)
+			fwMgr, err := buildFWManager(cfg, ctrl, store, log, nil, nil)
 			if err != nil {
 				return err
 			}
@@ -824,7 +834,7 @@ Requires either --force or --dry-run for safety.`,
 		}
 		defer ctrl.Close()
 
-		fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log, nil, nil)
+		fwMgr, err := buildFWManager(cfg, ctrl, store, log, nil, nil)
 		if err != nil {
 			return err
 		}
@@ -959,7 +969,7 @@ func openManualSession(ctx context.Context, cfg *config.Config, log zerolog.Logg
 		_ = store.Close()
 		return nil, nil, nil, fmt.Errorf("init UniFi client: %w", err)
 	}
-	fwMgr, err := buildFWManager(ctx, cfg, ctrl, store, log, nil, nil)
+	fwMgr, err := buildFWManager(cfg, ctrl, store, log, nil, nil)
 	if err == nil {
 		err = fwMgr.EnsureInfrastructure(ctx, cfg.UnifiSites)
 	}
@@ -991,7 +1001,7 @@ func controllerConfig(cfg *config.Config) controller.ClientConfig {
 // buildFWManager constructs a firewall.Manager from config, controller, store, and logger.
 // It does NOT call EnsureInfrastructure — callers do that themselves when needed.
 // cbOpen and cbClose are optional callbacks fired when the circuit breaker opens/closes; pass nil for no-op.
-func buildFWManager(ctx context.Context, cfg *config.Config,
+func buildFWManager(cfg *config.Config,
 	ctrl controller.Controller, store storage.Store, log zerolog.Logger,
 	cbOpen, cbClose func(),
 ) (firewall.Manager, error) {
