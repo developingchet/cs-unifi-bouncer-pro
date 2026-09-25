@@ -1235,24 +1235,11 @@ Exits 0 when all checks pass, 1 if any check fails.`,
 				checks = append(checks, diagCheck{"unifi_reachable", "PASS", cfg.UnifiURL + " ping ok"})
 			}
 
-			// --- Zone discovery (zone or auto mode) ---
 			if cfg.FirewallMode != "legacy" {
 				for _, site := range cfg.UnifiSites {
-					zones, zoneErr := ctrl.DiscoverZones(ctx, site)
-					if zoneErr != nil {
-						checks = append(checks, diagCheck{
-							"zone_discovery[" + site + "]", "FAIL", zoneErr.Error(),
-						})
-						allPass = false
-						continue
-					}
-					checks = append(checks, diagCheck{
-						"zone_discovery[" + site + "]", "PASS",
-						fmt.Sprintf("%d zones found", len(zones)),
-					})
-					for _, z := range zones {
-						checks = append(checks, diagCheck{"  " + z.Name, "", "id=" + z.ID})
-					}
+					siteChecks, ok := diagnoseSiteZones(ctx, ctrl, cfg.FirewallMode, site)
+					checks = append(checks, siteChecks...)
+					allPass = allPass && ok
 				}
 			}
 
@@ -1263,6 +1250,32 @@ Exits 0 when all checks pass, 1 if any check fails.`,
 			return nil
 		},
 	}
+}
+
+// diagnoseSiteZones resolves the firewall mode for one site (in auto mode, the
+// same way startup does) and lists its zones when the site uses zone mode.
+// Listing zones needs the integration API, so running it against a legacy
+// site authenticated by username/password would report a false failure.
+func diagnoseSiteZones(ctx context.Context, ctrl controller.Controller, mode, site string) ([]diagCheck, bool) {
+	if mode == "auto" {
+		hasZones, err := ctrl.HasFeature(ctx, site, controller.FeatureZoneBasedFirewall)
+		if err != nil {
+			return []diagCheck{{"firewall_mode[" + site + "]", "FAIL", err.Error()}}, false
+		}
+		if !hasZones {
+			return []diagCheck{{"firewall_mode[" + site + "]", "PASS", "legacy (site has no firewall zones)"}}, true
+		}
+	}
+	checks := []diagCheck{{"firewall_mode[" + site + "]", "PASS", "zone"}}
+	zones, err := ctrl.DiscoverZones(ctx, site)
+	if err != nil {
+		return append(checks, diagCheck{"zone_discovery[" + site + "]", "FAIL", err.Error()}), false
+	}
+	checks = append(checks, diagCheck{"zone_discovery[" + site + "]", "PASS", fmt.Sprintf("%d zones found", len(zones))})
+	for _, z := range zones {
+		checks = append(checks, diagCheck{"  " + z.Name, "", "id=" + z.ID})
+	}
+	return checks, true
 }
 
 func printDiagChecks(checks []diagCheck) {
