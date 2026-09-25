@@ -162,9 +162,8 @@ func managerTestNamer(t *testing.T) *Namer {
 	n, err := NewNamer(
 		"crowdsec-block-{{.Family}}-{{.Index}}",
 		"crowdsec-drop-{{.Family}}-{{.Index}}",
-		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}",
-		"test",
-	)
+		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}")
+
 	if err != nil {
 		t.Fatalf("NewNamer: %v", err)
 	}
@@ -922,14 +921,6 @@ func (pc *PanicController) Close() error {
 }
 
 func (pc *PanicController) InvalidateZoneCache(site string) {}
-
-func (pc *PanicController) GetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string) (controller.PolicyOrdering, error) {
-	return controller.PolicyOrdering{}, nil
-}
-
-func (pc *PanicController) SetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string, ordering controller.PolicyOrdering) error {
-	return nil
-}
 
 func (pc *PanicController) DiscoverSites(ctx context.Context) ([]string, error) {
 	return nil, nil

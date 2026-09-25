@@ -726,13 +726,13 @@ func TestSyncSite_ReturnMirror_KeptForManagedPolicy(t *testing.T) {
 	}
 	activeReturn := controller.ZonePolicy{
 		ID: "active-return-id", Name: "crowdsec-whitelist-cloudflare-External-Dmz-v4 (Return)",
-		Action: "ALLOW", Enabled: true, Predefined: true,
+		Action: "ALLOW", Enabled: true,
 		SrcZone: "zone-dmz", DstZone: "zone-external", IPVersion: "IPV4",
 	}
 	// Orphaned Return mirror for a policy that is no longer in config.
 	orphanReturn := controller.ZonePolicy{
 		ID: "orphan-return-id", Name: "crowdsec-whitelist-cloudflare-External-Old-v4 (Return)",
-		Action: "ALLOW", Enabled: true, Predefined: true,
+		Action: "ALLOW", Enabled: true,
 		SrcZone: "zone-old", DstZone: "zone-external", IPVersion: "IPV4",
 	}
 	ctrl.SetPolicies("test-site", []controller.ZonePolicy{active, activeReturn, orphanReturn})
@@ -1040,9 +1040,6 @@ func TestCheckWhitelistOrderReportsPrecedingBlock(t *testing.T) {
 	})
 	if err := mgr.checkWhitelistOrder(context.Background(), "test-site", pair, []string{"allow"}); err == nil {
 		t.Fatal("expected an error when the block precedes the allow")
-	}
-	if got := ctrl.Calls("SetPolicyOrdering"); got != 0 {
-		t.Fatalf("attempted to reorder integration policies %d times", got)
 	}
 	blockIndex = 300
 	if err := mgr.checkWhitelistOrder(context.Background(), "test-site", pair, []string{"allow"}); err != nil {

@@ -173,16 +173,6 @@ type apiV1PolicyUpdate struct {
 	LoggingEnabled        bool                 `json:"loggingEnabled"`
 }
 
-// apiOrderingBody is the request/response body for the policy ordering endpoints.
-type apiOrderingBody struct {
-	OrderedFirewallPolicyIDs apiOrderedPolicyIDs `json:"orderedFirewallPolicyIds"`
-}
-
-type apiOrderedPolicyIDs struct {
-	BeforeSystemDefined []string `json:"beforeSystemDefined"`
-	AfterSystemDefined  []string `json:"afterSystemDefined"`
-}
-
 // --- Generic HTTP helpers ---------------------------------------------------
 
 func doGET(ctx context.Context, c *unifiClient, url, endpoint string) ([]json.RawMessage, error) {
@@ -685,51 +675,6 @@ func deleteZonePolicyV1(ctx context.Context, c *unifiClient, siteID, id string) 
 	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies/%s",
 		c.cfg.BaseURL, siteID, id)
 	return ignoreNotFound(doDELETE(ctx, c, endpointURL, "delete-policy"))
-}
-
-func getPolicyOrderingV1(ctx context.Context, c *unifiClient, siteID, srcZoneID, dstZoneID string) (PolicyOrdering, error) {
-	u, err := url.Parse(fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies/ordering",
-		c.cfg.BaseURL, siteID))
-	if err != nil {
-		return PolicyOrdering{}, err
-	}
-	q := u.Query()
-	q.Set("sourceFirewallZoneId", srcZoneID)
-	q.Set("destinationFirewallZoneId", dstZoneID)
-	u.RawQuery = q.Encode()
-
-	var body apiOrderingBody
-	err = c.withReauth(ctx, func() error {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-		if err != nil {
-			return err
-		}
-		resp, err := c.apiDo(ctx, req, "get-policy-ordering")
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		return json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodyBytes)).Decode(&body)
-	})
-	if err != nil {
-		return PolicyOrdering{}, err
-	}
-	return PolicyOrdering(body.OrderedFirewallPolicyIDs), nil
-}
-
-func setPolicyOrderingV1(ctx context.Context, c *unifiClient, siteID, srcZoneID, dstZoneID string, ordering PolicyOrdering) error {
-	u, err := url.Parse(fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies/ordering",
-		c.cfg.BaseURL, siteID))
-	if err != nil {
-		return err
-	}
-	q := u.Query()
-	q.Set("sourceFirewallZoneId", srcZoneID)
-	q.Set("destinationFirewallZoneId", dstZoneID)
-	u.RawQuery = q.Encode()
-
-	body := apiOrderingBody{OrderedFirewallPolicyIDs: apiOrderedPolicyIDs(ordering)}
-	return doPUT(ctx, c, u.String(), "set-policy-ordering", body)
 }
 
 func v1PolicyToModel(p apiV1Policy) ZonePolicy {

@@ -39,7 +39,7 @@ func TestIPSet_AddRemove(t *testing.T) {
 	}
 }
 
-func TestIPSet_PeekDirtyCommitClean(t *testing.T) {
+func TestIPSet_PeekDirtyMarkClean(t *testing.T) {
 	s := NewIPSet()
 	s.Add("1.1.1.1")
 	s.Add("2.2.2.2")
@@ -56,10 +56,10 @@ func TestIPSet_PeekDirtyCommitClean(t *testing.T) {
 		t.Fatal("PeekDirty must not clear dirty flag")
 	}
 
-	s.CommitClean()
+	s.MarkClean()
 	_, dirty = s.PeekDirty()
 	if dirty {
-		t.Fatal("expected clean after CommitClean")
+		t.Fatal("expected clean after MarkClean")
 	}
 }
 

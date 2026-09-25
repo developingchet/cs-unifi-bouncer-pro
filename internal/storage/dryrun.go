@@ -48,7 +48,6 @@ func (s *dryRunStore) BanList() (map[string]BanEntry, error) {
 func (s *dryRunStore) BanRecord(string, time.Time, bool) error { return nil }
 func (s *dryRunStore) BanPut(string, BanEntry) error           { return nil }
 func (s *dryRunStore) BanDelete(string) error                  { return nil }
-func (s *dryRunStore) PruneExpiredBans() (int, error)          { return 0, nil }
 
 func (s *dryRunStore) GetGroup(name string) (*GroupRecord, error) {
 	if s.base == nil {

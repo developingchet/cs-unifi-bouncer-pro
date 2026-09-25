@@ -783,46 +783,6 @@ func (sm *ShardManager) doCreateUniFiGroup(ctx context.Context, name string) (st
 	return created.ID, nil
 }
 
-// createShard creates a new empty shard in UniFi and registers it in bbolt.
-// In zone mode this creates a Traffic Matching List; in legacy mode a FirewallGroup.
-func (sm *ShardManager) createShard(ctx context.Context, idx int) (*Shard, error) {
-	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: idx, Site: sm.site})
-	if err != nil {
-		return nil, err
-	}
-
-	objectKind := sm.shardObjectKind()
-
-	if sm.dryRun {
-		sm.log.Info().Str("name", name).Bool("ipv6", sm.ipv6).Int("shard", idx).
-			Msgf("[DRY-RUN] would create %s", objectKind)
-		shard := &Shard{ID: "dry-run-no-id", Name: name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet(), State: ShardStateActive}
-		shard.IPs.MarkClean()
-		return shard, nil
-	}
-
-	createdID, err := sm.doCreateUniFiGroup(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-
-	shard := &Shard{ID: createdID, Name: name, Index: idx, Family: Family(sm.ipv6), IPs: NewIPSet(), State: ShardStateActive}
-	shard.IPs.MarkClean()
-
-	if err := sm.store.SetGroup(cacheKey(sm.site, name), storage.GroupRecord{
-		UnifiID: createdID,
-		Site:    sm.site,
-		Index:   idx,
-		Members: []string{},
-		IPv6:    sm.ipv6,
-	}); err != nil {
-		sm.log.Warn().Err(err).Str("shard", name).Msg("failed to cache new shard in bbolt")
-	}
-
-	sm.log.Info().Str("name", name).Str("id", createdID).Msgf("created %s", objectKind)
-	return shard, nil
-}
-
 // GroupRefs returns Active group IDs paired with their actual shard indices.
 // Pending and Draining shards must not receive new policies.
 func (sm *ShardManager) GroupRefs() []GroupRef {
@@ -953,7 +913,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) error {
 	if sm.dryRun {
 		sm.log.Info().Str("shard", shard.Name).Int("member_count", len(ips)).
 			Msgf("[DRY-RUN] would sync %s", sm.shardObjectKind())
-		shard.IPs.CommitClean()
+		shard.IPs.MarkClean()
 		// In dry-run, transition Pending to Active for consistency.
 		if state == ShardStatePending {
 			sm.mu.Lock()
@@ -1273,9 +1233,8 @@ func (sm *ShardManager) Rebalance(ctx context.Context) int {
 // Should be called after syncAllFamilies so target shards are flushed before donors are deleted.
 func (sm *ShardManager) drainDraining(ctx context.Context) error {
 	sm.mu.RLock()
-	family := sm.familyStateLocked(sm.family)
 	var draining []*Shard
-	for _, s := range family.Shards {
+	for _, s := range sm.families[sm.family].Shards {
 		if s.State == ShardStateDraining {
 			draining = append(draining, s)
 		}

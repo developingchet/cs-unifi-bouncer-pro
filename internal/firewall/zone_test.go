@@ -19,9 +19,8 @@ func zoneTestNamer(t *testing.T) *Namer {
 	n, err := NewNamer(
 		"crowdsec-block-{{.Family}}-{{.Index}}",
 		"crowdsec-drop-{{.Family}}-{{.Index}}",
-		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}",
-		"test",
-	)
+		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}")
+
 	if err != nil {
 		t.Fatalf("NewNamer: %v", err)
 	}
@@ -89,6 +88,28 @@ func TestZoneManager_RepairsSparseShardPolicy(t *testing.T) {
 	policies, err = ctrl.ListZonePolicies(ctx, testSite)
 	if err != nil || len(policies) != 1 || policies[0].Name != "crowdsec-policy-wan-lan-v4-3" {
 		t.Fatalf("missing policy not restored: %+v, %v", policies, err)
+	}
+}
+
+func TestZoneManager_KeepsFilterTMLReferencedByAnotherPolicy(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	ctrl.SetTMLs(testSite, []controller.TrafficMatchingList{
+		{ID: "shared", Name: "crowdsec-ports-dst-External-Web", Type: "PORTS"},
+		{ID: "stale", Name: "crowdsec-ports-dst-External-Old", Type: "PORTS"},
+	})
+	ctrl.SetPolicies(testSite, []controller.ZonePolicy{{
+		ID: "other-instance", Name: "staging-policy", Description: "staging",
+		Enabled: true, Action: "BLOCK", DstPortTMLID: "shared",
+	}})
+	zm := newTestZoneManager(ctrl, store, zoneTestNamer(t))
+
+	zm.cleanupOrphanedPortTMLs(ctx, testSite, nil)
+
+	tmls, err := ctrl.ListTrafficMatchingLists(ctx, testSite)
+	if err != nil || len(tmls) != 1 || tmls[0].ID != "shared" {
+		t.Fatalf("remaining TMLs = %+v, %v; want only the referenced list", tmls, err)
 	}
 }
 
@@ -930,7 +951,7 @@ func TestZoneManager_EnsurePolicies_APIOrphan_DeletedWithoutBboltRecord(t *testi
 func TestZoneManager_RemovesCustomNamedOrphanWithoutCache(t *testing.T) {
 	ctrl := testutil.NewMockController()
 	store := newBboltStore(t)
-	namer, err := NewNamer("group-{{.Family}}-{{.Index}}", "rule-{{.Index}}", "blocked-{{.SrcZone}}-{{.DstZone}}-{{.Index}}", "test")
+	namer, err := NewNamer("group-{{.Family}}-{{.Index}}", "rule-{{.Index}}", "blocked-{{.SrcZone}}-{{.DstZone}}-{{.Index}}")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -948,7 +969,7 @@ func TestZoneManager_RemovesCustomNamedOrphanWithoutCache(t *testing.T) {
 func TestZoneManager_PreservesUntrackedPolicyWithoutStaticPrefix(t *testing.T) {
 	ctrl := testutil.NewMockController()
 	store := newBboltStore(t)
-	namer, err := NewNamer("group-{{.Family}}-{{.Index}}", "rule-{{.Index}}", "{{.SrcZone}}-blocked-{{.Index}}", "test")
+	namer, err := NewNamer("group-{{.Family}}-{{.Index}}", "rule-{{.Index}}", "{{.SrcZone}}-blocked-{{.Index}}")
 	if err != nil {
 		t.Fatal(err)
 	}

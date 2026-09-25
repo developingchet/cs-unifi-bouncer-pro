@@ -991,9 +991,8 @@ func buildFWManager(ctx context.Context, cfg *config.Config,
 	namer, err := firewall.NewNamer(
 		cfg.GroupNameTemplate,
 		cfg.RuleNameTemplate,
-		cfg.PolicyNameTemplate,
-		cfg.ObjectDescription,
-	)
+		cfg.PolicyNameTemplate)
+
 	if err != nil {
 		return nil, fmt.Errorf("build namer: %w", err)
 	}

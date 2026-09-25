@@ -278,34 +278,6 @@ func TestFakeServer_PolicyPutBodyExcludesID(t *testing.T) {
 	}
 }
 
-// TestFakeServer_PolicyOrdering verifies GetPolicyOrdering/SetPolicyOrdering roundtrip.
-func TestFakeServer_PolicyOrdering(t *testing.T) {
-	s := testutil.NewFakeUnifiServer()
-	defer s.Close()
-	s.AddSite("default", "site-uuid-1", "Default")
-	c := newFakeClient(t, s)
-	ctx := context.Background()
-
-	want := controller.PolicyOrdering{
-		BeforeSystemDefined: []string{"pol-1", "pol-2"},
-		AfterSystemDefined:  []string{"pol-3"},
-	}
-	if err := c.SetPolicyOrdering(ctx, "default", "zone-src", "zone-dst", want); err != nil {
-		t.Fatalf("SetPolicyOrdering: %v", err)
-	}
-
-	got, err := c.GetPolicyOrdering(ctx, "default", "zone-src", "zone-dst")
-	if err != nil {
-		t.Fatalf("GetPolicyOrdering: %v", err)
-	}
-	if len(got.BeforeSystemDefined) != 2 || got.BeforeSystemDefined[0] != "pol-1" {
-		t.Errorf("BeforeSystemDefined mismatch: %v", got.BeforeSystemDefined)
-	}
-	if len(got.AfterSystemDefined) != 1 || got.AfterSystemDefined[0] != "pol-3" {
-		t.Errorf("AfterSystemDefined mismatch: %v", got.AfterSystemDefined)
-	}
-}
-
 // TestFakeServer_DiscoverSites verifies DiscoverSites returns pre-populated sites.
 func TestFakeServer_DiscoverSites(t *testing.T) {
 	s := testutil.NewFakeUnifiServer()
@@ -555,35 +527,6 @@ func TestFakeServer_RateLimitInject(t *testing.T) {
 	want := 30 * time.Second
 	if rl.RetryAfter != want {
 		t.Errorf("RetryAfter = %v, want %v", rl.RetryAfter, want)
-	}
-}
-
-// TestFakeServer_OrderingSetup verifies SetOrdering pre-populates ordering
-// that GetPolicyOrdering returns correctly.
-func TestFakeServer_OrderingSetup(t *testing.T) {
-	s := testutil.NewFakeUnifiServer()
-	defer s.Close()
-	s.AddSite("default", "site-uuid-1", "Default")
-	c := newFakeClient(t, s)
-	ctx := context.Background()
-
-	want := controller.PolicyOrdering{
-		BeforeSystemDefined: []string{"pol-a", "pol-b"},
-		AfterSystemDefined:  []string{"pol-c"},
-	}
-	s.SetOrdering("site-uuid-1", "zone-src", "zone-dst", want)
-
-	got, err := c.GetPolicyOrdering(ctx, "default", "zone-src", "zone-dst")
-	if err != nil {
-		t.Fatalf("GetPolicyOrdering: %v", err)
-	}
-	if len(got.BeforeSystemDefined) != 2 ||
-		got.BeforeSystemDefined[0] != "pol-a" ||
-		got.BeforeSystemDefined[1] != "pol-b" {
-		t.Errorf("BeforeSystemDefined = %v, want %v", got.BeforeSystemDefined, want.BeforeSystemDefined)
-	}
-	if len(got.AfterSystemDefined) != 1 || got.AfterSystemDefined[0] != "pol-c" {
-		t.Errorf("AfterSystemDefined = %v, want %v", got.AfterSystemDefined, want.AfterSystemDefined)
 	}
 }
 

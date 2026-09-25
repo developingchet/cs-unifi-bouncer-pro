@@ -20,9 +20,8 @@ func testNamer(t *testing.T) *Namer {
 	n, err := NewNamer(
 		"crowdsec-block-{{.Family}}-{{.Index}}",
 		"crowdsec-drop-{{.Family}}-{{.Index}}",
-		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}",
-		"test",
-	)
+		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}")
+
 	if err != nil {
 		t.Fatalf("NewNamer: %v", err)
 	}
@@ -206,7 +205,7 @@ func TestEnsureShards_SameNameAcrossSites(t *testing.T) {
 func TestEnsureShards_CustomHexIndexWithoutCache(t *testing.T) {
 	ctrl := testutil.NewMockController()
 	store := newBboltStore(t)
-	namer, err := NewNamer("crowdsec-block-{{.Family}}-{{printf \"%x\" .Index}}", "rule-{{.Index}}", "policy-{{.Index}}", "test")
+	namer, err := NewNamer("crowdsec-block-{{.Family}}-{{printf \"%x\" .Index}}", "rule-{{.Index}}", "policy-{{.Index}}")
 	if err != nil {
 		t.Fatal(err)
 	}

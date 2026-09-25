@@ -141,40 +141,6 @@ func (s *bboltStore) BanList() (map[string]BanEntry, error) {
 	return result, err
 }
 
-// ---- Janitor ---------------------------------------------------------------
-
-func (s *bboltStore) PruneExpiredBans() (int, error) {
-	now := time.Now().UTC()
-	var pruned int
-	err := s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(bucketBans))
-		var toDelete [][]byte
-		if err := b.ForEach(func(k, v []byte) error {
-			var entry BanEntry
-			if err := msgpack.Unmarshal(v, &entry); err != nil {
-				s.log.Warn().Str("key", string(k)).Err(err).Msg("janitor: skipping corrupt ban entry")
-				return nil
-			}
-			if !entry.ExpiresAt.IsZero() && entry.ExpiresAt.Before(now) {
-				key := make([]byte, len(k))
-				copy(key, k)
-				toDelete = append(toDelete, key)
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-		for _, k := range toDelete {
-			if err := b.Delete(k); err != nil {
-				return err
-			}
-			pruned++
-		}
-		return nil
-	})
-	return pruned, err
-}
-
 // ---- Group cache -----------------------------------------------------------
 
 func (s *bboltStore) GetGroup(name string) (*GroupRecord, error) {
@@ -198,6 +164,7 @@ func (s *bboltStore) GetGroup(name string) (*GroupRecord, error) {
 }
 
 func (s *bboltStore) SetGroup(name string, rec GroupRecord) error {
+	rec.UpdatedAt = time.Now().UTC()
 	data, err := msgpack.Marshal(rec)
 	if err != nil {
 		return err

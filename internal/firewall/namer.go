@@ -14,7 +14,6 @@ type NameData struct {
 	Site    string // UniFi site name
 	SrcZone string // source zone name (zone mode only)
 	DstZone string // destination zone name (zone mode only)
-	Prefix  string // value of GROUP_PREFIX env var (default "crowdsec")
 }
 
 // Namer renders Go-template name strings for managed UniFi objects.
@@ -25,11 +24,10 @@ type Namer struct {
 	rulePrefix   string
 	policyTmpl   *template.Template
 	policyPrefix string
-	description  string
 }
 
 // NewNamer parses and validates the three name templates.
-func NewNamer(groupTmpl, ruleTmpl, policyTmpl, description string) (*Namer, error) {
+func NewNamer(groupTmpl, ruleTmpl, policyTmpl string) (*Namer, error) {
 	gt, err := template.New("group").Parse(groupTmpl)
 	if err != nil {
 		return nil, fmt.Errorf("GROUP_NAME_TEMPLATE: %w", err)
@@ -49,7 +47,6 @@ func NewNamer(groupTmpl, ruleTmpl, policyTmpl, description string) (*Namer, erro
 		rulePrefix:   strings.SplitN(ruleTmpl, "{{", 2)[0],
 		policyTmpl:   pt,
 		policyPrefix: strings.SplitN(policyTmpl, "{{", 2)[0],
-		description:  description,
 	}, nil
 }
 
@@ -66,11 +63,6 @@ func (n *Namer) RuleName(d NameData) (string, error) {
 // PolicyName renders the zone policy name for the given data.
 func (n *Namer) PolicyName(d NameData) (string, error) {
 	return render(n.policyTmpl, d)
-}
-
-// Description returns the static object description string.
-func (n *Namer) Description() string {
-	return n.description
 }
 
 func (n *Namer) PolicyPrefix() string {

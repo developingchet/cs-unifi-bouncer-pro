@@ -34,12 +34,9 @@ type GroupRecord struct {
 
 // PolicyRecord tracks managed firewall rules and zone policies.
 type PolicyRecord struct {
-	UnifiID   string
-	RuleID    string
-	Site      string
-	Mode      string // "legacy" or "zone"
-	Priority  int
-	UpdatedAt time.Time
+	UnifiID string
+	Site    string
+	Mode    string // "legacy" or "zone"
 }
 
 // Store is the persistence interface for the bouncer.
@@ -51,9 +48,6 @@ type Store interface {
 	BanPut(ip string, entry BanEntry) error
 	BanDelete(ip string) error
 	BanList() (map[string]BanEntry, error)
-
-	// Janitor helpers
-	PruneExpiredBans() (int, error)
 
 	// Group cache
 	GetGroup(name string) (*GroupRecord, error)

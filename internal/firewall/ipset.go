@@ -90,7 +90,7 @@ func (s *IPSet) Replace(ips []string) {
 	s.dirty = true
 }
 
-// IsDirty returns whether the set has changed since the last CommitClean.
+// IsDirty returns whether the set has changed since it was last marked clean.
 func (s *IPSet) IsDirty() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -98,7 +98,7 @@ func (s *IPSet) IsDirty() bool {
 }
 
 // PeekDirty returns the current members if dirty, or nil if clean.
-// Does NOT clear the dirty flag — use CommitClean after a successful write.
+// Does NOT clear the dirty flag — use CommitFlushed after a successful write.
 func (s *IPSet) PeekDirty() ([]string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -112,14 +112,7 @@ func (s *IPSet) PeekDirty() ([]string, bool) {
 	return out, true
 }
 
-// CommitClean clears the dirty flag. Call only after a successful API write.
-func (s *IPSet) CommitClean() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.dirty = false
-}
-
-// MarkClean clears the dirty flag without a successful write (baseline init).
+// MarkClean clears the dirty flag for state that already matches the controller.
 func (s *IPSet) MarkClean() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -530,42 +530,6 @@ func TestMockController_TMLs(t *testing.T) {
 	})
 }
 
-// TestMockController_PolicyOrdering covers SetOrdering/GetPolicyOrdering/SetPolicyOrdering.
-func TestMockController_PolicyOrdering(t *testing.T) {
-	ctx := context.Background()
-	m := testutil.NewMockController()
-
-	// SetOrdering (test helper) then GetPolicyOrdering.
-	m.SetOrdering("default", "src-zone", "dst-zone", controller.PolicyOrdering{
-		BeforeSystemDefined: []string{"pol-1"},
-		AfterSystemDefined:  []string{"pol-2"},
-	})
-	ord, err := m.GetPolicyOrdering(ctx, "default", "src-zone", "dst-zone")
-	if err != nil {
-		t.Fatalf("GetPolicyOrdering: %v", err)
-	}
-	if len(ord.BeforeSystemDefined) != 1 || ord.BeforeSystemDefined[0] != "pol-1" {
-		t.Errorf("BeforeSystemDefined = %v", ord.BeforeSystemDefined)
-	}
-
-	// SetPolicyOrdering via Controller interface then verify.
-	if err := m.SetPolicyOrdering(ctx, "default", "src-zone", "dst-zone", controller.PolicyOrdering{
-		BeforeSystemDefined: []string{"pol-x", "pol-y"},
-	}); err != nil {
-		t.Fatalf("SetPolicyOrdering: %v", err)
-	}
-	ord2, _ := m.GetPolicyOrdering(ctx, "default", "src-zone", "dst-zone")
-	if len(ord2.BeforeSystemDefined) != 2 {
-		t.Errorf("expected 2 before, got %v", ord2.BeforeSystemDefined)
-	}
-
-	// Different zone pair is independent.
-	ord3, _ := m.GetPolicyOrdering(ctx, "default", "other-src", "other-dst")
-	if len(ord3.BeforeSystemDefined) != 0 {
-		t.Errorf("expected empty for different zone pair, got %v", ord3.BeforeSystemDefined)
-	}
-}
-
 // TestMockController_DiscoverSites verifies DiscoverSites returns a copy.
 func TestMockController_DiscoverSites(t *testing.T) {
 	ctx := context.Background()
@@ -695,7 +659,7 @@ func TestMockController_Concurrent(t *testing.T) {
 	}
 }
 
-// TestMockController_ErrorInjection_TML verifies SetError for TML and ordering methods.
+// TestMockController_ErrorInjection_TML verifies SetError for TML and site discovery methods.
 func TestMockController_ErrorInjection_TML(t *testing.T) {
 	ctx := context.Background()
 	const site = "default"
@@ -729,19 +693,6 @@ func TestMockController_ErrorInjection_TML(t *testing.T) {
 			"DeleteTrafficMatchingList",
 			func(m *testutil.MockController) error {
 				return m.DeleteTrafficMatchingList(ctx, site, "id")
-			},
-		},
-		{
-			"GetPolicyOrdering",
-			func(m *testutil.MockController) error {
-				_, err := m.GetPolicyOrdering(ctx, site, "src", "dst")
-				return err
-			},
-		},
-		{
-			"SetPolicyOrdering",
-			func(m *testutil.MockController) error {
-				return m.SetPolicyOrdering(ctx, site, "src", "dst", controller.PolicyOrdering{})
 			},
 		},
 		{

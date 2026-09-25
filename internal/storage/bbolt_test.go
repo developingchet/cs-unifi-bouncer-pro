@@ -72,42 +72,31 @@ func TestBanRecordExistsDelete(t *testing.T) {
 func TestBanEntryExpiresAt(t *testing.T) {
 	s := newTestStore(t)
 	const ip = "5.6.7.8"
-	// Record with past expiry
-	past := time.Now().Add(-time.Hour)
-	if err := s.BanRecord(ip, past, false); err != nil {
+	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	if err := s.BanRecord(ip, expires, false); err != nil {
 		t.Fatalf("BanRecord: %v", err)
 	}
-	pruned, err := s.PruneExpiredBans()
-	if err != nil {
-		t.Fatalf("PruneExpiredBans: %v", err)
+	entry, err := s.BanGet(ip)
+	if err != nil || entry == nil {
+		t.Fatalf("BanGet: %v, %v", entry, err)
 	}
-	if pruned != 1 {
-		t.Fatalf("expected 1 pruned, got %d", pruned)
-	}
-	exists, _ := s.BanExists(ip)
-	if exists {
-		t.Fatal("pruned IP should not exist")
+	if !entry.ExpiresAt.Equal(expires) {
+		t.Fatalf("ExpiresAt = %v, want %v", entry.ExpiresAt, expires)
 	}
 }
 
-func TestPruneKeepsFreshBans(t *testing.T) {
+func TestSetGroupStampsUpdatedAt(t *testing.T) {
 	s := newTestStore(t)
-
-	// Fresh ban — should NOT be pruned
-	if err := s.BanRecord("9.9.9.9", time.Now().Add(time.Hour), false); err != nil {
-		t.Fatal(err)
+	before := time.Now().Add(-time.Second)
+	if err := s.SetGroup("crowdsec-block-v4-0", GroupRecord{UnifiID: "g0"}); err != nil {
+		t.Fatalf("SetGroup: %v", err)
 	}
-	// Never-expiring ban (zero time) — should NOT be pruned
-	if err := s.BanRecord("10.0.0.1", time.Time{}, false); err != nil {
-		t.Fatal(err)
+	rec, err := s.GetGroup("crowdsec-block-v4-0")
+	if err != nil || rec == nil {
+		t.Fatalf("GetGroup: %v, %v", rec, err)
 	}
-
-	pruned, err := s.PruneExpiredBans()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pruned != 0 {
-		t.Fatalf("expected 0 pruned, got %d", pruned)
+	if rec.UpdatedAt.Before(before) {
+		t.Fatalf("UpdatedAt = %v, want a time after %v", rec.UpdatedAt, before)
 	}
 }
 
@@ -170,10 +159,9 @@ func TestGroupCRUD(t *testing.T) {
 func TestPolicyCRUD(t *testing.T) {
 	s := newTestStore(t)
 	rec := PolicyRecord{
-		UnifiID:   "pol123",
-		Site:      "default",
-		Mode:      "legacy",
-		UpdatedAt: time.Now(),
+		UnifiID: "pol123",
+		Site:    "default",
+		Mode:    "legacy",
 	}
 	if err := s.SetPolicy("crowdsec-drop-v4-0", rec); err != nil {
 		t.Fatal(err)

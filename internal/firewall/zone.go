@@ -827,6 +827,8 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 
 // cleanupOrphanedPortTMLs removes filter lists no longer referenced by the
 // current pair configuration. IDs handle both base and content-versioned names.
+// A list still referenced by any policy is kept: it may belong to another
+// bouncer instance on the same site, or to a policy awaiting replacement.
 func (zm *ZoneManager) cleanupOrphanedPortTMLs(ctx context.Context, site string, sitePortTMLs map[string]portTMLIDs) {
 	expectedIDs := make(map[string]bool, len(sitePortTMLs)*4)
 	for _, ids := range sitePortTMLs {
@@ -836,20 +838,36 @@ func (zm *ZoneManager) cleanupOrphanedPortTMLs(ctx context.Context, site string,
 			}
 		}
 	}
-
 	allTMLs, err := zm.ctrl.ListTrafficMatchingLists(ctx, site)
 	if err != nil {
 		zm.log.Warn().Err(err).Str("site", site).Msg("orphan port TML cleanup: failed to list TMLs")
 		return
 	}
+	var candidates []controller.TrafficMatchingList
 	for _, t := range allTMLs {
-		if !strings.HasPrefix(t.Name, "crowdsec-ports-src-") &&
-			!strings.HasPrefix(t.Name, "crowdsec-ports-dst-") &&
-			!strings.HasPrefix(t.Name, "crowdsec-dstips-v4-") &&
-			!strings.HasPrefix(t.Name, "crowdsec-dstips-v6-") {
-			continue
+		if !expectedIDs[t.ID] && (strings.HasPrefix(t.Name, "crowdsec-ports-src-") ||
+			strings.HasPrefix(t.Name, "crowdsec-ports-dst-") ||
+			strings.HasPrefix(t.Name, "crowdsec-dstips-v4-") ||
+			strings.HasPrefix(t.Name, "crowdsec-dstips-v6-")) {
+			candidates = append(candidates, t)
 		}
-		if expectedIDs[t.ID] {
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	policies, err := zm.ctrl.ListZonePolicies(ctx, site)
+	if err != nil {
+		zm.log.Warn().Err(err).Str("site", site).Msg("orphan port TML cleanup: failed to list policies")
+		return
+	}
+	referenced := make(map[string]bool)
+	for _, p := range policies {
+		referenced[p.SrcPortTMLID] = true
+		referenced[p.DstPortTMLID] = true
+		referenced[p.DstIPTMLID] = true
+	}
+	for _, t := range candidates {
+		if referenced[t.ID] {
 			continue
 		}
 		if delErr := zm.ctrl.DeleteTrafficMatchingList(ctx, site, t.ID); delErr != nil {
@@ -1005,29 +1023,6 @@ func (zm *ZoneManager) DeletePolicies(ctx context.Context, site string) error {
 		}
 	}
 	return errors.Join(errs...)
-}
-
-// UpdateGroupReference updates zone policies that reference an old TML/group ID with a new one.
-func (zm *ZoneManager) UpdateGroupReference(ctx context.Context, site, oldGroupID, newGroupID string) error {
-	policies, err := zm.ctrl.ListZonePolicies(ctx, site)
-	if err != nil {
-		return err
-	}
-	for _, p := range policies {
-		needsUpdate := false
-		for i, id := range p.TrafficMatchingListIDs {
-			if id == oldGroupID {
-				p.TrafficMatchingListIDs[i] = newGroupID
-				needsUpdate = true
-			}
-		}
-		if needsUpdate {
-			if err := zm.ctrl.UpdateZonePolicy(ctx, site, p); err != nil {
-				return fmt.Errorf("update zone policy %s: %w", p.ID, err)
-			}
-		}
-	}
-	return nil
 }
 
 // needsUpdateZonePolicy returns true if the policy needs to be updated to match the desired state.

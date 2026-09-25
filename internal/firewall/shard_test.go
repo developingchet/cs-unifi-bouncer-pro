@@ -27,9 +27,8 @@ func newShardTestNamer(t *testing.T) *Namer {
 	n, err := NewNamer(
 		"crowdsec-block-{{.Family}}-{{.Index}}",
 		"crowdsec-drop-{{.Family}}-{{.Index}}",
-		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}",
-		"test",
-	)
+		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}")
+
 	if err != nil {
 		t.Fatalf("NewNamer: %v", err)
 	}
@@ -173,10 +172,9 @@ func TestAddIP_LargeOverflow(t *testing.T) {
 	}
 	shard0.IPs.MarkClean()
 
-	shard1, err := sm.createShard(ctx, 1)
-	if err != nil {
-		t.Fatalf("createShard(1): %v", err)
-	}
+	shard1 := sm.allocShard(1)
+	shard1.ID = "group-1"
+	shard1.State = ShardStateActive
 	sm.mu.Lock()
 	family = sm.familyStateLocked("v4")
 	family.Shards = append(family.Shards, shard1)

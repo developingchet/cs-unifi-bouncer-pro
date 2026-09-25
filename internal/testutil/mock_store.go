@@ -132,25 +132,6 @@ func (m *MockStore) BanList() (map[string]storage.BanEntry, error) {
 	return copyMap(m.bans), nil
 }
 
-// --- Janitor helpers --------------------------------------------------------
-
-func (m *MockStore) PruneExpiredBans() (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.check("PruneExpiredBans"); err != nil {
-		return 0, err
-	}
-	now := time.Now().UTC()
-	pruned := 0
-	for ip, entry := range m.bans {
-		if !entry.ExpiresAt.IsZero() && entry.ExpiresAt.Before(now) {
-			delete(m.bans, ip)
-			pruned++
-		}
-	}
-	return pruned, nil
-}
-
 // --- Group cache ------------------------------------------------------------
 
 func (m *MockStore) GetGroup(name string) (*storage.GroupRecord, error) {
