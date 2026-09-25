@@ -406,6 +406,9 @@ func (s *FakeUnifiServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	path := r.URL.Path
 	switch {
+	case path == "/" && r.Method == http.MethodGet:
+		w.WriteHeader(http.StatusOK) // a UniFi OS console serves its UI at the root
+		return
 	case path == "/api/auth/login" && r.Method == http.MethodPost:
 		s.handleLogin(w, r)
 	case path == "/proxy/network/api/self":

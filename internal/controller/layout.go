@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 )
@@ -23,9 +24,11 @@ var (
 )
 
 // detectLayout probes the controller root. UniFi OS serves its console at /
-// with 200; a standalone Network Application redirects / to /manage. Any other
-// outcome keeps the UniFi OS layout, and a failed probe is returned so the
-// caller can report an unreachable controller instead of a misleading login error.
+// with 200; a standalone Network Application redirects / to /manage. A 404 or
+// 5xx means the controller is still starting (a standalone controller answers
+// 404 until its web application is deployed), so it is returned as an error
+// rather than guessed. A failed probe is also returned so the caller can report
+// an unreachable controller instead of a misleading login error.
 func detectLayout(ctx context.Context, client *http.Client, baseURL string) (apiLayout, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/", nil)
 	if err != nil {
@@ -36,10 +39,27 @@ func detectLayout(ctx context.Context, client *http.Client, baseURL string) (api
 		return layoutUniFiOS, fmt.Errorf("probe controller at %s: %w", baseURL, err)
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest {
+	switch {
+	case resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest:
 		return layoutStandalone, nil
+	case resp.StatusCode == http.StatusNotFound || resp.StatusCode >= http.StatusInternalServerError:
+		return layoutUniFiOS, fmt.Errorf("controller at %s is not ready (GET / returned HTTP %d)", baseURL, resp.StatusCode)
 	}
 	return layoutUniFiOS, nil
+}
+
+// classicErrorMsg returns meta.msg from a classic API error body
+// ({"meta":{"rc":"error","msg":"api.err.X"}}), or "" if absent.
+func classicErrorMsg(body []byte) string {
+	var envelope struct {
+		Meta struct {
+			Msg string `json:"msg"`
+		} `json:"meta"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return ""
+	}
+	return envelope.Meta.Msg
 }
 
 // networkURL joins the base URL, the layout's Network API prefix, and path.

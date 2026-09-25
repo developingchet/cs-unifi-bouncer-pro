@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -13,13 +14,16 @@ import (
 
 func TestDetectLayout(t *testing.T) {
 	tests := []struct {
-		name   string
-		status int
-		want   apiLayout
+		name    string
+		status  int
+		want    apiLayout
+		wantErr bool
 	}{
-		{"UniFi OS console serves its UI", http.StatusOK, layoutUniFiOS},
-		{"standalone redirects to /manage", http.StatusFound, layoutStandalone},
-		{"unexpected status keeps UniFi OS", http.StatusNotFound, layoutUniFiOS},
+		{"UniFi OS console serves its UI", http.StatusOK, layoutUniFiOS, false},
+		{"standalone redirects to /manage", http.StatusFound, layoutStandalone, false},
+		{"other client error keeps UniFi OS", http.StatusForbidden, layoutUniFiOS, false},
+		{"starting standalone controller answers 404", http.StatusNotFound, layoutUniFiOS, true},
+		{"server error means not ready", http.StatusServiceUnavailable, layoutUniFiOS, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -34,11 +38,39 @@ func TestDetectLayout(t *testing.T) {
 				return http.ErrUseLastResponse
 			}}
 			got, err := detectLayout(context.Background(), client, srv.URL)
-			if err != nil {
-				t.Fatal(err)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
 			}
-			if got != tt.want {
+			if !tt.wantErr && got != tt.want {
 				t.Fatalf("layout = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClassicDuplicateIsConflict(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         string
+		wantConflict bool
+	}{
+		{"duplicate group", `{"meta":{"rc":"error","msg":"api.err.FirewallGroupExisted"},"data":[]}`, true},
+		{"duplicate rule", `{"meta":{"rc":"error","msg":"api.err.FirewallRuleIndexExisted"},"data":[]}`, true},
+		{"other validation error", `{"meta":{"rc":"error","msg":"api.err.InvalidPayload"},"data":[]}`, false},
+		{"not JSON", `bad request`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+			c := newTestClient(srv.URL, "test-key")
+			_, err := c.CreateFirewallGroup(context.Background(), "default", FirewallGroup{Name: "g"})
+			var conflict *ErrConflict
+			if errors.As(err, &conflict) != tt.wantConflict {
+				t.Fatalf("err = %v, want conflict %v", err, tt.wantConflict)
 			}
 		})
 	}

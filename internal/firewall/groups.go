@@ -418,24 +418,16 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 		if sm.mode == "zone" {
 			if tml, exists := apiTMLByName[name]; exists {
 				apiID = tml.ID
-				members = make([]string, 0, len(tml.Items))
+				values := make([]string, 0, len(tml.Items))
 				for _, item := range tml.Items {
-					if item.Value == TMLPlaceholderV4 || item.Value == TMLPlaceholderV6 {
-						continue // strip creation placeholder
-					}
-					members = append(members, item.Value)
+					values = append(values, item.Value)
 				}
+				members = stripPlaceholders(values)
 			}
 		} else {
 			if apiGroup, exists := apiGroupByName[name]; exists {
 				apiID = apiGroup.ID
-				members = make([]string, 0, len(apiGroup.GroupMembers))
-				for _, m := range apiGroup.GroupMembers {
-					if m == TMLPlaceholderV4 || m == TMLPlaceholderV6 {
-						continue // strip creation placeholder
-					}
-					members = append(members, m)
-				}
+				members = stripPlaceholders(apiGroup.GroupMembers)
 			}
 		}
 
@@ -1016,18 +1008,11 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) error {
 			return putErr
 		}
 
-		// If the object was deleted from UniFi externally, reset to Pending so
-		// it gets re-created on the next flush.
 		var nf *controller.ErrNotFound
 		if errors.As(putErr, &nf) {
-			sm.log.Warn().Str("shard", shard.Name).Str("shard_id", shard.ID).
-				Msg("shard object not found in UniFi (externally deleted?); resetting to Pending for re-creation")
-			sm.mu.Lock()
-			shard.State = ShardStatePending
-			shard.ID = ""
-			sm.mu.Unlock()
-			_ = sm.store.SetGroup(cacheKey(sm.site, shard.Name), storage.GroupRecord{Site: sm.site, Index: shard.Index, IPv6: sm.ipv6})
-			return nil
+			if handled := sm.handleShardNotFound(ctx, shard); handled {
+				return nil
+			}
 		}
 
 		sm.log.Error().Err(putErr).Str("shard", shard.Name).Str("shard_id", shard.ID).Int("ip_count", len(ips)).
@@ -1098,31 +1083,45 @@ func (sm *ShardManager) provisionShard(ctx context.Context, shard *Shard) error 
 // Used for 409 conflict recovery: if CreateTrafficMatchingList returns ErrConflict,
 // the TML already exists and we can recover its ID to continue without re-creating.
 func (sm *ShardManager) findExistingTMLByName(ctx context.Context, name string) string {
-	tmls, err := sm.ctrl.ListTrafficMatchingLists(ctx, sm.site)
-	if err != nil {
-		return ""
-	}
-	for _, t := range tmls {
-		if t.Name == name {
-			return t.ID
-		}
-	}
-	return ""
+	id, _ := sm.lookupTMLByName(ctx, name)
+	return id
 }
 
 // findExistingGroupByName queries the UniFi API for a firewall group with the given name.
 // Used for 409 conflict recovery in legacy mode.
 func (sm *ShardManager) findExistingGroupByName(ctx context.Context, name string) string {
+	id, _ := sm.lookupGroupByName(ctx, name)
+	return id
+}
+
+// lookupTMLByName returns the ID of the TML named name, "" if there is none,
+// or the listing error.
+func (sm *ShardManager) lookupTMLByName(ctx context.Context, name string) (string, error) {
+	tmls, err := sm.ctrl.ListTrafficMatchingLists(ctx, sm.site)
+	if err != nil {
+		return "", err
+	}
+	for _, t := range tmls {
+		if t.Name == name {
+			return t.ID, nil
+		}
+	}
+	return "", nil
+}
+
+// lookupGroupByName returns the ID of the firewall group named name, "" if
+// there is none, or the listing error.
+func (sm *ShardManager) lookupGroupByName(ctx context.Context, name string) (string, error) {
 	groups, err := sm.ctrl.ListFirewallGroups(ctx, sm.site)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	for _, g := range groups {
 		if g.Name == name {
-			return g.ID
+			return g.ID, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 func tmlTypeForFamily(family string) string {

@@ -906,7 +906,8 @@ func TestSyncShard_PutNotFound_ResetsToPending(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	// Inject a 404 on the next UpdateFirewallGroup call.
+	// The group is deleted outside the bouncer, so the next update returns 404.
+	ctrl.SetGroups(testSite, nil)
 	ctrl.SetError("UpdateFirewallGroup", &controller.ErrNotFound{URL: "/api/groups/" + shardID})
 
 	// syncAllFamilies should return nil (404 is handled gracefully).

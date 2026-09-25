@@ -598,6 +598,20 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 		func() {
 			m.syncMu.Lock()
 			defer m.syncMu.Unlock()
+			// Shards the bouncer considers in sync may have been edited on the
+			// controller. Checked under syncMu so no flush is in flight.
+			for _, mgr := range []*ShardManager{v4Mgr, v6Mgr} {
+				if mgr == nil {
+					continue
+				}
+				missing, extra, err := mgr.MarkRemoteDrift(ctx)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("check controller membership for site %s: %w", site, err))
+					continue
+				}
+				added += missing
+				removed += extra
+			}
 			flushed := true
 			if err := v4Mgr.syncAllFamilies(ctx); err != nil {
 				errs = append(errs, fmt.Errorf("v4 flush: %w", err))
@@ -713,6 +727,7 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 	siteDirty := make(map[string]int, len(sites))
 	var totalDirty int
 	var syncErrors []error
+	deferred := false
 	for _, site := range sites {
 		m.mu.RLock()
 		v4 := m.v4Mgrs[site]
@@ -742,8 +757,10 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 		// concurrent reconcile must not see a Draining donor before its target
 		// has been written successfully.
 		if !m.syncMu.TryLock() {
-			m.log.Warn().Str("site", site).Msg("SyncDirty: skipping site flush — reconcile in progress")
-			syncErrors = append(syncErrors, fmt.Errorf("sync site %s deferred: reconcile in progress", site))
+			// Reconcile flushes dirty shards itself, and anything it misses is
+			// flushed on the next tick, so this is routine rather than an error.
+			m.log.Debug().Str("site", site).Msg("SyncDirty: deferring site flush while reconcile runs")
+			deferred = true
 			continue
 		}
 		v4Synced, v6Synced := true, true
@@ -784,7 +801,7 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 			}
 		}()
 
-		if siteDirty[site] > 0 {
+		if siteDirty[site] > 0 && v4Synced && v6Synced {
 			v4Total := 0
 			v6Total := 0
 			if v4 != nil {
@@ -814,7 +831,7 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 			m.recordControllerSuccess()
 		}
 	}
-	if len(syncErrors) == 0 {
+	if len(syncErrors) == 0 && !deferred {
 		metrics.LastSyncTimestamp.Set(float64(time.Now().Unix()))
 	}
 	return errors.Join(syncErrors...)

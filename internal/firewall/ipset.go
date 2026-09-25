@@ -119,6 +119,15 @@ func (s *IPSet) MarkClean() {
 	s.dirty = false
 }
 
+// MarkStale forces the next sync to write the full member set, for when the
+// controller's copy was changed out of band and no longer matches the last write.
+func (s *IPSet) MarkStale() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dirty = true
+	s.lastFlushed = nil
+}
+
 // HasChangedFromFlushed returns true if the current member set differs from the
 // last successfully flushed snapshot. Returns true when no flush has occurred yet.
 func (s *IPSet) HasChangedFromFlushed() bool {

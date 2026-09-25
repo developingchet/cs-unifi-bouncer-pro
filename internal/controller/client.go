@@ -224,6 +224,10 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 		if len(body) == 4096 {
 			bodyStr += "...(truncated)"
 		}
+		if msg := classicErrorMsg(body); strings.HasSuffix(msg, "Existed") {
+			// The classic API reports duplicate names as 400, not 409.
+			return nil, &ErrConflict{Msg: msg}
+		}
 		return nil, fmt.Errorf("bad request: %s", bodyStr)
 	case http.StatusUnauthorized:
 		_ = resp.Body.Close()
