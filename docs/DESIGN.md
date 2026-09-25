@@ -118,7 +118,7 @@ The manager delegates controller operations to two mode-specific components:
 - **`legacyManager`** — manipulates firewall address groups and `WAN_IN`/`WANv6_IN` rules
 - **`zoneManager`** — manipulates firewall address groups and zone policies
 
-The `managerImpl` wraps both and selects based on the detected or configured mode. In `auto` mode, feature detection (`internal/controller/version.go`) probes the `/rest/firewallzone` endpoint per site and caches the result.
+The `managerImpl` wraps both and selects based on the detected or configured mode. In `auto` mode, feature detection (`internal/controller/features.go`) probes the integration v1 firewall zones endpoint per site and caches the result. A controller without that API (HTTP 404 or an HTML fallback page) is treated as legacy; any other probe error stops startup rather than guessing the mode.
 
 #### Zone policy portFilter constraint
 
@@ -327,7 +327,7 @@ All tests are table-driven and run without external services. The test suite cov
 - **`internal/bouncer/handler`**: source-aware ban handling, BAN_TTL cap, dry-run mode, per-site error continuation, auth error short-circuit
 - **`internal/bouncer/janitor`**: expired ban pruning, skip-on-unban-failure
 - **`internal/logger`**: redaction patterns
-- **`internal/lapi_metrics`**: Reporter construction, interval clamping, counter reset behaviour after push, payload structure validation, user-agent and API key headers, concurrent recording under the race detector, shutdown final-push
+- **`internal/lapimetrics`**: Reporter construction, interval clamping, counter reset behaviour after push, payload structure validation, user-agent and API key headers, concurrent recording under the race detector, shutdown final-push
 - **`internal/capabilities`**: Constant value contracts (`BouncerType`, `Layer`, remediation support flags) and the intentional distinction between `BouncerType` (used in the metrics payload `type` field) and the LAPI user-agent service token (`crowdsec-unifi-bouncer`, used in HTTP headers)
 - **`internal/whitelist`**: TML creation and update idempotency, ALLOW policy creation with IP TML IDs and port TML IDs, no-op when current, delete+recreate triggered when port TML IDs change (portFilter constraint), orphan policy and TML sweep, and policy index checks that report a block preceding an allow
 - **`internal/webhook`**: fires on registered events, skips unregistered events, ignores HTTP errors, empty URL disables notifier, payload is valid JSON

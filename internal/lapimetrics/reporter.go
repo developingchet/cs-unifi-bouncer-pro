@@ -1,4 +1,4 @@
-package lapi_metrics
+package lapimetrics
 
 import (
 	"bufio"
@@ -41,17 +41,13 @@ type originKey struct {
 }
 
 // NewReporter constructs a Reporter. If interval > 0 and < 10m, it is clamped to 10m.
-func NewReporter(lapiURL, apiKey, version string, interval time.Duration, log zerolog.Logger, clients ...*http.Client) *Reporter {
+func NewReporter(lapiURL, apiKey, version string, interval time.Duration, client *http.Client, log zerolog.Logger) *Reporter {
 	if interval > 0 && interval < minInterval {
 		log.Warn().
 			Dur("requested", interval).
 			Dur("enforced", minInterval).
 			Msg("LAPI_METRICS_PUSH_INTERVAL below minimum; clamping to 10m")
 		interval = minInterval
-	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	if len(clients) > 0 && clients[0] != nil {
-		client = clients[0]
 	}
 	return &Reporter{
 		lapiURL:     lapiURL,

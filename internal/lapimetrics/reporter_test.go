@@ -1,4 +1,4 @@
-package lapi_metrics
+package lapimetrics
 
 import (
 	"context"
@@ -17,7 +17,7 @@ import (
 // newTestReporter constructs a Reporter for testing, pointing at the given httptest server.
 func newTestReporter(t *testing.T, srv *httptest.Server, interval time.Duration) *Reporter {
 	t.Helper()
-	return NewReporter(srv.URL, "test-key", "1.2.3", interval, zerolog.Nop())
+	return NewReporter(srv.URL, "test-key", "1.2.3", interval, srv.Client(), zerolog.Nop())
 }
 
 // payloadCapture holds a decoded remediation_components entry.
@@ -126,7 +126,7 @@ func TestNewReporter_IntervalClamping(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := NewReporter("http://localhost", "key", "1.0.0", tt.input, zerolog.Nop())
+			r := NewReporter("http://localhost", "key", "1.0.0", tt.input, http.DefaultClient, zerolog.Nop())
 			if r.interval != tt.expected {
 				t.Errorf("got interval %v, want %v", r.interval, tt.expected)
 			}

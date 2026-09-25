@@ -21,7 +21,7 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/lapi_metrics"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/lapimetrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/lapihttp"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
@@ -267,9 +267,9 @@ func runDaemon() error {
 		if err != nil {
 			return fmt.Errorf("configure LAPI metrics client: %w", err)
 		}
-		reporter := lapi_metrics.NewReporter(
+		reporter := lapimetrics.NewReporter(
 			cfg.CrowdSecLAPIURL, cfg.CrowdSecLAPIKey, Version,
-			cfg.LAPIMetricsPushInterval, log, lapiClient,
+			cfg.LAPIMetricsPushInterval, lapiClient, log,
 		)
 		go reporter.Run(ctx)
 		recorder = reporter
