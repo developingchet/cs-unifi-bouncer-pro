@@ -61,7 +61,7 @@ Documentation PRs are always welcome — from typo fixes to new deployment examp
 
 | Tool | Minimum version |
 |------|----------------|
-| Go | 1.25 |
+| Go | 1.26.6 |
 | Docker | 20.10 |
 | Docker Compose | v2 |
 

@@ -2,7 +2,7 @@
 # Stage 1: Build
 # Use --platform=$BUILDPLATFORM so the builder always runs natively on the CI host (amd64).
 # TARGETARCH/TARGETOS/TARGETVARIANT are injected by BuildKit for cross-compilation via GOOS/GOARCH below.
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine@sha256:8e02eb337d9e0ea459e041f1ee5eece41cbb61f1d83e7d883a3e2fb4862063fa AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.6-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS builder
 
 RUN apk add --no-cache git ca-certificates tzdata
 
@@ -26,7 +26,7 @@ RUN GOARM=${TARGETVARIANT#v} CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH}
 RUN mkdir -p /out/data-init
 
 # Stage 2: Distroless runtime
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:a9329520abc449e3b14d5bc3a6ffae065bdde0f02667fa10880c49b35c109fd1
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
 ARG VERSION=dev
 ARG COMMIT=unknown
