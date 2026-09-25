@@ -87,7 +87,7 @@ UNIFI_SITES=default,homelab,iot
 | `FIREWALL_GROUP_CAPACITY_V4` | — | No | Override capacity for IPv4 groups (takes precedence over `FIREWALL_GROUP_CAPACITY`) |
 | `FIREWALL_GROUP_CAPACITY_V6` | — | No | Override capacity for IPv6 groups (takes precedence over `FIREWALL_GROUP_CAPACITY`) |
 | `FIREWALL_API_SHARD_DELAY` | `250ms` | No | Minimum pause between consecutive write calls (`PUT /rest/firewallgroup`, rule/policy `POST`/`DELETE`). Prevents the UDM from stacking back-to-back ruleset regenerations. Set `0` to disable. |
-| `FIREWALL_FLUSH_CONCURRENCY` | `1` | No | Maximum concurrent `PUT /rest/firewallgroup` calls in-flight across all sites and address families. `1` = fully serialized (recommended). Increase only for multi-site setups where faster bulk updates are needed. |
+| `FIREWALL_FLUSH_CONCURRENCY` | `1` | No | Maximum concurrent shard update calls (firewall group or traffic matching list) in flight across all sites and address families. `1` = fully serialized (recommended). Increase only for multi-site setups where faster bulk updates are needed. |
 | `FIREWALL_LOG_DROPS` | `false` | No | Enable logging on managed firewall rules and zone policies. Existing zone policies are updated on reconcile. |
 | `FIREWALL_CONNECTION_STATES` | `NEW,INVALID` | No | Connection states matched by zone block policies. Allowed values: `NEW`, `INVALID`, `ESTABLISHED`, or `ALL` for unrestricted matching. `ALL` can block replies to outbound connections. |
 | `FIREWALL_RECONCILE_ON_START` | `true` | No | Run a full reconcile on startup before accepting the CrowdSec stream |
@@ -102,7 +102,7 @@ UNIFI_SITES=default,homelab,iot
 
 ### Firewall mode details
 
-**`auto`** (recommended): The bouncer queries the UniFi controller to detect whether zone-based firewall policies are supported. Controllers running UniFi Network ≥ 8.x use zone mode; older versions use legacy mode. The detected mode is logged at startup.
+**`auto`** (recommended): The bouncer queries the UniFi controller to detect whether zone-based firewall policies are supported. Controllers running UniFi Network ≥ 8.x use zone mode; older versions use legacy mode. The detected mode is logged at startup. If the probe fails for any reason other than the zone API being absent, startup stops instead of guessing a mode.
 
 **`legacy`**: Creates `WAN_IN` and `WANv6_IN` drop rules that reference managed address-group shards. Works with all UniFi Network versions.
 
@@ -312,7 +312,7 @@ Decisions from CrowdSec pass through an 8-stage filter pipeline before being enq
 | `BLOCK_SCENARIO_EXCLUDE` | — | Comma-separated scenario substrings to skip. Example: `impossible-travel,test` |
 | `BLOCK_WHITELIST` | — | Comma-separated IP addresses or CIDR ranges that are never blocked. Add your public WAN IP here; private and CGNAT ranges are skipped automatically. |
 | `BLOCK_MIN_DURATION` | — | Ignore ban decisions shorter than this duration. Example: `1h`. Useful to filter out short test decisions. |
-| `BLOCK_SCENARIO_DURATION_MAP` | — | Per-scenario ban duration overrides. Comma- or semicolon-separated `key=duration` pairs where the longest matching key wins. A configured override may exceed `BAN_TTL`. Example: `ssh-bf=168h;http-probing=24h` |
+| `BLOCK_SCENARIO_DURATION_MAP` | — | Per-scenario ban duration overrides. Comma- or semicolon-separated `key=duration` pairs where the longest matching key wins. A configured override may exceed `BAN_TTL`. Example: `ssh-bf=168h;http-probing=24h`. A malformed entry or non-positive duration stops startup. |
 
 ### Filter pipeline stages
 
@@ -336,7 +336,7 @@ A token-bucket rate limiter can throttle how fast decisions are dequeued and app
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DECISION_RATE_LIMIT` | `0` | Maximum decisions processed per second. `0` disables rate limiting (unlimited throughput). |
-| `DECISION_BURST_SIZE` | `1000` | Token-bucket burst capacity — the maximum number of decisions that can be processed in a single burst before the rate limit takes effect. Has no effect when `DECISION_RATE_LIMIT=0`. |
+| `DECISION_BURST_SIZE` | `1000` | Token-bucket burst capacity — the maximum number of decisions that can be processed in a single burst before the rate limit takes effect. Must be at least 1 when `DECISION_RATE_LIMIT` is set; has no effect when `DECISION_RATE_LIMIT=0`. |
 
 ```bash
 # Allow up to 500 decisions/s with a burst of 2000
