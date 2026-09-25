@@ -155,16 +155,23 @@ func (b *Bouncer) runPeriodicSync(ctx context.Context) {
 // After every decision block it calls SyncDirty to flush in-memory dirty shards to
 // the UniFi API. The first flush is logged at Info as the startup sync boundary.
 func (b *Bouncer) processStream(ctx context.Context) error {
-	go b.streamBnc.Run(ctx)
+	runErr := make(chan error, 1)
+	go func() { runErr <- b.streamBnc.Run(ctx) }()
 
 	startupSynced := false
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case err := <-runErr:
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return streamError(err)
 		case decisions, ok := <-b.streamBnc.Stream:
 			if !ok {
-				return fmt.Errorf("CrowdSec stream closed")
+				// Run closes the stream immediately before returning its error.
+				return streamError(<-runErr)
 			}
 			b.handleDecisionBlock(ctx, decisions)
 			if err := b.fwMgr.SyncDirty(ctx, b.cfg.UnifiSites); err != nil {
@@ -176,6 +183,13 @@ func (b *Bouncer) processStream(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func streamError(err error) error {
+	if err == nil {
+		return fmt.Errorf("CrowdSec stream closed")
+	}
+	return fmt.Errorf("CrowdSec stream closed: %w", err)
 }
 
 func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.DecisionsStreamResponse) {
