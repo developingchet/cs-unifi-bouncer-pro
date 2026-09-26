@@ -208,6 +208,29 @@ func TestCIDRDecision(t *testing.T) {
 	}
 }
 
+func TestFilter_RejectsOverlyBroadRanges(t *testing.T) {
+	tests := []struct {
+		value string
+		pass  bool
+	}{
+		{"32.0.0.0/3", false},
+		{"45.0.0.0/7", false},
+		{"45.0.0.0/8", true},
+		{"2000::/3", false},
+		{"2a00::/31", false},
+		{"2a00:1450::/32", true},
+		{"203.0.113.9", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			d := makeDecision("ban", "range", tt.value, "ssh-bf", "crowdsec", "24h")
+			if got := Filter(d, NewFilterConfig(), zerolog.Nop()).Passed; got != tt.pass {
+				t.Fatalf("Passed = %v, want %v", got, tt.pass)
+			}
+		})
+	}
+}
+
 func TestIPv6Decision(t *testing.T) {
 	cfg := NewFilterConfig()
 	d := makeDecision("ban", "ip", "2001:db9::1", "ssh-bf", "crowdsec", "24h")
@@ -281,6 +304,20 @@ func TestFilter_ScenarioDurationOverride(t *testing.T) {
 			scenario:    "ssh-bf",
 			duration:    "3h",
 			overrideMap: nil,
+			wantDur:     3 * time.Hour,
+		},
+		{
+			name:        "longest key wins",
+			scenario:    "crowdsecurity/ssh-bf",
+			duration:    "1h",
+			overrideMap: map[string]time.Duration{"ssh": 2 * time.Hour, "ssh-bf": 5 * time.Hour},
+			wantDur:     5 * time.Hour,
+		},
+		{
+			name:        "equal-length keys resolve lexically",
+			scenario:    "foobar",
+			duration:    "1h",
+			overrideMap: map[string]time.Duration{"foo": 2 * time.Hour, "bar": 3 * time.Hour},
 			wantDur:     3 * time.Hour,
 		},
 	}

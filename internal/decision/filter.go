@@ -2,6 +2,7 @@ package decision
 
 import (
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -124,6 +125,11 @@ func Filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger) FilterResu
 		return FilterResult{}
 	}
 	isV6 := IsIPv6(sanitized)
+	if TooBroad(sanitized, isV6) {
+		metrics.DecisionsFiltered.WithLabelValues(stageParse, "range_too_broad").Inc()
+		log.Warn().Str("value", sanitized).Msg("filtered: range is broader than /8 (IPv4) or /32 (IPv6)")
+		return FilterResult{}
+	}
 
 	// Stage 6: reject private/loopback/link-local/ULA
 	if IsPrivate(sanitized) {
@@ -158,7 +164,7 @@ func Filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger) FilterResu
 	matchedKey := ""
 	if action == "ban" {
 		for key, overrideDur := range cfg.ScenarioDurationMap {
-			if key != "" && strings.Contains(scenario, key) && len(key) > len(matchedKey) {
+			if key != "" && strings.Contains(scenario, key) && longerOrFirst(key, matchedKey) {
 				dur = overrideDur
 				matchedKey = key
 			}
@@ -173,6 +179,37 @@ func Filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger) FilterResu
 		Duration:         dur,
 		DurationOverride: matchedKey != "",
 	}
+}
+
+// Ranges broader than these prefixes are never banned: a range that large is
+// almost certainly a mistake or a hostile feed, and would cut off a large
+// share of the internet. Smaller private ranges are caught by stage 6.
+const (
+	minRangePrefixV4 = 8
+	minRangePrefixV6 = 32
+)
+
+// TooBroad reports whether value is a range broader than /8 (IPv4) or /32
+// (IPv6). A single address is never too broad.
+func TooBroad(value string, ipv6 bool) bool {
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil {
+		return false // a single address
+	}
+	if ipv6 {
+		return prefix.Bits() < minRangePrefixV6
+	}
+	return prefix.Bits() < minRangePrefixV4
+}
+
+// longerOrFirst reports whether key should replace matched as the scenario
+// duration override: the longest key wins, and equal lengths resolve by
+// lexical order so the result does not depend on map iteration order.
+func longerOrFirst(key, matched string) bool {
+	if len(key) != len(matched) {
+		return len(key) > len(matched)
+	}
+	return key < matched
 }
 
 func containsCI(haystack []string, needle string) bool {

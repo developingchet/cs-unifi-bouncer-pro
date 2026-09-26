@@ -322,7 +322,7 @@ Decisions from CrowdSec pass through an 8-stage filter pipeline before being enq
 | `BLOCK_SCENARIO_EXCLUDE` | — | Comma-separated scenario substrings to skip. Example: `impossible-travel,test` |
 | `BLOCK_WHITELIST` | — | Comma-separated IP addresses or CIDR ranges that are never blocked. Add your public WAN IP here; private and CGNAT ranges are skipped automatically. |
 | `BLOCK_MIN_DURATION` | — | Ignore ban decisions shorter than this duration. Example: `1h`. Useful to filter out short test decisions. |
-| `BLOCK_SCENARIO_DURATION_MAP` | — | Per-scenario ban duration overrides. Comma- or semicolon-separated `key=duration` pairs where the longest matching key wins. A configured override may exceed `BAN_TTL`. Example: `ssh-bf=168h;http-probing=24h`. A malformed entry or non-positive duration stops startup. |
+| `BLOCK_SCENARIO_DURATION_MAP` | — | Per-scenario ban duration overrides. Comma- or semicolon-separated `key=duration` pairs where the longest matching key wins (equal-length keys resolve alphabetically). A configured override may exceed `BAN_TTL`. Example: `ssh-bf=168h;http-probing=24h`. A malformed entry or non-positive duration stops startup. |
 
 ### Filter pipeline stages
 
@@ -332,7 +332,7 @@ Decisions from CrowdSec pass through an 8-stage filter pipeline before being enq
 | `scenario-exclude` | Scenarios matching any `BLOCK_SCENARIO_EXCLUDE` substring |
 | `origin` | Origins not in `CROWDSEC_ORIGINS` (when set) |
 | `scope` | Non-IP/CIDR scopes (ASN, country, etc.) |
-| `parse` | Invalid or malformed IP addresses |
+| `parse` | Invalid or malformed IP addresses, and ranges broader than `/8` (IPv4) or `/32` (IPv6), which are never banned. The same range limit applies to blocklist entries. |
 | `private-ip` | RFC 1918, loopback, link-local, and ULA addresses |
 | `whitelist` | IPs matching `BLOCK_WHITELIST` |
 | `min-duration` | Decisions shorter than `BLOCK_MIN_DURATION` |
