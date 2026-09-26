@@ -281,62 +281,10 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		m.mu.RLock()
 		v4Mgr := m.v4Mgrs[site]
 		v6Mgr := m.v6Mgrs[site]
-		// Set activation callbacks to provision infrastructure when Pending shards become Active.
-		// Use m.bgCtx (the long-lived daemon context) rather than the callback's ctx so that
-		// a cancelled startup context does not abort mid-run shard provisioning.
-		v4Mgr.SetActivationCallback(func(_ context.Context, shardIdx int, groupID string) error {
-			if err := m.ensureNewShardInfrastructure(m.bgCtx, site, false, shardIdx, v4Mgr); err != nil {
-				m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).Str("group_id", groupID).
-					Msg("failed to provision infrastructure for newly activated v4 shard")
-				return err
-			}
-			return nil
-		})
-		m.attachShardCallbacks(v4Mgr)
-		v4Mgr.SetMergeThreshold(m.cfg.ShardMergeThreshold)
-		onDrained := func(ctx context.Context, shardIdx int, groupID string) error {
-			mode := m.cachedMode(site)
-			switch mode {
-			case "legacy":
-				if err := m.legacyMgr.DeleteRuleForShard(ctx, site, false, shardIdx); err != nil {
-					return fmt.Errorf("delete rule for drained v4 shard %d: %w", shardIdx, err)
-				}
-			case "zone":
-				if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, false, shardIdx); err != nil {
-					return fmt.Errorf("delete policies for drained v4 shard %d: %w", shardIdx, err)
-				}
-			}
-			return nil
-		}
-		v4Mgr.SetDrainCallback(onDrained)
+		m.wireShardManager(site, false, v4Mgr)
 		if m.cfg.EnableIPv6 && v6Mgr != nil {
-			v6Mgr.SetActivationCallback(func(_ context.Context, shardIdx int, groupID string) error {
-				if err := m.ensureNewShardInfrastructure(m.bgCtx, site, true, shardIdx, v6Mgr); err != nil {
-					m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).Str("group_id", groupID).
-						Msg("failed to provision infrastructure for newly activated v6 shard")
-					return err
-				}
-				return nil
-			})
-			m.attachShardCallbacks(v6Mgr)
-			v6Mgr.SetMergeThreshold(m.cfg.ShardMergeThreshold)
-			onDrainedV6 := func(ctx context.Context, shardIdx int, groupID string) error {
-				mode := m.cachedMode(site)
-				switch mode {
-				case "legacy":
-					if err := m.legacyMgr.DeleteRuleForShard(ctx, site, true, shardIdx); err != nil {
-						return fmt.Errorf("delete rule for drained v6 shard %d: %w", shardIdx, err)
-					}
-				case "zone":
-					if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, true, shardIdx); err != nil {
-						return fmt.Errorf("delete policies for drained v6 shard %d: %w", shardIdx, err)
-					}
-				}
-				return nil
-			}
-			v6Mgr.SetDrainCallback(onDrainedV6)
+			m.wireShardManager(site, true, v6Mgr)
 		}
-
 		m.mu.RUnlock()
 
 		switch mode {
@@ -365,6 +313,39 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		}
 	}
 	return nil
+}
+
+// wireShardManager installs the activation, sync, merge and drain hooks on
+// one address family's shard manager for site.
+func (m *managerImpl) wireShardManager(site string, ipv6 bool, sm *ShardManager) {
+	fam := Family(ipv6)
+	activationFailedMsg := "failed to provision infrastructure for newly activated " + fam + " shard"
+	// Provision infrastructure when Pending shards become Active. Use m.bgCtx
+	// (the long-lived daemon context) rather than the callback's ctx so that
+	// a cancelled startup context does not abort mid-run shard provisioning.
+	sm.SetActivationCallback(func(_ context.Context, shardIdx int, groupID string) error {
+		if err := m.ensureNewShardInfrastructure(m.bgCtx, site, ipv6, shardIdx, sm); err != nil {
+			m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).Str("group_id", groupID).
+				Msg(activationFailedMsg)
+			return err
+		}
+		return nil
+	})
+	m.attachShardCallbacks(sm)
+	sm.SetMergeThreshold(m.cfg.ShardMergeThreshold)
+	sm.SetDrainCallback(func(ctx context.Context, shardIdx int, _ string) error {
+		switch m.cachedMode(site) {
+		case "legacy":
+			if err := m.legacyMgr.DeleteRuleForShard(ctx, site, ipv6, shardIdx); err != nil {
+				return fmt.Errorf("delete rule for drained %s shard %d: %w", fam, shardIdx, err)
+			}
+		case "zone":
+			if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, ipv6, shardIdx); err != nil {
+				return fmt.Errorf("delete policies for drained %s shard %d: %w", fam, shardIdx, err)
+			}
+		}
+		return nil
+	})
 }
 
 // cleanupOrphanedShardGroups deletes placeholder-only (orphaned) groups found
