@@ -423,7 +423,7 @@ The bouncer can periodically fetch plain-text IP/CIDR blocklists from external U
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BLOCKLIST_URLS` | — | Comma-separated list of URLs to fetch. Each URL must return a plain-text list with one IP address or CIDR per line. Anything after `#` or `;` is a comment, so annotated feeds such as Spamhaus DROP (`192.0.2.0/24 ; SBL123`) work; only the first field of a line is read. A `/32` or `/128` entry is stored as the bare address. Blank and comment-only lines are ignored. |
-| `BLOCKLIST_REFRESH_INTERVAL` | `24h` | How often to re-fetch and re-apply each URL. Bans applied from external blocklists have their expiry set to `now + 2×BLOCKLIST_REFRESH_INTERVAL`, so they auto-expire if the URL becomes unreachable. |
+| `BLOCKLIST_REFRESH_INTERVAL` | `24h` | How often to re-fetch and re-apply each URL. Each successful fetch sets its bans to expire at `now + 2×BLOCKLIST_REFRESH_INTERVAL`, so an entry the feed drops lapses within two intervals. A failed fetch (error, non-200, or a 200 with no valid entries) extends the bans from the last good fetch instead, for up to `BAN_TTL` since that fetch. |
 
 ```bash
 # Fetch two external threat intelligence feeds every 12 hours
@@ -431,7 +431,7 @@ BLOCKLIST_URLS=https://example.com/badips.txt,https://example.net/threatlist.txt
 BLOCKLIST_REFRESH_INTERVAL=12h
 ```
 
-Each feed URL owns a separate ban claim. If CrowdSec or another feed still claims an IP, expiry of one feed's claim does not remove the firewall ban. Feed refreshes extend claim expiry to twice the refresh interval; a failed fetch lets the claim expire. Feed imports are logged with entry, new and skipped counts. Feed URLs often carry an access token, so logs and stored claim sources show the URL without credentials, query string or fragment (`https://example.com/badips.txt?<redacted>`).
+Each feed URL owns a separate ban claim. If CrowdSec or another feed still claims an IP, expiry of one feed's claim does not remove the firewall ban. Feed refreshes extend claim expiry to twice the refresh interval. A failed fetch keeps the feed's current bans (logged as "keeping bans from the last successful fetch"); once a feed has failed for longer than `BAN_TTL`, its bans are no longer extended and expire. Feed imports are logged with entry, new and skipped counts. Feed URLs often carry an access token, so logs and stored claim sources show the URL without credentials, query string or fragment (`https://example.com/badips.txt?<redacted>`).
 
 Addresses are recorded and applied in batches of 500, so a large feed does not hold up CrowdSec decisions while it imports. Addresses the controller rejects stay recorded as pending and are retried by the next reconcile.
 

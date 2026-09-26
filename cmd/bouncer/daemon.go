@@ -97,7 +97,7 @@ func runDaemon() error {
 		if err != nil {
 			return fmt.Errorf("parse blocklist whitelist: %w", err)
 		}
-		blMgr := blocklist.NewManager(cfg.BlocklistURLs, cfg.BlocklistRefreshInterval, claims, protected, cfg.DryRun, log)
+		blMgr := blocklist.NewManager(cfg.BlocklistURLs, cfg.BlocklistRefreshInterval, cfg.BanTTL, claims, protected, cfg.DryRun, log)
 		go blMgr.Run(ctx)
 	}
 	janitor := bouncer.NewJanitor(store, claims, cfg.JanitorInterval, log)

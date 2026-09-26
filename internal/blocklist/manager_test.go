@@ -52,7 +52,7 @@ func (m *mockFWManager) ZoneManager() *firewall.ZoneManager            { return 
 func newTestManager(url string) (*Manager, *testutil.MockStore, *mockFWManager) {
 	store := testutil.NewMockStore()
 	fwMgr := &mockFWManager{}
-	mgr := NewManager([]string{url}, 24*time.Hour, banstate.New(store, fwMgr, []string{"default"}, false), nil, false, zerolog.Nop())
+	mgr := NewManager([]string{url}, 24*time.Hour, 7*24*time.Hour, banstate.New(store, fwMgr, []string{"default"}, false), nil, false, zerolog.Nop())
 	return mgr, store, fwMgr
 }
 

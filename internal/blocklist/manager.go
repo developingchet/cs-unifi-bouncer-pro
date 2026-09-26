@@ -31,15 +31,28 @@ type Manager struct {
 	dryRun    bool
 	log       zerolog.Logger
 	client    *http.Client
+
+	// maxOutage bounds how long a failing feed keeps its bans, measured from
+	// its last good fetch (or from startup). lastGood is only touched by Run.
+	maxOutage time.Duration
+	lastGood  map[string]time.Time
 }
 
-func NewManager(urls []string, interval time.Duration, claims *banstate.Manager,
+// NewManager builds a feed manager. maxOutage is how long an unreachable
+// feed keeps the bans from its last good fetch; the daemon passes BAN_TTL.
+func NewManager(urls []string, interval, maxOutage time.Duration, claims *banstate.Manager,
 	protected []*net.IPNet, dryRun bool, log zerolog.Logger,
 ) *Manager {
+	lastGood := make(map[string]time.Time, len(urls))
+	now := time.Now()
+	for _, url := range urls {
+		lastGood[url] = now
+	}
 	return &Manager{
 		urls: urls, interval: interval, claims: claims,
 		protected: protected, dryRun: dryRun, log: log,
-		client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: feedhttp.CheckRedirect},
+		client:    &http.Client{Timeout: 30 * time.Second, CheckRedirect: feedhttp.CheckRedirect},
+		maxOutage: maxOutage, lastGood: lastGood,
 	}
 }
 
@@ -61,7 +74,37 @@ func (m *Manager) fetchAndApply(ctx context.Context) {
 	for _, url := range m.urls {
 		if err := m.fetchURL(ctx, url); err != nil {
 			m.log.Error().Err(err).Str("url", logger.SafeURL(url)).Msg("blocklist: fetch failed")
+			m.keepClaims(url)
+			continue
 		}
+		m.lastGood[url] = time.Now()
+	}
+}
+
+// keepClaims extends the bans from url's last successful fetch through
+// another two refresh intervals. A feed's bans lapse when a successful fetch
+// no longer lists them, not because the feed was unreachable: otherwise one
+// failed fetch let the whole list expire at the moment the next fetch was
+// due, and a longer outage unbanned all of it. A feed that has failed for
+// longer than maxOutage is treated as gone and its bans run out.
+func (m *Manager) keepClaims(url string) {
+	if m.dryRun {
+		return
+	}
+	display := logger.SafeURL(url)
+	down := time.Since(m.lastGood[url])
+	if m.maxOutage > 0 && down >= m.maxOutage {
+		m.log.Error().Str("url", display).Stringer("unreachable_for", down.Round(time.Minute)).
+			Msg("blocklist: feed failing for longer than BAN_TTL; its bans are no longer extended and will expire")
+		return
+	}
+	n, err := m.claims.ExtendSource("blocklist:"+display, time.Now().Add(m.interval*2))
+	if err != nil {
+		m.log.Error().Err(err).Str("url", display).Msg("blocklist: could not extend bans from the last successful fetch")
+		return
+	}
+	if n > 0 {
+		m.log.Warn().Str("url", display).Int("bans", n).Msg("blocklist: keeping bans from the last successful fetch")
 	}
 }
 
@@ -117,6 +160,11 @@ func (m *Manager) fetchURL(ctx context.Context, url string) error {
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("scan blocklist: %w", err)
+	}
+	if len(entries) == 0 {
+		// An error page or truncated response served with 200 must not
+		// count as "the feed now lists nothing".
+		return fmt.Errorf("no valid entries (%d lines skipped)", skipped)
 	}
 	if m.dryRun {
 		m.log.Info().Str("url", display).Int("entries", len(entries)).Msg("[DRY-RUN] would import blocklist")
