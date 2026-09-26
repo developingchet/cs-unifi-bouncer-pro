@@ -136,10 +136,9 @@ type ShardManager struct {
 	dryRun     bool
 	mode       string // "legacy" or "zone" (used for log messaging only)
 
-	// Per-family shard state. In this codebase each ShardManager owns one
-	// family ("v4" for ipv6=false, "v6" for ipv6=true), but the map keeps
-	// AddIP/RemoveIP explicit and future-proof.
-	families map[string]*ShardFamily
+	// fam holds the shard state for this manager's address family
+	// ("v4" for ipv6=false, "v6" for ipv6=true). Guarded by mu.
+	fam *ShardFamily
 
 	// onActivated is called when a Pending shard becomes Active (transitions to UniFi after first flush).
 	// Called with (ctx, shardIdx, groupID).
@@ -200,11 +199,9 @@ func NewShardManager(site string, ipv6 bool, capacity int, namer *Namer,
 		flushSem:   flushSem,
 		dryRun:     dryRun,
 		mode:       mode,
-		families: map[string]*ShardFamily{
-			family: {
-				Shards:  []*Shard{},
-				ipOwner: make(map[string]int),
-			},
+		fam: &ShardFamily{
+			Shards:  []*Shard{},
+			ipOwner: make(map[string]int),
 		},
 	}
 }
@@ -256,21 +253,6 @@ func (sm *ShardManager) shardObjectKind() string {
 	return "firewall group"
 }
 
-func (sm *ShardManager) familyStateLocked(ipFamily string) *ShardFamily {
-	family := sm.families[ipFamily]
-	if family == nil {
-		family = &ShardFamily{
-			Shards:  []*Shard{},
-			ipOwner: make(map[string]int),
-		}
-		sm.families[ipFamily] = family
-	}
-	if family.ipOwner == nil {
-		family.ipOwner = make(map[string]int)
-	}
-	return family
-}
-
 func (sm *ShardManager) findShardByIndexLocked(family *ShardFamily, shardIdx int) *Shard {
 	for _, shard := range family.Shards {
 		if shard.Index == shardIdx {
@@ -285,7 +267,7 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	family := sm.familyStateLocked(sm.family)
+	family := sm.fam
 	family.Shards = family.Shards[:0]
 	clear(family.ipOwner)
 
@@ -496,7 +478,7 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 	return nil
 }
 
-// AddIP adds ip to the appropriate shard for ipFamily ("v4" or "v6").
+// AddIP adds ip to the appropriate shard of this manager's address family.
 // If ip is already tracked in any shard, it is a no-op (deduplication).
 // If all shards are full or draining, a new Pending shard is allocated
 // in-memory and the IP is placed into it immediately. The shard will be
@@ -508,17 +490,17 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 // created a TOCTOU race: concurrent goroutines could all compute the same
 // nextIndex, one would win the re-lock and create the shard, and the rest
 // would find that shard already full and return an error.
-func (sm *ShardManager) AddIP(_ context.Context, ip, ipFamily string) error {
+func (sm *ShardManager) AddIP(_ context.Context, ip string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	sm.addIPLocked(ip, ipFamily)
+	sm.addIPLocked(ip)
 	return nil
 }
 
 // addIPLocked places ip and returns the index of the shard that holds it and
 // whether that shard was allocated by this call. Callers hold sm.mu.
-func (sm *ShardManager) addIPLocked(ip, ipFamily string) (owner int, allocated bool) {
-	family := sm.familyStateLocked(ipFamily)
+func (sm *ShardManager) addIPLocked(ip string) (owner int, allocated bool) {
+	family := sm.fam
 
 	if idx, owned := family.ipOwner[ip]; owned {
 		return idx, false
@@ -552,11 +534,11 @@ func (sm *ShardManager) addIPLocked(ip, ipFamily string) (owner int, allocated b
 }
 
 // RemoveIP removes ip from whichever shard owns it. No-op if not tracked.
-func (sm *ShardManager) RemoveIP(ip, ipFamily string) {
+func (sm *ShardManager) RemoveIP(ip string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	family := sm.familyStateLocked(ipFamily)
+	family := sm.fam
 	shardIdx, owned := family.ipOwner[ip]
 	if !owned {
 		return
@@ -575,7 +557,7 @@ func (sm *ShardManager) RemoveIP(ip, ipFamily string) {
 // decided under the lock, so concurrent adds never both report one shard.
 func (sm *ShardManager) Add(_ context.Context, ip string) (shardName string, newShardIdx int, err error) {
 	sm.mu.Lock()
-	ownerIdx, allocated := sm.addIPLocked(ip, sm.family)
+	ownerIdx, allocated := sm.addIPLocked(ip)
 	sm.mu.Unlock()
 
 	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: ownerIdx, Site: sm.site})
@@ -592,14 +574,14 @@ func (sm *ShardManager) Add(_ context.Context, ip string) (shardName string, new
 // Remove removes an IP from whichever shard contains it.
 func (sm *ShardManager) Remove(ctx context.Context, ip string) (string, error) {
 	sm.mu.RLock()
-	family := sm.families[sm.family]
+	family := sm.fam
 	shardIdx, owned := family.ipOwner[ip]
 	sm.mu.RUnlock()
 	if !owned {
 		return "", nil
 	}
 
-	sm.RemoveIP(ip, sm.family)
+	sm.RemoveIP(ip)
 
 	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: shardIdx, Site: sm.site})
 	if err != nil {
@@ -618,7 +600,7 @@ func (sm *ShardManager) FlushDirty(ctx context.Context) error {
 func (sm *ShardManager) PrunableTail() (unifiID string, shardIdx int, ok bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	family := sm.families[sm.family]
+	family := sm.fam
 
 	if len(family.Shards) == 0 {
 		return "", -1, false
@@ -640,7 +622,7 @@ func (sm *ShardManager) PrunableTail() (unifiID string, shardIdx int, ok bool) {
 // Call only after the API group has been successfully deleted.
 func (sm *ShardManager) RemoveTail() error {
 	sm.mu.Lock()
-	family := sm.familyStateLocked(sm.family)
+	family := sm.fam
 	n := len(family.Shards)
 	if n == 0 {
 		sm.mu.Unlock()
@@ -675,7 +657,7 @@ func (sm *ShardManager) DeleteShardObject(ctx context.Context, unifiID string) e
 func (sm *ShardManager) Contains(ip string) bool {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	family := sm.families[sm.family]
+	family := sm.fam
 	_, ok := family.ipOwner[ip]
 	return ok
 }
@@ -684,7 +666,7 @@ func (sm *ShardManager) Contains(ip string) bool {
 func (sm *ShardManager) AllMembers() []string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	family := sm.families[sm.family]
+	family := sm.fam
 	var all []string
 	for _, s := range family.Shards {
 		all = append(all, s.IPs.Members()...)
@@ -782,7 +764,7 @@ func (sm *ShardManager) lookupShardObjectByName(ctx context.Context, name string
 func (sm *ShardManager) GroupRefs() []GroupRef {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	family := sm.families[sm.family]
+	family := sm.fam
 	refs := make([]GroupRef, 0, len(family.Shards))
 	for _, s := range family.Shards {
 		if s.State == ShardStateActive && s.ID != "" {
@@ -798,7 +780,7 @@ func (sm *ShardManager) GroupRefs() []GroupRef {
 func (sm *ShardManager) OwnedRefs() []GroupRef {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	family := sm.families[sm.family]
+	family := sm.fam
 	refs := make([]GroupRef, 0, len(family.Shards))
 	for _, s := range family.Shards {
 		if s.State != ShardStatePending && s.ID != "" {
@@ -811,7 +793,7 @@ func (sm *ShardManager) OwnedRefs() []GroupRef {
 func (sm *ShardManager) GroupIDAt(shardIdx int) string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	for _, shard := range sm.families[sm.family].Shards {
+	for _, shard := range sm.fam.Shards {
 		if shard.Index == shardIdx && shard.State == ShardStateActive {
 			return shard.ID
 		}
@@ -823,7 +805,7 @@ func (sm *ShardManager) GroupIDAt(shardIdx int) string {
 func (sm *ShardManager) GroupIDs() []string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	family := sm.families[sm.family]
+	family := sm.fam
 	ids := make([]string, 0, len(family.Shards))
 	for _, shard := range family.Shards {
 		if shard.State != ShardStatePending && shard.ID != "" {
@@ -834,7 +816,7 @@ func (sm *ShardManager) GroupIDs() []string {
 }
 
 func (sm *ShardManager) updateMetricsLocked() {
-	family := sm.families[sm.family]
+	family := sm.fam
 	familyName := Family(sm.ipv6)
 	unsynced := 0
 	for _, s := range family.Shards {
@@ -888,12 +870,8 @@ func (sm *ShardManager) recordCreateFailure(shard *Shard, ipCount int, err error
 func (sm *ShardManager) countDirty() int {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	managed := sm.families[sm.family]
-	if managed == nil {
-		return 0
-	}
 	n := 0
-	for _, shard := range managed.Shards {
+	for _, shard := range sm.fam.Shards {
 		if shard.IPs.IsDirty() {
 			n++
 		}
@@ -910,12 +888,8 @@ func (sm *ShardManager) syncAllFamilies(ctx context.Context) error {
 	// Individual shard operations (IPSet) are internally lock-protected,
 	// so iterating snapshots outside the lock is safe.
 	sm.mu.RLock()
-	managed := sm.families[sm.family]
-	var shards []*Shard
-	if managed != nil {
-		shards = make([]*Shard, len(managed.Shards))
-		copy(shards, managed.Shards)
-	}
+	shards := make([]*Shard, len(sm.fam.Shards))
+	copy(shards, sm.fam.Shards)
 	sm.mu.RUnlock()
 
 	var firstErr error
@@ -1150,7 +1124,7 @@ func (sm *ShardManager) provisionShard(ctx context.Context, shard *Shard) error 
 func (sm *ShardManager) MarkUnprovisioned(shardIdx int) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	shard := sm.findShardByIndexLocked(sm.families[sm.family], shardIdx)
+	shard := sm.findShardByIndexLocked(sm.fam, shardIdx)
 	if shard == nil || shard.State != ShardStateActive {
 		return
 	}
@@ -1212,7 +1186,7 @@ func (sm *ShardManager) Rebalance(ctx context.Context) int {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	family := sm.familyStateLocked(sm.family)
+	family := sm.fam
 	merged := 0
 
 	for {
@@ -1297,7 +1271,7 @@ func (sm *ShardManager) Rebalance(ctx context.Context) int {
 func (sm *ShardManager) drainDraining(ctx context.Context) error {
 	sm.mu.RLock()
 	var draining []*Shard
-	for _, s := range sm.families[sm.family].Shards {
+	for _, s := range sm.fam.Shards {
 		if s.State == ShardStateDraining {
 			draining = append(draining, s)
 		}
@@ -1361,7 +1335,7 @@ func (sm *ShardManager) drainShard(ctx context.Context, shard *Shard) error {
 
 	// 5. Splice the shard out of the in-memory slice (verify state under lock).
 	sm.mu.Lock()
-	family := sm.familyStateLocked(sm.family)
+	family := sm.fam
 	for pos, s := range family.Shards {
 		if s.Index == shard.Index && s.State == ShardStateDraining {
 			family.Shards = append(family.Shards[:pos], family.Shards[pos+1:]...)

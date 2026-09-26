@@ -164,10 +164,10 @@ func TestEnsureShards_RecoversSparseAPIOnlyGroups(t *testing.T) {
 	if cached, err := store.GetGroup(cacheKey(testSite, "crowdsec-block-v4-3")); err != nil || cached == nil || cached.UnifiID != "group-3" {
 		t.Fatalf("recovered cache = %+v, %v", cached, err)
 	}
-	if err := sm.AddIP(context.Background(), "3.3.3.3", "v4"); err != nil {
+	if err := sm.AddIP(context.Background(), "3.3.3.3"); err != nil {
 		t.Fatal(err)
 	}
-	if pending := sm.findShardByIndexLocked(sm.families[sm.family], 4); pending == nil {
+	if pending := sm.findShardByIndexLocked(sm.fam, 4); pending == nil {
 		t.Fatal("overflow must allocate index 4 after sparse index 3")
 	}
 }
@@ -799,7 +799,7 @@ func TestSyncShard_SendsPlaceholderWhenEmpty(t *testing.T) {
 	// Mark the shard as dirty with empty IPs (simulating all bans expired).
 	// Replace marks dirty internally, so just call Replace with empty slice.
 	sm.mu.Lock()
-	sm.families["v4"].Shards[0].IPs.Replace([]string{}) // empty set marks dirty
+	sm.fam.Shards[0].IPs.Replace([]string{}) // empty set marks dirty
 	sm.mu.Unlock()
 
 	beforeFlush := ctrl.Calls("UpdateTrafficMatchingList")
@@ -859,7 +859,7 @@ func TestEnsureShards_FiltersPlaceholder(t *testing.T) {
 	// A TML whose only member is the RFC 5737 placeholder is treated as an orphan:
 	// the placeholder is stripped and, with zero real members, the shard is not
 	// loaded into the active shard slice (it will be cleaned up separately).
-	if got := len(sm.families["v4"].Shards); got != 0 {
+	if got := len(sm.fam.Shards); got != 0 {
 		t.Errorf("Shards len: got %d, want 0 (placeholder-only TML should not be loaded as a shard)", got)
 	}
 }
@@ -894,7 +894,7 @@ func TestSyncShard_PutNotFound_ResetsToPending(t *testing.T) {
 
 	// Verify we loaded an Active shard.
 	sm.mu.RLock()
-	family := sm.families["v4"]
+	family := sm.fam
 	if len(family.Shards) != 1 || family.Shards[0].State != ShardStateActive {
 		sm.mu.RUnlock()
 		t.Fatalf("expected 1 Active shard after EnsureShards")
@@ -917,7 +917,7 @@ func TestSyncShard_PutNotFound_ResetsToPending(t *testing.T) {
 
 	// Shard must now be Pending with an empty ID.
 	sm.mu.RLock()
-	family = sm.families["v4"]
+	family = sm.fam
 	gotState := family.Shards[0].State
 	gotID := family.Shards[0].ID
 	sm.mu.RUnlock()

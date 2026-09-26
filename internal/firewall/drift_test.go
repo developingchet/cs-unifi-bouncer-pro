@@ -138,7 +138,7 @@ func TestSyncShard_PutNotFound_Unconfirmed(t *testing.T) {
 				t.Fatalf("syncAllFamilies err = %v, wantErr %v", err, tt.wantErr)
 			}
 			sm.mu.RLock()
-			shard := sm.families["v4"].Shards[0]
+			shard := sm.fam.Shards[0]
 			gotID, gotState := shard.ID, shard.State
 			sm.mu.RUnlock()
 			if gotID != tt.wantID || (gotState == ShardStateActive) != tt.wantActive {

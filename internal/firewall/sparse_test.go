@@ -147,7 +147,7 @@ func TestAdd_ReportsEachNewShardOnce(t *testing.T) {
 		seen[idx]++
 	}
 	sm.mu.RLock()
-	shards := len(sm.families["v4"].Shards)
+	shards := len(sm.fam.Shards)
 	sm.mu.RUnlock()
 	if len(seen) != shards {
 		t.Errorf("reported %d new shards, allocated %d", len(seen), shards)

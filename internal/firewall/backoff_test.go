@@ -55,7 +55,7 @@ func TestShardCreate_BacksOffAndReportsUnsyncedIPs(t *testing.T) {
 
 	// Once the window passes the create is retried and succeeds.
 	sm.mu.Lock()
-	shard := sm.families["v4"].Shards[0]
+	shard := sm.fam.Shards[0]
 	if time.Until(shard.createRetryAt) < createBackoffBase/2 {
 		t.Errorf("retry scheduled too soon: %v", time.Until(shard.createRetryAt))
 	}

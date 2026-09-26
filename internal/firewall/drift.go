@@ -65,7 +65,7 @@ func (sm *ShardManager) MarkRemoteDrift(ctx context.Context) (missing, extra int
 
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	family := sm.families[sm.family]
+	family := sm.fam
 	if family == nil {
 		return 0, 0, nil
 	}
