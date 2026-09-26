@@ -423,33 +423,52 @@ func validateZoneNetworks(site string, pairs []config.ZonePair, zones []controll
 	return nil
 }
 
-// EnsurePolicies idempotently creates zone policies for each shard and zone pair.
-func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards, v6Shards *ShardManager) error {
-	zm.opMu.Lock()
-	defer zm.opMu.Unlock()
+// zoneMapForSite returns the cached zone name -> ID map for site, having
+// verified that every configured zone pair's src/dst zones are present in it.
+func (zm *ZoneManager) zoneMapForSite(site string) (map[string]string, error) {
 	zm.mu.RLock()
 	zoneMap, ok := zm.zoneCache[site]
 	zm.mu.RUnlock()
 	if !ok {
-		return fmt.Errorf("zone cache not populated for site %q — was Bootstrap called?", site)
+		return nil, fmt.Errorf("zone cache not populated for site %q — was Bootstrap called?", site)
 	}
 	for _, pair := range zm.cfg.ZonePairs {
 		if _, ok := zoneMap[pair.Src]; !ok {
-			return fmt.Errorf("zone %q not in cache for site %q", pair.Src, site)
+			return nil, fmt.Errorf("zone %q not in cache for site %q", pair.Src, site)
 		}
 		if _, ok := zoneMap[pair.Dst]; !ok {
-			return fmt.Errorf("zone %q not in cache for site %q", pair.Dst, site)
+			return nil, fmt.Errorf("zone %q not in cache for site %q", pair.Dst, site)
 		}
 	}
+	return zoneMap, nil
+}
 
-	// Fetch ALL existing policies once for all zone pairs (avoids one GET per pair).
-	existingPolicies, err := zm.ctrl.ListZonePolicies(ctx, site)
+// policiesByID lists all zone policies for site and indexes them by ID.
+func (zm *ZoneManager) policiesByID(ctx context.Context, site string) (map[string]controller.ZonePolicy, error) {
+	policies, err := zm.ctrl.ListZonePolicies(ctx, site)
+	if err != nil {
+		return nil, err
+	}
+	existingByID := make(map[string]controller.ZonePolicy, len(policies))
+	for _, p := range policies {
+		existingByID[p.ID] = p
+	}
+	return existingByID, nil
+}
+
+// EnsurePolicies idempotently creates zone policies for each shard and zone pair.
+func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards, v6Shards *ShardManager) error {
+	zm.opMu.Lock()
+	defer zm.opMu.Unlock()
+	zoneMap, err := zm.zoneMapForSite(site)
 	if err != nil {
 		return err
 	}
-	existingByID := make(map[string]controller.ZonePolicy, len(existingPolicies))
-	for _, p := range existingPolicies {
-		existingByID[p.ID] = p
+
+	// Fetch ALL existing policies once for all zone pairs (avoids one GET per pair).
+	existingByID, err := zm.policiesByID(ctx, site)
+	if err != nil {
+		return err
 	}
 
 	// Build the set of all policy names expected by the current config so that
@@ -806,28 +825,14 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 	zm.opMu.Lock()
 	defer zm.opMu.Unlock()
 
-	zm.mu.RLock()
-	zoneMap, ok := zm.zoneCache[site]
-	zm.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("zone cache not populated for site %q — was Bootstrap called?", site)
-	}
-	for _, pair := range zm.cfg.ZonePairs {
-		if _, ok := zoneMap[pair.Src]; !ok {
-			return fmt.Errorf("zone %q not in cache for site %q", pair.Src, site)
-		}
-		if _, ok := zoneMap[pair.Dst]; !ok {
-			return fmt.Errorf("zone %q not in cache for site %q", pair.Dst, site)
-		}
+	zoneMap, err := zm.zoneMapForSite(site)
+	if err != nil {
+		return err
 	}
 
-	policies, err := zm.ctrl.ListZonePolicies(ctx, site)
+	existingByID, err := zm.policiesByID(ctx, site)
 	if err != nil {
 		return fmt.Errorf("list policies for shard %d: %w", shardIdx, err)
-	}
-	existingByID := make(map[string]controller.ZonePolicy, len(policies))
-	for _, p := range policies {
-		existingByID[p.ID] = p
 	}
 
 	firstCreate := true

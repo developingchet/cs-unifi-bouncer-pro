@@ -258,22 +258,7 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		}
 
 		// Clean up placeholder-only (orphaned) groups found in UniFi
-		for _, orphan := range v4.TakeOrphanedGroups() {
-			if m.cfg.DryRun {
-				m.log.Info().Str("site", site).Str("group_name", orphan.Name).Msg("[DRY-RUN] would delete orphaned group")
-				continue
-			}
-			m.log.Info().Str("site", site).Str("group_name", orphan.Name).Str("group_id", orphan.UnifiID).
-				Msg("deleting orphaned placeholder-only group")
-			// Best-effort cleanup of any policies/rules that reference this group.
-			// This handles migration from pre-lazy-creation code where rules were created eagerly.
-			m.deleteOrphanedReferencingObjects(ctx, site, mode, orphan.UnifiID)
-			// Orphaned groups were never adopted into our memory management, so they have no policies/rules created by us.
-			// Delete the group object.
-			if err := v4.DeleteShardObject(ctx, orphan.UnifiID); err != nil {
-				m.log.Warn().Err(err).Str("group_id", orphan.UnifiID).Msg("failed to delete orphaned group (will continue)")
-			}
-		}
+		m.cleanupOrphanedShardGroups(ctx, site, mode, v4)
 
 		m.mu.Lock()
 		m.v4Mgrs[site] = v4
@@ -287,22 +272,7 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 			}
 
 			// Clean up placeholder-only (orphaned) groups found in UniFi
-			for _, orphan := range v6.TakeOrphanedGroups() {
-				if m.cfg.DryRun {
-					m.log.Info().Str("site", site).Str("group_name", orphan.Name).Msg("[DRY-RUN] would delete orphaned group")
-					continue
-				}
-				m.log.Info().Str("site", site).Str("group_name", orphan.Name).Str("group_id", orphan.UnifiID).
-					Msg("deleting orphaned placeholder-only group")
-				// Best-effort cleanup of any policies/rules that reference this group.
-				// This handles migration from pre-lazy-creation code where rules were created eagerly.
-				m.deleteOrphanedReferencingObjects(ctx, site, mode, orphan.UnifiID)
-				// Orphaned groups were never adopted into our memory management, so they have no policies/rules created by us.
-				// Delete the group object.
-				if err := v6.DeleteShardObject(ctx, orphan.UnifiID); err != nil {
-					m.log.Warn().Err(err).Str("group_id", orphan.UnifiID).Msg("failed to delete orphaned group (will continue)")
-				}
-			}
+			m.cleanupOrphanedShardGroups(ctx, site, mode, v6)
 			m.mu.Lock()
 			m.v6Mgrs[site] = v6
 			m.mu.Unlock()
@@ -395,6 +365,28 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		}
 	}
 	return nil
+}
+
+// cleanupOrphanedShardGroups deletes placeholder-only (orphaned) groups found
+// in UniFi for sm, along with any policies/rules that still reference them.
+// Orphaned groups were never adopted into our memory management, so they have
+// no policies/rules created by us beyond this best-effort migration cleanup.
+func (m *managerImpl) cleanupOrphanedShardGroups(ctx context.Context, site, mode string, sm *ShardManager) {
+	for _, orphan := range sm.TakeOrphanedGroups() {
+		if m.cfg.DryRun {
+			m.log.Info().Str("site", site).Str("group_name", orphan.Name).Msg("[DRY-RUN] would delete orphaned group")
+			continue
+		}
+		m.log.Info().Str("site", site).Str("group_name", orphan.Name).Str("group_id", orphan.UnifiID).
+			Msg("deleting orphaned placeholder-only group")
+		// Best-effort cleanup of any policies/rules that reference this group.
+		// This handles migration from pre-lazy-creation code where rules were created eagerly.
+		m.deleteOrphanedReferencingObjects(ctx, site, mode, orphan.UnifiID)
+		// Delete the group object.
+		if err := sm.DeleteShardObject(ctx, orphan.UnifiID); err != nil {
+			m.log.Warn().Err(err).Str("group_id", orphan.UnifiID).Msg("failed to delete orphaned group (will continue)")
+		}
+	}
 }
 
 // tolerateShardFailures lets startup continue when only individual shards
@@ -519,6 +511,39 @@ func (m *managerImpl) Reconcile(ctx context.Context, sites []string) (*Reconcile
 	return result, errors.Join(result.Errors...)
 }
 
+// diffFamily reconciles one family's shard membership against desired: it adds
+// IPs missing from sm and removes members no longer in desired. If ctx is
+// cancelled partway through, it returns the counts accumulated so far with
+// ctx.Err() appended to errs.
+func (m *managerImpl) diffFamily(ctx context.Context, sm *ShardManager, desired map[string]struct{}) (added, removed int, errs []error) {
+	for ip := range desired {
+		if ctx.Err() != nil {
+			return added, removed, append(errs, ctx.Err())
+		}
+		if !sm.Contains(ip) {
+			if _, _, err := sm.Add(ctx, ip); err != nil {
+				errs = append(errs, err)
+			} else {
+				added++
+			}
+		}
+	}
+
+	for _, ip := range sm.AllMembers() {
+		if ctx.Err() != nil {
+			return added, removed, append(errs, ctx.Err())
+		}
+		if _, ok := desired[ip]; !ok {
+			if _, err := sm.Remove(ctx, ip); err != nil {
+				errs = append(errs, err)
+			} else {
+				removed++
+			}
+		}
+	}
+	return added, removed, errs
+}
+
 // reconcileSite diffs the bbolt ban list against all UniFi groups for one site.
 func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, removed int, errs []error) {
 	bans, err := m.store.BanList()
@@ -546,59 +571,20 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 		}
 	}
 
-	// Add missing IPs
-	for ip := range desiredV4 {
-		if ctx.Err() != nil {
-			return added, removed, append(errs, ctx.Err())
-		}
-		if !v4Mgr.Contains(ip) {
-			if _, _, err := v4Mgr.Add(ctx, ip); err != nil {
-				errs = append(errs, err)
-			} else {
-				added++
-			}
-		}
-	}
-
-	// Remove extra IPs from v4
-	for _, ip := range v4Mgr.AllMembers() {
-		if ctx.Err() != nil {
-			return added, removed, append(errs, ctx.Err())
-		}
-		if _, ok := desiredV4[ip]; !ok {
-			if _, err := v4Mgr.Remove(ctx, ip); err != nil {
-				errs = append(errs, err)
-			} else {
-				removed++
-			}
-		}
+	// Add missing IPs, then remove extra ones, for v4.
+	added, removed, errs = m.diffFamily(ctx, v4Mgr, desiredV4)
+	if ctx.Err() != nil {
+		return added, removed, errs
 	}
 
 	// IPv6
 	if v6Mgr != nil {
-		for ip := range desiredV6 {
-			if ctx.Err() != nil {
-				return added, removed, append(errs, ctx.Err())
-			}
-			if !v6Mgr.Contains(ip) {
-				if _, _, err := v6Mgr.Add(ctx, ip); err != nil {
-					errs = append(errs, err)
-				} else {
-					added++
-				}
-			}
-		}
-		for _, ip := range v6Mgr.AllMembers() {
-			if ctx.Err() != nil {
-				return added, removed, append(errs, ctx.Err())
-			}
-			if _, ok := desiredV6[ip]; !ok {
-				if _, err := v6Mgr.Remove(ctx, ip); err != nil {
-					errs = append(errs, err)
-				} else {
-					removed++
-				}
-			}
+		v6Added, v6Removed, v6Errs := m.diffFamily(ctx, v6Mgr, desiredV6)
+		added += v6Added
+		removed += v6Removed
+		errs = append(errs, v6Errs...)
+		if ctx.Err() != nil {
+			return added, removed, errs
 		}
 	}
 
@@ -762,6 +748,14 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 	}
 	metrics.DirtyShards.Set(float64(totalDirty))
 
+	// dirtyFamily pairs a family's ShardManager with its name (for log fields
+	// and error messages) and a pointer to that family's synced flag.
+	type dirtyFamily struct {
+		name   string
+		sm     *ShardManager
+		synced *bool
+	}
+
 	// Second pass: flush and emit a per-site Info summary when work was done.
 	for _, site := range sites {
 		m.mu.RLock()
@@ -780,39 +774,33 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 			continue
 		}
 		v4Synced, v6Synced := true, true
+		var families []dirtyFamily
+		if v4 != nil {
+			families = append(families, dirtyFamily{"v4", v4, &v4Synced})
+		}
+		if v6 != nil {
+			families = append(families, dirtyFamily{"v6", v6, &v6Synced})
+		}
 		func() {
 			defer m.syncMu.Unlock()
-			if v4 != nil {
-				if n := v4.Rebalance(ctx); n > 0 {
-					m.log.Info().Str("site", site).Int("merged", n).Str("family", "v4").Msg("shard rebalance complete")
+			for _, f := range families {
+				if n := f.sm.Rebalance(ctx); n > 0 {
+					m.log.Info().Str("site", site).Int("merged", n).Str("family", f.name).Msg("shard rebalance complete")
 				}
 			}
-			if v6 != nil {
-				if n := v6.Rebalance(ctx); n > 0 {
-					m.log.Info().Str("site", site).Int("merged", n).Str("family", "v6").Msg("shard rebalance complete")
-				}
-			}
-			if v4 != nil {
-				if err := v4.syncAllFamilies(ctx); err != nil {
-					v4Synced = false
-					syncErrors = append(syncErrors, fmt.Errorf("sync v4 shards for site %s: %w", site, err))
-				}
-			}
-			if v6 != nil {
-				if err := v6.syncAllFamilies(ctx); err != nil {
-					v6Synced = false
-					syncErrors = append(syncErrors, fmt.Errorf("sync v6 shards for site %s: %w", site, err))
+			for _, f := range families {
+				if err := f.sm.syncAllFamilies(ctx); err != nil {
+					*f.synced = false
+					syncErrors = append(syncErrors, fmt.Errorf("sync %s shards for site %s: %w", f.name, site, err))
 				}
 			}
 			// Drain only after each family's target shards reached the API.
-			if v4 != nil && v4Synced {
-				if err := v4.drainDraining(ctx); err != nil {
-					syncErrors = append(syncErrors, fmt.Errorf("drain v4 shards for site %s: %w", site, err))
+			for _, f := range families {
+				if !*f.synced {
+					continue
 				}
-			}
-			if v6 != nil && v6Synced {
-				if err := v6.drainDraining(ctx); err != nil {
-					syncErrors = append(syncErrors, fmt.Errorf("drain v6 shards for site %s: %w", site, err))
+				if err := f.sm.drainDraining(ctx); err != nil {
+					syncErrors = append(syncErrors, fmt.Errorf("drain %s shards for site %s: %w", f.name, site, err))
 				}
 			}
 		}()
