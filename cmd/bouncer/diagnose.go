@@ -115,38 +115,9 @@ Exits 0 when all checks pass, 1 if any check fails.`,
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			lapiURL := cfg.CrowdSecLAPIURL + "/v1/decisions?limit=1"
-			lapiClient, lapiClientErr := lapihttp.NewClient(cfg.CrowdSecLAPIVerifyTLS, cfg.CrowdSecLAPICACert, 10*time.Second)
-			if lapiClientErr != nil {
-				checks = append(checks, diagCheck{"lapi_reachable", "FAIL", lapiClientErr.Error()})
-				allPass = false
-			} else {
-				lapiReq, lapiReqErr := http.NewRequestWithContext(ctx, http.MethodGet, lapiURL, nil)
-				if lapiReqErr != nil {
-					checks = append(checks, diagCheck{"lapi_reachable", "FAIL", lapiReqErr.Error()})
-					allPass = false
-				} else {
-					lapiReq.Header.Set("X-Api-Key", cfg.CrowdSecLAPIKey)
-					lapiResp, lapiErr := lapiClient.Do(lapiReq)
-					if lapiErr != nil {
-						checks = append(checks, diagCheck{"lapi_reachable", "FAIL", lapiErr.Error()})
-						allPass = false
-					} else {
-						_ = lapiResp.Body.Close()
-						detail := fmt.Sprintf("%s → %d %s", cfg.CrowdSecLAPIURL, lapiResp.StatusCode, http.StatusText(lapiResp.StatusCode))
-						switch {
-						case lapiResp.StatusCode == http.StatusUnauthorized:
-							checks = append(checks, diagCheck{"lapi_reachable", "FAIL",
-								detail + " — authentication failed; check CROWDSEC_LAPI_KEY"})
-							allPass = false
-						case lapiResp.StatusCode >= 200 && lapiResp.StatusCode < 300:
-							checks = append(checks, diagCheck{"lapi_reachable", "PASS", detail})
-						default:
-							checks = append(checks, diagCheck{"lapi_reachable", "WARN", detail})
-						}
-					}
-				}
-			}
+			lapiCheck := probeLAPI(ctx, cfg)
+			checks = append(checks, lapiCheck)
+			allPass = allPass && lapiCheck.status != "FAIL"
 
 			ctrl, ctrlErr := controller.NewClient(ctx, controllerConfig(cfg), zerolog.Nop())
 			if ctrlErr != nil {
@@ -181,6 +152,35 @@ Exits 0 when all checks pass, 1 if any check fails.`,
 			}
 			return nil
 		},
+	}
+}
+
+// probeLAPI checks that the LAPI answers an authenticated decision query.
+// A 401 fails; any other non-2xx answer is a warning.
+func probeLAPI(ctx context.Context, cfg *config.Config) diagCheck {
+	const name = "lapi_reachable"
+	client, err := lapihttp.NewClient(cfg.CrowdSecLAPIVerifyTLS, cfg.CrowdSecLAPICACert, 10*time.Second)
+	if err != nil {
+		return diagCheck{name, "FAIL", err.Error()}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.CrowdSecLAPIURL+"/v1/decisions?limit=1", nil)
+	if err != nil {
+		return diagCheck{name, "FAIL", err.Error()}
+	}
+	req.Header.Set("X-Api-Key", cfg.CrowdSecLAPIKey)
+	resp, err := client.Do(req)
+	if err != nil {
+		return diagCheck{name, "FAIL", err.Error()}
+	}
+	_ = resp.Body.Close()
+	detail := fmt.Sprintf("%s → %d %s", cfg.CrowdSecLAPIURL, resp.StatusCode, http.StatusText(resp.StatusCode))
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized:
+		return diagCheck{name, "FAIL", detail + " — authentication failed; check CROWDSEC_LAPI_KEY"}
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return diagCheck{name, "PASS", detail}
+	default:
+		return diagCheck{name, "WARN", detail}
 	}
 }
 

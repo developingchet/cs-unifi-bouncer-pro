@@ -197,9 +197,17 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 		}
 	}
 
-	// Sweep for orphaned whitelist policies — managed by this bouncer but no
-	// longer declared in CLOUDFLARE_ZONE_PAIRS.
-	for _, p := range existingPolicies {
+	m.sweepOrphanPolicies(ctx, site, existingPolicies, managedPolicyIDs, managedBaseNames)
+	m.sweepOrphanTMLs(ctx, site, expectedTMLNames)
+	return nil
+}
+
+// sweepOrphanPolicies deletes whitelist policies that are ours but no longer
+// declared in CLOUDFLARE_ZONE_PAIRS. managedIDs are the forward policies just
+// ensured; managedBaseNames keep their UniFi-created "(Return)" mirrors.
+func (m *Manager) sweepOrphanPolicies(ctx context.Context, site string, existing []controller.ZonePolicy,
+	managedIDs, managedBaseNames map[string]bool) {
+	for _, p := range existing {
 		if !strings.HasPrefix(p.Name, whitelistPrefix) {
 			continue
 		}
@@ -215,7 +223,7 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 			// Forward policy: keep only if this exact ID is actively managed.
 			// ID-based tracking correctly handles duplicate-named policies — only
 			// the specific policy returned by ensureAllowPolicy is protected.
-			if managedPolicyIDs[p.ID] {
+			if managedIDs[p.ID] {
 				continue
 			}
 			// Not actively managed by ID — only delete if it's ours to clean up
@@ -231,34 +239,34 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 				Msg("deleted orphaned Cloudflare whitelist policy (zone pair removed from config)")
 		}
 	}
+}
 
-	// Sweep for orphaned port-filter TMLs (srcports/dstports) that no longer
-	// correspond to any configured CLOUDFLARE_ZONE_PAIRS entry with port filters.
-	allTMLs, tmlErr := m.ctrl.ListTrafficMatchingLists(ctx, site)
-	if tmlErr != nil {
-		m.log.Warn().Err(tmlErr).Str("site", site).Msg("failed to list TMLs for orphan sweep")
-	} else {
-		for _, t := range allTMLs {
-			if !strings.HasPrefix(t.Name, whitelistPrefix) {
-				continue
-			}
-			// Only target per-pair filter TMLs (srcports / dstports / dstips), not the IP TMLs.
-			if !strings.Contains(t.Name, "srcports-") && !strings.Contains(t.Name, "dstports-") && !strings.Contains(t.Name, "dstips-") {
-				continue
-			}
-			if expectedTMLNames[t.Name] {
-				continue
-			}
-			if err := m.ctrl.DeleteTrafficMatchingList(ctx, site, t.ID); err != nil {
-				m.log.Warn().Err(err).Str("tml", t.Name).Msg("failed to delete orphaned whitelist port TML")
-			} else {
-				m.log.Info().Str("tml", t.Name).Str("site", site).
-					Msg("deleted orphaned Cloudflare whitelist port TML (zone pair removed from config)")
-			}
+// sweepOrphanTMLs deletes per-pair filter TMLs (srcports, dstports, dstips)
+// whose name is not in expected. The shared Cloudflare IP TMLs are never
+// touched here.
+func (m *Manager) sweepOrphanTMLs(ctx context.Context, site string, expected map[string]bool) {
+	allTMLs, err := m.ctrl.ListTrafficMatchingLists(ctx, site)
+	if err != nil {
+		m.log.Warn().Err(err).Str("site", site).Msg("failed to list TMLs for orphan sweep")
+		return
+	}
+	for _, t := range allTMLs {
+		if !strings.HasPrefix(t.Name, whitelistPrefix) {
+			continue
+		}
+		if !strings.Contains(t.Name, "srcports-") && !strings.Contains(t.Name, "dstports-") && !strings.Contains(t.Name, "dstips-") {
+			continue
+		}
+		if expected[t.Name] {
+			continue
+		}
+		if err := m.ctrl.DeleteTrafficMatchingList(ctx, site, t.ID); err != nil {
+			m.log.Warn().Err(err).Str("tml", t.Name).Msg("failed to delete orphaned whitelist port TML")
+		} else {
+			m.log.Info().Str("tml", t.Name).Str("site", site).
+				Msg("deleted orphaned Cloudflare whitelist port TML (zone pair removed from config)")
 		}
 	}
-
-	return nil
 }
 
 // pickDstIPTML selects the destination IP TML ID for a policy.
