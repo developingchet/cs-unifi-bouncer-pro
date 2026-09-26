@@ -11,10 +11,9 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
 )
 
-// TestManager_FailedFetchKeepsPreviousBans covers a live finding: with the
-// feed server down for two refresh intervals every feed ban lapsed. A failed
-// fetch, or a 200 that lists nothing usable, now extends the claims from the
-// last good fetch instead.
+// TestManager_FailedFetchKeepsPreviousBans: a failed fetch, or a 200 that
+// lists nothing usable, extends the claims from the last good fetch, so a
+// feed outage longer than two refresh intervals does not lift its bans.
 func TestManager_FailedFetchKeepsPreviousBans(t *testing.T) {
 	tests := []struct {
 		name   string

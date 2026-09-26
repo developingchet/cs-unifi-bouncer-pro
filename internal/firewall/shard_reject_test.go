@@ -10,10 +10,10 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// TestSyncShard_RefusedMemberDoesNotBlockTheShard reproduces a live failure:
-// the classic API refuses "203.0.113.77/32" with FirewallGroupInvalidArgs,
-// the shard failed on every flush, and the failures opened the circuit
-// breaker, which stopped every other ban.
+// TestSyncShard_RefusedMemberDoesNotBlockTheShard: the classic API refuses
+// "203.0.113.77/32" with FirewallGroupInvalidArgs. The shard must still sync
+// its other members, and the refusal must not count toward the circuit
+// breaker, which would otherwise stop every other ban.
 func TestSyncShard_RefusedMemberDoesNotBlockTheShard(t *testing.T) {
 	ctrl := testutil.NewMockController()
 	ctrl.RefuseGroupMember("203.0.113.77/32")
