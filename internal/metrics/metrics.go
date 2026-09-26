@@ -182,11 +182,4 @@ var (
 		Name:      "cloudflare_whitelist_sync_errors_total",
 		Help:      "Total Cloudflare whitelist sync failures.",
 	})
-
-	// DecisionQueueDepth tracks decision rate limiter backpressure.
-	DecisionQueueDepth = promauto.NewGauge(prometheus.GaugeOpts{
-		Namespace: namespace,
-		Name:      "decision_queue_depth",
-		Help:      "Tracks decision rate limiter backpressure.",
-	})
 )

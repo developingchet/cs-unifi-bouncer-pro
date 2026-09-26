@@ -160,36 +160,7 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 
 	if c.cfg.Debug {
 		c.log.Debug().Str("method", req.Method).Str("url", req.URL.String()).Msg("unifi api request")
-
-		// Attach httptrace to ctx — must be done before req.WithContext so the
-		// trace is not overwritten. All callbacks fire on the goroutine that calls Do.
-		trace := &httptrace.ClientTrace{
-			GetConn: func(hostPort string) {
-				c.log.Debug().Str("hostport", hostPort).Msg("httptrace: GetConn")
-			},
-			GotConn: func(i httptrace.GotConnInfo) {
-				c.log.Debug().Bool("reused", i.Reused).Bool("was_idle", i.WasIdle).Msg("httptrace: GotConn")
-			},
-			ConnectStart: func(network, addr string) {
-				c.log.Debug().Str("network", network).Str("addr", addr).Msg("httptrace: ConnectStart")
-			},
-			ConnectDone: func(network, addr string, err error) {
-				c.log.Debug().Str("addr", addr).Err(err).Msg("httptrace: ConnectDone")
-			},
-			TLSHandshakeStart: func() {
-				c.log.Debug().Msg("httptrace: TLSHandshakeStart")
-			},
-			TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
-				c.log.Debug().Err(err).Msg("httptrace: TLSHandshakeDone")
-			},
-			WroteRequest: func(info httptrace.WroteRequestInfo) {
-				c.log.Debug().Err(info.Err).Msg("httptrace: WroteRequest")
-			},
-			GotFirstResponseByte: func() {
-				c.log.Debug().Msg("httptrace: GotFirstResponseByte")
-			},
-		}
-		ctx = httptrace.WithClientTrace(ctx, trace)
+		ctx = attachDebugTrace(ctx, c.log)
 	}
 
 	resp, err := c.http.Do(req.WithContext(ctx))
@@ -216,6 +187,16 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 			Int("status", resp.StatusCode).Stringer("elapsed", elapsed).Msg("unifi api response")
 	}
 
+	if err := responseStatusError(resp, req); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// responseStatusError translates a non-2xx UniFi API response into a typed
+// error, closing the response body in the process. It returns nil for 2xx
+// responses, leaving the body open for the caller to read.
+func responseStatusError(resp *http.Response, req *http.Request) error {
 	switch resp.StatusCode {
 	case http.StatusBadRequest:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -226,29 +207,63 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 		}
 		if msg := classicErrorMsg(body); strings.HasSuffix(msg, "Existed") {
 			// The classic API reports duplicate names as 400, not 409.
-			return nil, &ErrConflict{Msg: msg}
+			return &ErrConflict{Msg: msg}
 		}
-		return nil, fmt.Errorf("bad request: %s", bodyStr)
+		return fmt.Errorf("bad request: %s", bodyStr)
 	case http.StatusUnauthorized:
 		_ = resp.Body.Close()
-		return nil, &ErrUnauthorized{Msg: "HTTP 401"}
+		return &ErrUnauthorized{Msg: "HTTP 401"}
 	case http.StatusNotFound:
 		_ = resp.Body.Close()
-		return nil, &ErrNotFound{URL: req.URL.Path}
+		return &ErrNotFound{URL: req.URL.Path}
 	case http.StatusTooManyRequests:
 		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 		_ = resp.Body.Close()
-		return nil, &ErrRateLimit{RetryAfter: retryAfter}
+		return &ErrRateLimit{RetryAfter: retryAfter}
 	case http.StatusConflict:
 		_ = resp.Body.Close()
-		return nil, &ErrConflict{Msg: "HTTP 409 conflict"}
+		return &ErrConflict{Msg: "HTTP 409 conflict"}
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("UniFi API returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("UniFi API returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	return resp, nil
+	return nil
+}
+
+// attachDebugTrace attaches an httptrace.ClientTrace to ctx that logs
+// connection lifecycle events at debug level. Must be called before
+// req.WithContext so the trace is not overwritten; all callbacks fire on the
+// goroutine that calls Do.
+func attachDebugTrace(ctx context.Context, log zerolog.Logger) context.Context {
+	trace := &httptrace.ClientTrace{
+		GetConn: func(hostPort string) {
+			log.Debug().Str("hostport", hostPort).Msg("httptrace: GetConn")
+		},
+		GotConn: func(i httptrace.GotConnInfo) {
+			log.Debug().Bool("reused", i.Reused).Bool("was_idle", i.WasIdle).Msg("httptrace: GotConn")
+		},
+		ConnectStart: func(network, addr string) {
+			log.Debug().Str("network", network).Str("addr", addr).Msg("httptrace: ConnectStart")
+		},
+		ConnectDone: func(network, addr string, err error) {
+			log.Debug().Str("addr", addr).Err(err).Msg("httptrace: ConnectDone")
+		},
+		TLSHandshakeStart: func() {
+			log.Debug().Msg("httptrace: TLSHandshakeStart")
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			log.Debug().Err(err).Msg("httptrace: TLSHandshakeDone")
+		},
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			log.Debug().Err(info.Err).Msg("httptrace: WroteRequest")
+		},
+		GotFirstResponseByte: func() {
+			log.Debug().Msg("httptrace: GotFirstResponseByte")
+		},
+	}
+	return httptrace.WithClientTrace(ctx, trace)
 }
 
 // withReauth executes fn, and on ErrUnauthorized calls EnsureAuth then retries once.

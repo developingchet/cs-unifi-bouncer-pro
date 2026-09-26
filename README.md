@@ -405,7 +405,6 @@ Available at `:9090/metrics` (configurable via `METRICS_ADDR`):
 | `crowdsec_unifi_shards_rebalanced_total` | Counter | Total shards drained by the rebalance pass, labelled by family and site |
 | `crowdsec_unifi_decisions_in_flight` | Gauge | Decisions currently being processed by the job handler |
 | `crowdsec_unifi_cloudflare_whitelist_sync_errors_total` | Counter | Total Cloudflare whitelist sync failures |
-| `crowdsec_unifi_decision_queue_depth` | Gauge | Decision rate limiter backpressure — depth of decisions waiting to be processed |
 
 ### CrowdSec usage metrics
 

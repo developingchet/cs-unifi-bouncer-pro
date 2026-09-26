@@ -341,7 +341,7 @@ Decisions from CrowdSec pass through an 8-stage filter pipeline before being enq
 
 ## Decision Rate Limiting
 
-A token-bucket rate limiter can throttle how fast decisions are dequeued and applied to UniFi during large ban waves. When the limiter is active, excess decisions are queued and processed as tokens refill. The `crowdsec_unifi_decision_queue_depth` metric tracks backpressure.
+A token-bucket rate limiter can throttle how fast decisions are dequeued and applied to UniFi during large ban waves. When the limiter is active, excess decisions are queued and processed as tokens refill.
 
 | Variable | Default | Description |
 |----------|---------|-------------|

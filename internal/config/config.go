@@ -474,6 +474,27 @@ func Load() (*Config, error) {
 
 // Validate checks required fields and semantic constraints.
 func (c *Config) Validate() error {
+	if err := c.validateController(); err != nil {
+		return err
+	}
+	if err := c.validateFirewall(); err != nil {
+		return err
+	}
+	if err := c.validateOperational(); err != nil {
+		return err
+	}
+	if err := c.validateTiming(); err != nil {
+		return err
+	}
+	if err := c.validateFeeds(); err != nil {
+		return err
+	}
+	return c.validateCloudflare()
+}
+
+// validateController checks the UniFi controller URL/TLS settings and the
+// required UniFi and CrowdSec credentials.
+func (c *Config) validateController() error {
 	if c.UnifiURL == "" {
 		return fmt.Errorf("UNIFI_URL is required")
 	}
@@ -500,7 +521,12 @@ func (c *Config) Validate() error {
 	if c.UnifiAPIKey == "" && (c.UnifiUsername == "" || c.UnifiPassword == "") {
 		return fmt.Errorf("either UNIFI_API_KEY or both UNIFI_USERNAME and UNIFI_PASSWORD are required")
 	}
+	return nil
+}
 
+// validateFirewall checks the firewall mode, block action, connection state
+// filter, object name templates, and zone pairs.
+func (c *Config) validateFirewall() error {
 	validModes := map[string]bool{"auto": true, "legacy": true, "zone": true}
 	if !validModes[c.FirewallMode] {
 		return fmt.Errorf("FIREWALL_MODE must be auto, legacy, or zone; got %q", c.FirewallMode)
@@ -531,7 +557,12 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("ZONE_PAIRS: %w", err)
 		}
 	}
+	return nil
+}
 
+// validateOperational checks logging, the block whitelist, the CrowdSec LAPI
+// URL, the configured UniFi sites, and firewall group capacity.
+func (c *Config) validateOperational() error {
 	validLogLevels := map[string]bool{
 		"trace": true, "debug": true, "info": true,
 		"warn": true, "error": true, "fatal": true, "panic": true,
@@ -586,7 +617,12 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("%s must be between 1 and 10000, or 0 to use the default (got %d)", capacity.name, capacity.value)
 		}
 	}
+	return nil
+}
 
+// validateTiming checks the ban/sync/reconcile durations and decision rate
+// limiting settings.
+func (c *Config) validateTiming() error {
 	if c.BanTTL <= 0 {
 		return fmt.Errorf("BAN_TTL must be > 0; got %s", c.BanTTL)
 	}
@@ -624,6 +660,11 @@ func (c *Config) Validate() error {
 	if c.DecisionRateLimit > 0 && c.DecisionBurstSize < 1 {
 		return fmt.Errorf("DECISION_BURST_SIZE must be >= 1 when DECISION_RATE_LIMIT is set; got %d", c.DecisionBurstSize)
 	}
+	return nil
+}
+
+// validateFeeds checks the blocklist import and webhook notification settings.
+func (c *Config) validateFeeds() error {
 	if len(c.BlocklistURLs) > 0 && c.BlocklistRefreshInterval <= 0 {
 		return fmt.Errorf("BLOCKLIST_REFRESH_INTERVAL must be > 0 when BLOCKLIST_URLS is set")
 	}
@@ -636,31 +677,34 @@ func (c *Config) Validate() error {
 	if c.WebhookURL != "" && !isHTTPURL(c.WebhookURL) {
 		return fmt.Errorf("WEBHOOK_URL must be an absolute http:// or https:// URL")
 	}
+	return nil
+}
 
-	// Validate Cloudflare whitelist config
-	if c.CloudflareWhitelistEnabled {
-		// The whitelist is a set of zone policies managed through the
-		// integration API, which accepts API keys only.
-		if c.FirewallMode == "legacy" {
-			return fmt.Errorf("CLOUDFLARE_WHITELIST_ENABLED requires the zone-based firewall; it cannot be used with FIREWALL_MODE=legacy")
-		}
-		if c.UnifiAPIKey == "" {
-			return fmt.Errorf("CLOUDFLARE_WHITELIST_ENABLED requires UNIFI_API_KEY")
-		}
-		if c.CloudflareRefreshInterval <= 0 {
-			return fmt.Errorf("CLOUDFLARE_REFRESH_INTERVAL must be > 0")
-		}
-		if len(c.CloudflareZonePairs) == 0 {
-			return fmt.Errorf("CLOUDFLARE_WHITELIST_ENABLED is set but CLOUDFLARE_ZONE_PAIRS is empty")
-		}
-		if _, err := c.ParseCloudflareZonePairs(); err != nil {
-			return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: %w", err)
-		}
-		if !isHTTPURL(c.CloudflareIPv4URL) || !isHTTPURL(c.CloudflareIPv6URL) {
-			return fmt.Errorf("CLOUDFLARE_IPV4_URL and CLOUDFLARE_IPV6_URL must be absolute http:// or https:// URLs")
-		}
+// validateCloudflare checks the Cloudflare whitelist config when enabled.
+func (c *Config) validateCloudflare() error {
+	if !c.CloudflareWhitelistEnabled {
+		return nil
 	}
-
+	// The whitelist is a set of zone policies managed through the
+	// integration API, which accepts API keys only.
+	if c.FirewallMode == "legacy" {
+		return fmt.Errorf("CLOUDFLARE_WHITELIST_ENABLED requires the zone-based firewall; it cannot be used with FIREWALL_MODE=legacy")
+	}
+	if c.UnifiAPIKey == "" {
+		return fmt.Errorf("CLOUDFLARE_WHITELIST_ENABLED requires UNIFI_API_KEY")
+	}
+	if c.CloudflareRefreshInterval <= 0 {
+		return fmt.Errorf("CLOUDFLARE_REFRESH_INTERVAL must be > 0")
+	}
+	if len(c.CloudflareZonePairs) == 0 {
+		return fmt.Errorf("CLOUDFLARE_WHITELIST_ENABLED is set but CLOUDFLARE_ZONE_PAIRS is empty")
+	}
+	if _, err := c.ParseCloudflareZonePairs(); err != nil {
+		return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: %w", err)
+	}
+	if !isHTTPURL(c.CloudflareIPv4URL) || !isHTTPURL(c.CloudflareIPv6URL) {
+		return fmt.Errorf("CLOUDFLARE_IPV4_URL and CLOUDFLARE_IPV6_URL must be absolute http:// or https:// URLs")
+	}
 	return nil
 }
 
