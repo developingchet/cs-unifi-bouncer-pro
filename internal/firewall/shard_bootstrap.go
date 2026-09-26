@@ -67,8 +67,33 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 	})
 
 	sm.assignOwnersLocked()
+	sm.splitOversizedLocked()
 	sm.updateMetricsLocked()
 	return nil
+}
+
+// splitOversizedLocked moves members beyond the shard limit out of each
+// loaded shard, so lowering the capacity takes effect on restart. The moved
+// members go to shards with room, or to new Pending shards. Callers hold sm.mu.
+func (sm *ShardManager) splitOversizedLocked() {
+	// range reads the slice once, so shards allocated below are not revisited.
+	for _, shard := range sm.fam.Shards {
+		if shard.IPs.Len() <= sm.shardLimit {
+			continue
+		}
+		members := shard.IPs.Members()
+		sort.Strings(members)
+		excess := members[sm.shardLimit:]
+		for _, ip := range excess {
+			sm.removeIPLocked(ip)
+		}
+		for _, ip := range excess {
+			sm.addIPLocked(ip)
+		}
+		sm.log.Warn().Str("site", sm.site).Str("shard", shard.Name).
+			Int("moved", len(excess)).Int("limit", sm.shardLimit).
+			Msg("shard holds more members than its capacity; moved the excess to other shards")
+	}
 }
 
 // listAPIShardObjects fetches the current shard objects from UniFi: traffic

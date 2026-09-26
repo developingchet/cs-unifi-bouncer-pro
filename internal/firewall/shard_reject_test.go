@@ -17,7 +17,7 @@ import (
 func TestSyncShard_RefusedMemberDoesNotBlockTheShard(t *testing.T) {
 	ctrl := testutil.NewMockController()
 	ctrl.RefuseGroupMember("203.0.113.77/32")
-	sm := NewShardManager(testSite, false, 10, testNamer(t), ctrl, testutil.NewMockStore(), zerolog.Nop(), 0, nil, false, "legacy")
+	sm := NewShardManager(testSite, false, 10, testNamer(t), ctrl, testutil.NewMockStore(), zerolog.Nop(), 0, false, "legacy")
 	syncErrors := 0
 	sm.SetSyncCallbacks(func() {}, func() { syncErrors++ })
 
@@ -63,7 +63,7 @@ func badRequest(arg string) error {
 
 func TestSyncShard_UnnamedBadRequestIsNotABreakerFailure(t *testing.T) {
 	ctrl := testutil.NewMockController()
-	sm := NewShardManager(testSite, false, 10, testNamer(t), ctrl, testutil.NewMockStore(), zerolog.Nop(), 0, nil, false, "legacy")
+	sm := NewShardManager(testSite, false, 10, testNamer(t), ctrl, testutil.NewMockStore(), zerolog.Nop(), 0, false, "legacy")
 	syncErrors := 0
 	sm.SetSyncCallbacks(func() {}, func() { syncErrors++ })
 	ctx := context.Background()

@@ -145,7 +145,7 @@ func (m *Manager) fetchURL(ctx context.Context, url string) error {
 			continue
 		}
 		ip, ipv6, ok := parseEntry(line)
-		if !ok || decision.TooBroad(ip, ipv6) || decision.IsPrivate(ip) || decision.IsWhitelisted(ip, m.protected) {
+		if !ok || decision.Unbannable(ip, ipv6, m.protected) {
 			skipped++
 			continue
 		}

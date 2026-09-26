@@ -10,6 +10,7 @@ import (
 	"github.com/crowdsecurity/crowdsec/pkg/models"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/lapihttp"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/testutil"
 	"github.com/rs/zerolog"
 )
@@ -178,14 +179,33 @@ func TestBouncer_SkipsDecisionsWithoutIdentity(t *testing.T) {
 	}
 }
 
+// The stream reports a deleted ban with type "ban". Its deletion must still
+// release the claim when the address has since been whitelisted.
+func TestBouncer_DeletionOfWhitelistedBanReachesHandler(t *testing.T) {
+	cfg := &config.Config{UnifiSites: []string{"default"}, BanTTL: time.Hour, BlockWhitelist: []string{"203.0.113.0/24"}}
+	b := newTestBouncer(t, cfg)
+	var jobs []SyncJob
+	b.handler = func(_ context.Context, job SyncJob) error {
+		jobs = append(jobs, job)
+		return nil
+	}
+	action, scope, ip, origin := "ban", "ip", "203.0.113.7", "cscli"
+	id := int64(42)
+	d := &models.Decision{ID: id, Type: &action, Scope: &scope, Value: &ip, Origin: &origin}
+	b.handleDecisionBlock(context.Background(), &models.DecisionsStreamResponse{New: []*models.Decision{d}, Deleted: []*models.Decision{d}}, "stream")
+	if len(jobs) != 1 || jobs[0].Action != "delete" || jobs[0].IP != ip || jobs[0].Source != "crowdsec:id:42" {
+		t.Fatalf("jobs = %+v, want one delete for %s", jobs, ip)
+	}
+}
+
 func TestUserAgentVersionPrefix(t *testing.T) {
 	for in, want := range map[string]string{
 		"v1.2.3": "crowdsec-unifi-bouncer/v1.2.3",
 		"1.2.3":  "crowdsec-unifi-bouncer/v1.2.3",
 		"dev":    "crowdsec-unifi-bouncer/vdev",
 	} {
-		if got := userAgent(in); got != want {
-			t.Errorf("userAgent(%q) = %q, want %q", in, got, want)
+		if got := lapihttp.UserAgent(in); got != want {
+			t.Errorf("UserAgent(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

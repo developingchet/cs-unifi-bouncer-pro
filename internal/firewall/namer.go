@@ -5,16 +5,13 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 )
 
-// NameData holds variables available in name templates.
-type NameData struct {
-	Family  string // "v4" or "v6"
-	Index   int    // shard number (0, 1, 2...)
-	Site    string // UniFi site name
-	SrcZone string // source zone name (zone mode only)
-	DstZone string // destination zone name (zone mode only)
-}
+// NameData holds variables available in name templates. It is the type
+// config validates the templates against.
+type NameData = config.NameData
 
 // Namer renders Go-template name strings for managed UniFi objects.
 type Namer struct {

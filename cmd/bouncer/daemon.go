@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"syscall"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
@@ -51,7 +53,13 @@ func runDaemon() error {
 			return fmt.Errorf("auto-discover sites: %w", err)
 		}
 		cfg.UnifiSites = filterExcluded(discovered, cfg.UnifiSitesExclude)
+		if len(cfg.UnifiSites) == 0 {
+			return fmt.Errorf("auto-discover sites: no site left to manage; discovered %s, UNIFI_SITES_EXCLUDE removes all of them",
+				strings.Join(discovered, ", "))
+		}
 		log.Info().Strs("sites", cfg.UnifiSites).Msg("auto-discovered UniFi sites")
+	} else if err := checkSitesExist(ctx, ctrl, cfg.UnifiSites, log); err != nil {
+		return err
 	}
 
 	// The notifier is a no-op when WEBHOOK_URL is empty or in dry-run mode.
@@ -67,8 +75,8 @@ func runDaemon() error {
 	}()
 
 	fwMgr, err := buildFWManager(cfg, ctrl, store, log,
-		func() { notifier.Fire("circuit_breaker_open", nil) },
-		func() { notifier.Fire("circuit_breaker_close", nil) },
+		func() { notifier.Fire(webhook.EventCircuitBreakerOpen, nil) },
+		func() { notifier.Fire(webhook.EventCircuitBreakerClose, nil) },
 	)
 	if err != nil {
 		return err
@@ -82,7 +90,7 @@ func runDaemon() error {
 	go watchSIGHUP(ctx, notifySIGHUP(), cfg, fwMgr, log)
 	cfManager := startCloudflareWhitelist(ctx, cfg, ctrl, cfPairs, log)
 
-	recorder, err := newMetricsRecorder(ctx, cfg, log)
+	recorder, recorderDone, err := newMetricsRecorder(ctx, cfg, log)
 	if err != nil {
 		return err
 	}
@@ -129,26 +137,36 @@ func runDaemon() error {
 
 	done := make(chan error, 1)
 	go func() { done <- bnc.Run(ctx) }()
-	return awaitShutdown(ctx, cfg, done, webhookDone, log)
+	return awaitShutdown(ctx, cfg, done, log, webhookDone, recorderDone)
 }
 
 // awaitShutdown returns when the bouncer stops. After a signal it allows
-// SHUTDOWN_GRACE_PERIOD for the bouncer and queued webhooks to finish, then
-// forces the process to exit.
-func awaitShutdown(ctx context.Context, cfg *config.Config, done <-chan error, webhookDone <-chan struct{}, log zerolog.Logger) error {
+// SHUTDOWN_GRACE_PERIOD for the bouncer to stop and for each drain (queued
+// webhooks, the final usage-metrics push) to finish, then forces the process
+// to exit.
+func awaitShutdown(ctx context.Context, cfg *config.Config, done <-chan error, log zerolog.Logger, drains ...<-chan struct{}) error {
+	stopped := done
+	var err error
 	select {
-	case err := <-done:
-		return err
+	case err = <-done:
+		if ctx.Err() == nil {
+			return err // stopped on its own, not by a signal
+		}
+		closed := make(chan error, 1)
+		closed <- err
+		stopped = closed
 	case <-ctx.Done():
 	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownGracePeriod)
 	defer shutdownCancel()
 	select {
-	case err := <-done:
-		select {
-		case <-webhookDone:
-		case <-shutdownCtx.Done():
+	case err = <-stopped:
+		for _, drain := range drains {
+			select {
+			case <-drain:
+			case <-shutdownCtx.Done():
+			}
 		}
 		return err
 	case <-shutdownCtx.Done():
@@ -170,6 +188,9 @@ func logStartup(cfg *config.Config, log zerolog.Logger) {
 	if w := cfg.InsecureLAPIURLWarning(); w != "" {
 		log.Warn().Str("url", cfg.CrowdSecLAPIURL).Msg(w)
 	}
+	if cfg.UnifiAPIDebug && log.GetLevel() > zerolog.DebugLevel {
+		log.Warn().Str("log_level", cfg.LogLevel).Msg("UNIFI_API_DEBUG logs at debug level; set LOG_LEVEL=debug to see it")
+	}
 	if len(cfg.BlockWhitelist) == 0 {
 		log.Warn().Msg("BLOCK_WHITELIST is empty; add your public WAN address to prevent self-ban")
 	}
@@ -181,6 +202,24 @@ func logStartup(cfg *config.Config, log zerolog.Logger) {
 		Bool("captcha", capabilities.SupportsCaptcha).
 		Bool("appsec", capabilities.SupportsAppSec).
 		Msg("bouncer capabilities")
+}
+
+// checkSitesExist fails when a configured site is not on the controller, which
+// otherwise surfaces later as a bare 401 from the first site-scoped request.
+// A failed site listing only warns, so a key that cannot list sites still starts.
+func checkSitesExist(ctx context.Context, ctrl controller.Controller, sites []string, log zerolog.Logger) error {
+	known, err := ctrl.DiscoverSites(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("could not list UniFi sites to check UNIFI_SITES; continuing")
+		return nil
+	}
+	for _, site := range sites {
+		if !slices.Contains(known, site) {
+			return fmt.Errorf("UNIFI_SITES: site %q is not on the controller; available sites: %s (use the short site name from the URL, e.g. \"default\")",
+				site, strings.Join(known, ", "))
+		}
+	}
+	return nil
 }
 
 // filterExcluded removes excluded sites from a site list.

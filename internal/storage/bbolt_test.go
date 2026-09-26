@@ -310,6 +310,40 @@ func TestBbolt_EventRingBuffer(t *testing.T) {
 	}
 }
 
+// Lowering HISTORY_MAX_EVENTS on an existing database trims the whole excess
+// on the next write, not every other stale entry.
+func TestBbolt_EventRingBufferShrink(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewBboltStore(dir, zerolog.Nop(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		if err := s.RecordEvent(EventEntry{Action: "ban", IP: "1.2.3.4", RecordedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = NewBboltStore(dir, zerolog.Nop(), 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.RecordEvent(EventEntry{Action: "ban", IP: "5.6.7.8", RecordedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListEvents(0)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(got) != 5 || got[0].IP != "5.6.7.8" {
+		t.Fatalf("events = %d (newest %+v), want 5 ending with the new one", len(got), got[0])
+	}
+}
+
 func TestBbolt_ListEvents_Limit(t *testing.T) {
 	s := newTestStore(t)
 	for i := 0; i < 10; i++ {

@@ -42,7 +42,7 @@ func newBboltStore(t *testing.T) storage.Store {
 // newV4ShardManager creates a new v4 ShardManager with a small capacity.
 func newV4ShardManager(t *testing.T, capacity int, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
-	return NewShardManager(testSite, false, capacity, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
+	return NewShardManager(testSite, false, capacity, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "legacy")
 }
 
 // TestEnsureShards_FirstRun verifies that lazy creation means an empty store
@@ -185,7 +185,7 @@ func TestEnsureShards_SameNameAcrossSites(t *testing.T) {
 	for _, tc := range []struct {
 		site, id, ip string
 	}{{"site-a", "group-a", "8.8.8.8"}, {"site-b", "group-b", "9.9.9.9"}} {
-		sm := NewShardManager(tc.site, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
+		sm := NewShardManager(tc.site, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "legacy")
 		if err := sm.EnsureShards(ctx); err != nil {
 			t.Fatalf("%s: %v", tc.site, err)
 		}
@@ -210,7 +210,7 @@ func TestEnsureShards_CustomHexIndexWithoutCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctrl.SetGroups(testSite, []controller.FirewallGroup{{ID: "group-a", Name: "crowdsec-block-v4-a", GroupMembers: []string{"8.8.8.8"}}})
-	sm := NewShardManager(testSite, false, 5, namer, ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
+	sm := NewShardManager(testSite, false, 5, namer, ctrl, store, zerolog.Nop(), 0, false, "legacy")
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -664,7 +664,7 @@ func TestRemoveTail(t *testing.T) {
 // newZoneV4ShardManager creates a new v4 ShardManager in zone mode.
 func newZoneV4ShardManager(t *testing.T, capacity int, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
-	return NewShardManager(testSite, false, capacity, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "zone")
+	return NewShardManager(testSite, false, capacity, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "zone")
 }
 
 // TestCreateShard_SendsNonEmptyItems verifies that TML creation always

@@ -16,7 +16,7 @@ func (m *managerImpl) PrepareDrain(ctx context.Context, sites []string) error {
 			return fmt.Errorf("resolve mode for site %s: %w", site, err)
 		}
 		v4 := NewShardManager(site, false, m.cfg.GroupCapacityV4, m.namer, m.ctrl, m.store, m.log,
-			m.cfg.APIShardDelay, m.flushSem, m.cfg.DryRun, mode)
+			m.cfg.APIShardDelay, m.cfg.DryRun, mode)
 		if err := v4.EnsureShards(ctx); err != nil {
 			return fmt.Errorf("load IPv4 shards for site %s: %w", site, err)
 		}
@@ -24,7 +24,7 @@ func (m *managerImpl) PrepareDrain(ctx context.Context, sites []string) error {
 		m.v4Mgrs[site] = v4
 		m.mu.Unlock()
 		v6 := NewShardManager(site, true, m.cfg.GroupCapacityV6, m.namer, m.ctrl, m.store, m.log,
-			m.cfg.APIShardDelay, m.flushSem, m.cfg.DryRun, mode)
+			m.cfg.APIShardDelay, m.cfg.DryRun, mode)
 		if err := v6.EnsureShards(ctx); err != nil {
 			return fmt.Errorf("load IPv6 shards for site %s: %w", site, err)
 		}

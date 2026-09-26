@@ -156,7 +156,8 @@ Exits 0 when all checks pass, 1 if any check fails.`,
 }
 
 // probeLAPI checks that the LAPI answers an authenticated decision query.
-// A 401 fails; any other non-2xx answer is a warning.
+// A 401 or 403 fails (CrowdSec answers 403 to an unknown bouncer key); any
+// other non-2xx answer is a warning.
 func probeLAPI(ctx context.Context, cfg *config.Config) diagCheck {
 	const name = "lapi_reachable"
 	client, err := lapihttp.NewClient(cfg.CrowdSecLAPIVerifyTLS, cfg.CrowdSecLAPICACert, 10*time.Second)
@@ -175,7 +176,7 @@ func probeLAPI(ctx context.Context, cfg *config.Config) diagCheck {
 	_ = resp.Body.Close()
 	detail := fmt.Sprintf("%s → %d %s", cfg.CrowdSecLAPIURL, resp.StatusCode, http.StatusText(resp.StatusCode))
 	switch {
-	case resp.StatusCode == http.StatusUnauthorized:
+	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
 		return diagCheck{name, "FAIL", detail + " — authentication failed; check CROWDSEC_LAPI_KEY"}
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		return diagCheck{name, "PASS", detail}

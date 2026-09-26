@@ -15,9 +15,10 @@ Common issues and solutions for cs-unifi-bouncer-pro.
 - [No Bans Being Applied](#no-bans-being-applied)
   - [No decisions in CrowdSec](#no-decisions-in-crowdsec)
   - [Decisions are being filtered](#decisions-are-being-filtered)
+  - [My own address is banned](#my-own-address-is-banned)
 - [Authentication Errors](#authentication-errors)
   - [UniFi controller returns 401](#unifi-controller-returns-401)
-  - [CrowdSec LAPI returns 401](#crowdsec-lapi-returns-401)
+  - [CrowdSec LAPI returns 401 or 403](#crowdsec-lapi-returns-401-or-403)
 - [Cloudflare Whitelist Issues](#cloudflare-whitelist-issues)
   - [Cloudflare ALLOW policies not created](#cloudflare-allow-policies-not-created)
   - [Cloudflare whitelist blocks legitimate traffic](#cloudflare-whitelist-blocks-legitimate-traffic)
@@ -67,7 +68,12 @@ docker compose config | grep -E "UNIFI_URL|CROWDSEC_LAPI_KEY|UNIFI_API_KEY"
 grep -E "^(UNIFI_URL|CROWDSEC_LAPI_URL|CROWDSEC_LAPI_KEY)=" .env
 ```
 
-All three must be set and non-empty. `UNIFI_URL` and `CROWDSEC_LAPI_URL` must include a scheme (`http://` or `https://`).
+All three must be set and non-empty. `UNIFI_URL` and `CROWDSEC_LAPI_URL` must include a scheme (`http://` or `https://`) and must not contain a username or password; set `UNIFI_USERNAME`/`UNIFI_PASSWORD` instead.
+
+Other settings checked at startup:
+
+- `GROUP_NAME_TEMPLATE`, `RULE_NAME_TEMPLATE` and `POLICY_NAME_TEMPLATE` must render a non-empty name that includes `{{.Index}}`, using only `.Family`, `.Index`, `.Site`, `.SrcZone` and `.DstZone`.
+- `WEBHOOK_EVENTS` accepts only `circuit_breaker_open`, `circuit_breaker_close` and `reconcile_drift`.
 
 ---
 
@@ -157,6 +163,7 @@ To verify the fix, enable debug logging and watch for `tcp4` in the trace:
 
 ```bash
 echo "UNIFI_API_DEBUG=true" >> .env
+echo "LOG_LEVEL=debug" >> .env   # UNIFI_API_DEBUG output is logged at debug level
 docker compose up -d --force-recreate cs-unifi-bouncer-pro
 docker logs cs-unifi-bouncer-pro | grep -E "ConnectStart|tcp"
 ```
@@ -207,6 +214,8 @@ docker compose up -d --force-recreate cs-unifi-bouncer-pro
 bbolt's storage layer (mmap-based database) requires several syscalls beyond basic
 file I/O: `flock` (advisory locking), `fallocate` (pre-allocation), `madvise` (mmap hint),
 `msync` (commit flush), and `getrandom` (TLS entropy for HTTPS connections).
+Creating a `DATA_DIR` that does not exist yet also needs `mkdirat`, so older
+profiles failed with `create data dir: mkdir ...: operation not permitted`.
 Older versions of the seccomp profile were missing some of these.
 
 **Fix** — pull the latest image which includes the corrected seccomp profile:
@@ -225,6 +234,7 @@ present in the `SCMP_ACT_ALLOW` names array within `security/seccomp-unifi.json`
 "flock",
 "getrandom",
 "madvise",
+"mkdirat",
 "msync",
 "pwrite64",
 "readv"
@@ -307,27 +317,48 @@ bouncer.
 
 ### Decisions are being filtered
 
-**Symptom:** CrowdSec has active decisions but the bouncer does not apply them. Enable debug logging:
+**Symptom:** CrowdSec has active decisions but the bouncer does not apply them. Check which filter stage rejected them:
 
 ```bash
-# Temporarily enable debug
-echo "LOG_LEVEL=debug" >> .env
-docker compose up -d --force-recreate cs-unifi-bouncer-pro
-docker logs -f cs-unifi-bouncer-pro
+curl -s http://localhost:9090/metrics | grep crowdsec_unifi_decisions_filtered_total
 ```
 
-Look for `"msg":"decision filtered"` lines. The `stage` field identifies which step rejected the decision:
+Each rejected decision is also logged with a `filtered: ...` message. Parse failures are logged at `warn`; the other stages log at `trace`, so set `LOG_LEVEL=trace` temporarily to see them:
+
+```bash
+echo "LOG_LEVEL=trace" >> .env
+docker compose up -d --force-recreate cs-unifi-bouncer-pro
+docker logs -f cs-unifi-bouncer-pro | grep filtered
+```
+
+The `stage` label on the metric identifies which step rejected the decision:
 
 | `stage` | Cause | Fix |
 |---------|-------|-----|
-| `action` | Decision action is `del` (delete event) | Normal — delete events are processed as unbans, not filtered |
-| `scenario-exclude` | Scenario matches `BLOCK_SCENARIO_EXCLUDE` | Expected — excluded scenarios are intentional |
-| `origin` | Origin not in `CROWDSEC_ORIGINS` | Lower or remove `CROWDSEC_ORIGINS` |
-| `scope` | Scope is not `ip` or `range` (e.g. ASN, country) | UniFi only accepts single IPs and CIDRs; this is a limitation |
-| `parse` | Malformed IP address | Indicates a bad decision in CrowdSec — check upstream |
-| `private-ip` | Private/reserved IP range | Expected — private IPs are never blocked |
-| `whitelist` | IP is in `BLOCK_WHITELIST` | Expected — your trusted range |
-| `min-duration` | Decision duration below `BLOCK_MIN_DURATION` | Lower or remove `BLOCK_MIN_DURATION` |
+| `1_action` | Decision type is neither `ban` nor `delete` (e.g. `captcha`) | Expected — only bans are enforced |
+| `2_scenario_exclude` | Scenario matches `BLOCK_SCENARIO_EXCLUDE` | Expected — excluded scenarios are intentional |
+| `3_origin` | Origin not in `CROWDSEC_ORIGINS` | Lower or remove `CROWDSEC_ORIGINS` |
+| `4_scope` | Scope is not `ip` or `range` (e.g. ASN, country) | UniFi only accepts single IPs and CIDRs; this is a limitation |
+| `5_parse` | Missing field, malformed IP address, or range broader than `/8` (IPv4) / `/32` (IPv6) | Indicates a bad decision in CrowdSec — check upstream |
+| `6_private` | Private/reserved IP range | Expected — private IPs are never blocked |
+| `7_whitelist` | IP is in `BLOCK_WHITELIST` | Expected — your trusted range |
+| `8_min_duration` | Decision duration below `BLOCK_MIN_DURATION` | Lower or remove `BLOCK_MIN_DURATION` |
+
+Deletions are only checked by stages 1, 4 and 5, so a deletion still lifts a ban applied before `BLOCK_SCENARIO_EXCLUDE`, `CROWDSEC_ORIGINS` or `BLOCK_WHITELIST` was narrowed.
+
+---
+
+### My own address is banned
+
+**Symptom:** A trusted address (your WAN IP, an office range) is blocked in UniFi.
+
+**Fix:** Add the address or range to `BLOCK_WHITELIST` and restart the bouncer. On startup, stored bans that `BLOCK_WHITELIST` now covers (as well as private addresses and ranges broader than `/8` IPv4 or `/32` IPv6) are deleted from the ban database, and a warning is logged:
+
+```
+lifted stored bans that are whitelisted, private or broader than /8 (IPv4) or /32 (IPv6); reconcile removes them from UniFi
+```
+
+The following reconcile removes them from the UniFi groups. New decisions for whitelisted addresses are rejected at stage `7_whitelist`.
 
 ---
 
@@ -352,9 +383,14 @@ Look for `"msg":"decision filtered"` lines. The `stage` field identifies which s
    docker compose up -d --force-recreate cs-unifi-bouncer-pro
    ```
 
+A site name that does not exist also draws a 401 from site-scoped requests.
+Startup checks `UNIFI_SITES` against the controller first and stops with
+`UNIFI_SITES: site "..." is not on the controller; available sites: ...`. Use
+the short name from the controller URL (`/manage/<name>/...`), not the display name.
+
 ---
 
-### CrowdSec LAPI returns 401
+### CrowdSec LAPI returns 401 or 403
 
 **Symptom:**
 
@@ -362,7 +398,9 @@ Look for `"msg":"decision filtered"` lines. The `stage` field identifies which s
 {"level":"error","error":"unauthorized (401)","msg":"stream error"}
 ```
 
-**Cause:** The bouncer's LAPI key has been deleted from CrowdSec.
+**Cause:** The bouncer's LAPI key has been deleted from CrowdSec, or was never
+registered. CrowdSec answers an unknown bouncer key with 403 Forbidden;
+`diagnose` reports both as `lapi_reachable FAIL ... check CROWDSEC_LAPI_KEY`.
 
 **Fix:**
 
@@ -600,7 +638,7 @@ The cleanup requires ownership evidence from the cache or a static name prefix a
 **Fix:** This is usually transient. The bouncer will retry dirty shards at the next `SYNC_INTERVAL` tick (default `30s`). If the error is chronic:
 
 - Check UniFi controller connectivity
-- Increase `FIREWALL_API_SHARD_DELAY` to reduce request rate
+- Increase `FIREWALL_API_SHARD_DELAY` to space out rule/policy creates and group deletes (group membership `PUT`s are not delayed)
 - Review `crowdsec_unifi_dirty_shards` and `crowdsec_unifi_shard_sync_total{result="error"}` metrics
 
 ---
@@ -712,9 +750,10 @@ Common causes:
 
 | Log message | Cause | Fix |
 |-------------|-------|-----|
-| `webhook: skipping unregistered event` | Event name not in `WEBHOOK_EVENTS` | Add the event to `WEBHOOK_EVENTS` |
-| `webhook: POST failed` (warn) | Network error or non-2xx response | Verify the URL is reachable from the container; webhook errors are non-fatal |
-| No log entries | `WEBHOOK_URL` is empty | Set `WEBHOOK_URL` in your `.env` |
+| `webhook: delivery failed` (warn) | Network error or timeout | Verify the URL is reachable from the container; webhook errors are non-fatal |
+| `webhook: server returned error status` (warn) | The endpoint answered 4xx or 5xx | Check the endpoint's own logs |
+| `webhook: queue full, event dropped` (warn) | The endpoint is too slow; more than 64 events are waiting | Check the endpoint's response time |
+| No log entries | `WEBHOOK_URL` is empty, the event is not listed in `WEBHOOK_EVENTS`, or the event has not happened | Set `WEBHOOK_URL`; add the event to `WEBHOOK_EVENTS` (or leave it empty for all events). `reconcile_drift` fires only when a periodic reconcile adds and removes 100 or more IPs in total |
 
 Webhook POSTs use a 5 second timeout and are never retried. The bouncer continues normally if a webhook call fails.
 

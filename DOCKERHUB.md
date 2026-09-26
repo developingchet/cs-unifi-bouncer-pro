@@ -46,7 +46,7 @@ For full setup including CrowdSec registration, TLS, multi-site, and Docker Secr
 - **Shard rebalance** — collapses under-filled TMLs automatically after expiry (`SHARD_MERGE_THRESHOLD`)
 - **Circuit breaker** — configurable failure threshold and cooldown; suspends syncs when the controller is unhealthy
 - **Crash-safe bbolt persistence** — bbolt-first write ordering; startup reconcile corrects drift after a crash or restart
-- **20 Prometheus metrics** — decisions, API calls, active bans, shard occupancy, decision latency, circuit breaker state
+- **24 Prometheus metrics** — decisions, API calls, active bans, shard occupancy, decision latency, circuit breaker state
 - **Decision latency histogram** — end-to-end timing from CrowdSec filter pipeline to successful UniFi write
 - **CrowdSec usage-metrics** — decision telemetry pushed to LAPI `/v1/usage-metrics` (default: 30 min; configurable)
 - **Cloudflare whitelist sync** — ALLOW policies for Cloudflare IP ranges, auto-refreshed on a configurable schedule

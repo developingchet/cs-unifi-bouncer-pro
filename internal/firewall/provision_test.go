@@ -19,7 +19,7 @@ func TestEnsurePolicies_OneRefusedShardDoesNotOrphanTheRest(t *testing.T) {
 	ctx := context.Background()
 	const site = "provision-site"
 	ctrl := testutil.NewMockController()
-	sm := NewShardManager(site, false, 2, zoneTestNamer(t), ctrl, testutil.NewMockStore(), zerolog.Nop(), 0, nil, false, "zone")
+	sm := NewShardManager(site, false, 2, zoneTestNamer(t), ctrl, testutil.NewMockStore(), zerolog.Nop(), 0, false, "zone")
 	if err := sm.EnsureShards(ctx); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}

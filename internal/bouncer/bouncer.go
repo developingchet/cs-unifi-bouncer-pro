@@ -26,12 +26,6 @@ import (
 // BinaryVersion is set at startup from the -X main.Version ldflags value.
 var BinaryVersion = "dev"
 
-// userAgent is the LAPI user agent, crowdsec-unifi-bouncer/v<version>.
-// Release tags already start with "v", which used to be doubled ("vv1.2.3").
-func userAgent(version string) string {
-	return "crowdsec-unifi-bouncer/v" + strings.TrimPrefix(version, "v")
-}
-
 // Bouncer wires together the CrowdSec stream, filter pipeline, and firewall manager.
 type Bouncer struct {
 	cfg       *config.Config
@@ -97,7 +91,7 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 		CAPath:              cfg.CrowdSecLAPICACert,
 		TickerInterval:      tickerStr,
 		InsecureSkipVerify:  &skipVerify,
-		UserAgent:           userAgent(BinaryVersion),
+		UserAgent:           lapihttp.UserAgent(BinaryVersion),
 		RetryInitialConnect: true,
 	}
 
@@ -258,7 +252,11 @@ func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.Dec
 // applyDecision filters d and hands it to the job handler. It returns false
 // only when ctx was cancelled while waiting on the rate limiter.
 func (b *Bouncer) applyDecision(ctx context.Context, d *models.Decision, action, source string) bool {
-	result := decision.Filter(d, b.filterCfg, b.log)
+	filter := decision.Filter
+	if action == "delete" {
+		filter = decision.FilterDeleted
+	}
+	result := filter(d, b.filterCfg, b.log)
 	if !result.Passed {
 		return true
 	}

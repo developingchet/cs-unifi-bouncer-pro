@@ -53,7 +53,7 @@ func runPeriodicReconcile(ctx context.Context, fwMgr firewall.Manager, sites []s
 		log.Info().Int("added", result.Added).Int("removed", result.Removed).
 			Stringer("elapsed", result.Elapsed).Msg("periodic reconcile complete")
 		if result.Added+result.Removed >= reconcileDriftThreshold {
-			notifier.Fire("reconcile_drift", map[string]any{
+			notifier.Fire(webhook.EventReconcileDrift, map[string]any{
 				"added":   result.Added,
 				"removed": result.Removed,
 			})
@@ -193,19 +193,26 @@ func runCloudflareRefresh(ctx context.Context, mgr *whitelist.Manager, pairs []w
 }
 
 // newMetricsRecorder starts the LAPI usage-metrics reporter, or returns a
-// no-op recorder when reporting is disabled or in dry-run mode.
-func newMetricsRecorder(ctx context.Context, cfg *config.Config, log zerolog.Logger) (bouncer.MetricsRecorder, error) {
+// no-op recorder when reporting is disabled or in dry-run mode. The returned
+// channel closes once the reporter has made its final push after ctx ends;
+// shutdown waits on it so that push is not cut off.
+func newMetricsRecorder(ctx context.Context, cfg *config.Config, log zerolog.Logger) (bouncer.MetricsRecorder, <-chan struct{}, error) {
+	done := make(chan struct{})
 	if cfg.LAPIMetricsPushInterval <= 0 || cfg.DryRun {
-		return nopRecorder{}, nil
+		close(done)
+		return nopRecorder{}, done, nil
 	}
 	client, err := lapihttp.NewClient(cfg.CrowdSecLAPIVerifyTLS, cfg.CrowdSecLAPICACert, 5*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("configure LAPI metrics client: %w", err)
+		return nil, nil, fmt.Errorf("configure LAPI metrics client: %w", err)
 	}
 	reporter := lapimetrics.NewReporter(
 		cfg.CrowdSecLAPIURL, cfg.CrowdSecLAPIKey, Version,
 		cfg.LAPIMetricsPushInterval, client, log,
 	)
-	go reporter.Run(ctx)
-	return reporter, nil
+	go func() {
+		defer close(done)
+		reporter.Run(ctx)
+	}()
+	return reporter, done, nil
 }

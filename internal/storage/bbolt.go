@@ -298,12 +298,13 @@ func (s *bboltStore) RecordEvent(e EventEntry) error {
 			return err
 		}
 		// Sequence keys are ordered, so only entries older than the cap need
-		// inspection. A normal append removes at most one entry.
+		// inspection. A normal append removes at most one entry. cursor.Delete
+		// keeps the cursor in step; bucket deletes during a walk skip keys.
 		if seq > uint64(s.maxEvents) {
 			cutoff := encodeSeq(seq - uint64(s.maxEvents))
 			cursor := b.Cursor()
-			for key, _ := cursor.First(); key != nil && bytes.Compare(key, cutoff) <= 0; key, _ = cursor.Next() {
-				if err := b.Delete(key); err != nil {
+			for key, _ := cursor.First(); key != nil && bytes.Compare(key, cutoff) <= 0; key, _ = cursor.First() {
+				if err := cursor.Delete(); err != nil {
 					return err
 				}
 			}

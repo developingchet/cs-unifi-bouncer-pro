@@ -20,7 +20,7 @@ func BenchmarkShardManagerAdd_ProductionScale(b *testing.B) {
 	}
 	ctx := context.Background()
 	for b.Loop() {
-		sm := NewShardManager("bench", false, 10_000, zoneTestNamerB(b), testutil.NewMockController(), testutil.NewMockStore(), zerolog.Nop(), 0, nil, false, "zone")
+		sm := NewShardManager("bench", false, 10_000, zoneTestNamerB(b), testutil.NewMockController(), testutil.NewMockStore(), zerolog.Nop(), 0, false, "zone")
 		for _, ip := range ips {
 			if _, _, err := sm.Add(ctx, ip); err != nil {
 				b.Fatal(err)

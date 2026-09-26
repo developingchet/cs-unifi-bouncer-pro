@@ -196,6 +196,41 @@ func TestStage8_DeleteIgnoresMinDuration(t *testing.T) {
 	}
 }
 
+// A deletion must reach the handler even when the ban filters would now
+// reject its decision: otherwise a ban applied before BLOCK_SCENARIO_EXCLUDE,
+// CROWDSEC_ORIGINS or BLOCK_WHITELIST changed is never released.
+func TestFilter_DeletePassesBanOnlyStages(t *testing.T) {
+	wl, err := ParseWhitelist([]string{"203.0.113.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name  string
+		cfg   func(*FilterConfig)
+		value string
+	}{
+		{"excluded scenario", func(c *FilterConfig) { c.BlockScenarioExclude = []string{"ssh"} }, "198.51.100.1"},
+		{"origin not allowed", func(c *FilterConfig) { c.AllowedOrigins = []string{"lists"} }, "198.51.100.1"},
+		{"whitelisted", func(c *FilterConfig) { c.Whitelist = wl }, "203.0.113.5"},
+		{"private", func(*FilterConfig) {}, "10.1.2.3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := NewFilterConfig()
+			tt.cfg(&cfg)
+			// The stream reports a deleted ban with its original type.
+			d := makeDecision("ban", "ip", tt.value, "ssh-bf", "cscli", "4h")
+			if Filter(d, cfg, zerolog.Nop()).Passed {
+				t.Fatal("precondition: the ban should be filtered")
+			}
+			r := FilterDeleted(d, cfg, zerolog.Nop())
+			if !r.Passed || r.Action != "delete" || r.Value != tt.value {
+				t.Fatalf("delete filtered: %+v", r)
+			}
+		})
+	}
+}
+
 func TestCIDRDecision(t *testing.T) {
 	cfg := NewFilterConfig()
 	d := makeDecision("ban", "range", "203.0.113.0/24", "ssh-bf", "crowdsec", "24h")

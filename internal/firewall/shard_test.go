@@ -39,7 +39,7 @@ func newShardTestManager(t *testing.T, mode string, capacity int) (*ShardManager
 	t.Helper()
 	ctrl := testutil.NewMockController()
 	store := newShardTestStore(t)
-	sm := NewShardManager(testSite, false, capacity, newShardTestNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, mode)
+	sm := NewShardManager(testSite, false, capacity, newShardTestNamer(t), ctrl, store, zerolog.Nop(), 0, false, mode)
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestEnsureShards_LoadsExisting(t *testing.T) {
 		},
 	})
 
-	sm := NewShardManager(testSite, false, 10000, namer, ctrl, store, zerolog.Nop(), 0, nil, false, "zone")
+	sm := NewShardManager(testSite, false, 10000, namer, ctrl, store, zerolog.Nop(), 0, false, "zone")
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
@@ -369,6 +369,51 @@ func TestEnsureShards_LoadsExisting(t *testing.T) {
 	}
 	if family.Shards[0].IPs.IsDirty() {
 		t.Fatal("expected baseline shard to be clean")
+	}
+}
+
+// Lowering the capacity below a loaded shard's size moves the excess members
+// into new shards on the next start.
+func TestEnsureShards_SplitsShardOverCapacity(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newShardTestStore(t)
+	items := make([]controller.TrafficMatchingListItem, 0, 7)
+	for i := 1; i <= 7; i++ {
+		items = append(items, controller.TrafficMatchingListItem{Value: fmt.Sprintf("198.51.100.%d", i)})
+	}
+	ctrl.SetTMLs(testSite, []controller.TrafficMatchingList{
+		{ID: "tml-0", Name: "crowdsec-block-v4-0", Type: "IPV4_ADDRESSES", Items: items},
+	})
+
+	sm := NewShardManager(testSite, false, 3, newShardTestNamer(t), ctrl, store, zerolog.Nop(), 0, false, "zone")
+	if err := sm.EnsureShards(context.Background()); err != nil {
+		t.Fatalf("EnsureShards: %v", err)
+	}
+
+	family := familyState(t, sm)
+	if got := len(family.Shards); got != 3 {
+		t.Fatalf("shards = %d, want 3", got)
+	}
+	total := 0
+	for _, s := range family.Shards {
+		if s.IPs.Len() > 3 {
+			t.Fatalf("shard %s holds %d members, over the limit of 3", s.Name, s.IPs.Len())
+		}
+		total += s.IPs.Len()
+		for _, ip := range s.IPs.Members() {
+			if owner := family.ipOwner[ip]; owner != s.Index {
+				t.Fatalf("%s owned by shard %d, stored in shard %d", ip, owner, s.Index)
+			}
+		}
+	}
+	if total != 7 || len(family.ipOwner) != 7 {
+		t.Fatalf("members = %d, owners = %d, want 7", total, len(family.ipOwner))
+	}
+	if !family.Shards[0].IPs.IsDirty() {
+		t.Fatal("the shrunk shard must be written on the next flush")
+	}
+	if family.Shards[1].State != ShardStatePending || family.Shards[2].State != ShardStatePending {
+		t.Fatal("overflow shards must be created on the next flush")
 	}
 }
 

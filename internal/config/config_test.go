@@ -554,6 +554,19 @@ func TestInvalidZonePairs(t *testing.T) {
 	}
 }
 
+func TestZoneModeRequiresAPIKey(t *testing.T) {
+	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
+	setEnv(t, "UNIFI_USERNAME", "admin")
+	setEnv(t, "UNIFI_PASSWORD", "secret")
+	setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
+	setEnv(t, "FIREWALL_MODE", "zone")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "FIREWALL_MODE=zone requires UNIFI_API_KEY") {
+		t.Fatalf("Load() error = %v, want the zone mode API key error", err)
+	}
+}
+
 func TestInvalidFirewallMode(t *testing.T) {
 	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
 	setEnv(t, "UNIFI_API_KEY", "key")
@@ -990,7 +1003,6 @@ func TestValidateRuntimeLimits(t *testing.T) {
 		{"empty sites", func(c *Config) { c.UnifiSites = nil }},
 		{"zero poll interval", func(c *Config) { c.CrowdSecPollInterval = 0 }},
 		{"zero shutdown grace", func(c *Config) { c.ShutdownGracePeriod = 0 }},
-		{"zero flush concurrency", func(c *Config) { c.FirewallFlushConcurrency = 0 }},
 		{"negative rate limit", func(c *Config) { c.DecisionRateLimit = -1 }},
 		{"rate limit without burst", func(c *Config) { c.DecisionRateLimit = 10; c.DecisionBurstSize = 0 }},
 		{"cloudflare whitelist in legacy mode", func(c *Config) {

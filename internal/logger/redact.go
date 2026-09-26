@@ -7,12 +7,13 @@ import (
 )
 
 // RedactWriter wraps an io.Writer and masks sensitive values before writing.
-// It redacts UNIFI_PASSWORD values, API keys, and Bearer tokens from log lines.
+// It redacts passwords, API keys, session cookies, CSRF and other tokens, and
+// Bearer tokens from log lines.
 type RedactWriter struct {
 	w io.Writer
 }
 
-var secretField = regexp.MustCompile(`(?i)((?:unifi_password|password|unifi_api_key|crowdsec_lapi_key|lapi[_-]?key|bouncer[_-]?api[_-]?key|x-api-key|api[_-]?key)["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'[^']*'|[^\s,}\]]+)`)
+var secretField = regexp.MustCompile(`(?i)((?:unifi_password|password|unifi_api_key|crowdsec_lapi_key|lapi[_-]?key|bouncer[_-]?api[_-]?key|x-api-key|api[_-]?key|(?:set-)?cookie|unifises|token)["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'[^']*'|[^\s,}\]]+)`)
 var bearerToken = regexp.MustCompile(`(?i)(Bearer\s+)[A-Za-z0-9_\-.]+`)
 
 // NewRedactWriter returns a RedactWriter that applies all default sensitive patterns.

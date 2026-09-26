@@ -37,7 +37,7 @@ func TestSparseShards_NewShardNeverReusesAnIndex(t *testing.T) {
 		tmlWith("tml-2", "crowdsec-block-v4-2", "198.51.100.4", "198.51.100.5", "198.51.100.6"),
 		tmlWith("tml-3", "crowdsec-block-v4-3", "198.51.100.7", "198.51.100.8", "198.51.100.9"),
 	})
-	sm := NewShardManager(testSite, false, 3, zoneTestNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "zone")
+	sm := NewShardManager(testSite, false, 3, zoneTestNamer(t), ctrl, store, zerolog.Nop(), 0, false, "zone")
 	if err := sm.EnsureShards(ctx); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestCreateShardObject_EmptyIDAdoptsExisting(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mock := testutil.NewMockController()
 			mock.SetTMLs(testSite, tt.listed)
-			sm := NewShardManager(testSite, false, 3, zoneTestNamer(t), emptyIDController{mock}, testutil.NewMockStore(), zerolog.Nop(), 0, nil, false, "zone")
+			sm := NewShardManager(testSite, false, 3, zoneTestNamer(t), emptyIDController{mock}, testutil.NewMockStore(), zerolog.Nop(), 0, false, "zone")
 			id, err := sm.doCreateUniFiGroup(context.Background(), "crowdsec-block-v4-0")
 			if (err != nil) != tt.wantErr || id != tt.wantID {
 				t.Fatalf("doCreateUniFiGroup = %q, %v; want %q, err %v", id, err, tt.wantID, tt.wantErr)
@@ -120,7 +120,7 @@ func TestCreateShardObject_EmptyIDAdoptsExisting(t *testing.T) {
 // TestAdd_ReportsEachNewShardOnce verifies that concurrent adds report every
 // allocated shard exactly once, so its policy or rule is provisioned once.
 func TestAdd_ReportsEachNewShardOnce(t *testing.T) {
-	sm := NewShardManager(testSite, false, 3, zoneTestNamer(t), testutil.NewMockController(), testutil.NewMockStore(), zerolog.Nop(), 0, nil, false, "zone")
+	sm := NewShardManager(testSite, false, 3, zoneTestNamer(t), testutil.NewMockController(), testutil.NewMockStore(), zerolog.Nop(), 0, false, "zone")
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestCreateShardObject_RefusedCreateAdoptsExisting(t *testing.T) {
 			mock := testutil.NewMockController()
 			mock.SetTMLs(testSite, tt.listed)
 			mock.SetError("CreateTrafficMatchingList", tt.createErr)
-			sm := NewShardManager(testSite, false, 3, zoneTestNamer(t), mock, testutil.NewMockStore(), zerolog.Nop(), 0, nil, false, "zone")
+			sm := NewShardManager(testSite, false, 3, zoneTestNamer(t), mock, testutil.NewMockStore(), zerolog.Nop(), 0, false, "zone")
 			id, err := sm.doCreateUniFiGroup(context.Background(), "crowdsec-block-v4-0")
 			if (err != nil) != tt.wantErr || id != tt.wantID {
 				t.Fatalf("doCreateUniFiGroup = %q, %v; want %q, err %v", id, err, tt.wantID, tt.wantErr)

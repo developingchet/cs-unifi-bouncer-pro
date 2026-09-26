@@ -33,6 +33,8 @@ func TestResolveCapacitiesHonorsShardLimit(t *testing.T) {
 	}{
 		{name: "default cap", cfg: config.Config{ShardLimit: 9000, FirewallGroupCapacity: 10000}, wantV4: 9000, wantV6: 9000},
 		{name: "family override", cfg: config.Config{ShardLimit: 9000, FirewallGroupCapacity: 10000, FirewallGroupCapacityV4: 4000, FirewallGroupCapacityV6: 5000}, wantV4: 4000, wantV6: 5000},
+		{name: "v4 override leaves v6 on the shared value", cfg: config.Config{ShardLimit: 10000, FirewallGroupCapacity: 8000, FirewallGroupCapacityV4: 40}, wantV4: 40, wantV6: 8000},
+		{name: "nothing set uses SHARD_LIMIT", cfg: config.Config{ShardLimit: 10000}, wantV4: 10000, wantV6: 10000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			v4, v6 := resolveCapacities(&tc.cfg)

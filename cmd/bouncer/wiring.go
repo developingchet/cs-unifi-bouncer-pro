@@ -7,6 +7,7 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
@@ -38,7 +39,29 @@ func openStore(cfg *config.Config, log zerolog.Logger) (storage.Store, error) {
 		log.Warn().Int("bans", rekeyed).
 			Msg("rekeyed bans stored as /32 or /128 host prefixes under the bare address; UniFi rejects host prefixes, so these bans were not enforced until now")
 	}
+	if err := dropUnbannable(store, cfg, log); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	return store, nil
+}
+
+// dropUnbannable lifts stored bans that BLOCK_WHITELIST or the range guards
+// now cover, so changing the whitelist takes effect on restart.
+func dropUnbannable(store storage.Store, cfg *config.Config, log zerolog.Logger) error {
+	whitelist, err := decision.ParseWhitelist(cfg.BlockWhitelist)
+	if err != nil {
+		return fmt.Errorf("parse BLOCK_WHITELIST: %w", err)
+	}
+	dropped, err := banstate.DropUnbannable(store, whitelist)
+	if err != nil {
+		return fmt.Errorf("drop unbannable bans: %w", err)
+	}
+	if len(dropped) > 0 {
+		log.Warn().Strs("bans", dropped[:min(len(dropped), 20)]).Int("count", len(dropped)).
+			Msg("lifted stored bans that are whitelisted, private or broader than /8 (IPv4) or /32 (IPv6); reconcile removes them from UniFi")
+	}
+	return nil
 }
 
 func controllerConfig(cfg *config.Config) controller.ClientConfig {
@@ -92,7 +115,6 @@ func buildFWManager(cfg *config.Config,
 		GroupCapacityV6:             v6Cap,
 		DryRun:                      cfg.DryRun,
 		APIShardDelay:               cfg.FirewallAPIShardDelay,
-		FlushConcurrency:            cfg.FirewallFlushConcurrency,
 		CircuitBreakerThreshold:     cfg.CircuitBreakerThreshold,
 		CircuitBreakerResetInterval: cfg.CircuitBreakerResetInterval,
 		ShardMergeThreshold:         cfg.ShardMergeThreshold,
@@ -125,9 +147,11 @@ func resolveCapacities(cfg *config.Config) (v4Cap, v6Cap int) {
 	if v4Cap == 0 {
 		v4Cap = cfg.FirewallGroupCapacity
 	}
+	// Each family falls back to the shared FIREWALL_GROUP_CAPACITY, so a
+	// FIREWALL_GROUP_CAPACITY_V4 override does not also shrink IPv6 groups.
 	v6Cap = cfg.FirewallGroupCapacityV6
 	if v6Cap == 0 {
-		v6Cap = v4Cap
+		v6Cap = cfg.FirewallGroupCapacity
 	}
 	// SHARD_LIMIT is the controller's hard ceiling for each managed list.
 	// Per-family capacity settings may lower it but must not exceed it.

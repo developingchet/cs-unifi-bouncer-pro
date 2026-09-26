@@ -19,7 +19,7 @@ func TestShardCreate_BacksOffAndReportsUnsyncedIPs(t *testing.T) {
 	ctx := context.Background()
 	const site = "backoff-site"
 	ctrl := testutil.NewMockController()
-	sm := NewShardManager(site, false, 10, zoneTestNamer(t), ctrl, testutil.NewMockStore(), zerolog.Nop(), 0, nil, false, "zone")
+	sm := NewShardManager(site, false, 10, zoneTestNamer(t), ctrl, testutil.NewMockStore(), zerolog.Nop(), 0, false, "zone")
 	if err := sm.EnsureShards(ctx); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestShardCreate_BacksOffAndReportsUnsyncedIPs(t *testing.T) {
 }
 
 func TestCreateBackoffGrowsAndCaps(t *testing.T) {
-	sm := NewShardManager("s", false, 10, zoneTestNamer(t), testutil.NewMockController(), testutil.NewMockStore(), zerolog.Nop(), 0, nil, false, "zone")
+	sm := NewShardManager("s", false, 10, zoneTestNamer(t), testutil.NewMockController(), testutil.NewMockStore(), zerolog.Nop(), 0, false, "zone")
 	shard := &Shard{Name: "crowdsec-block-v4-0", Family: "v4", IPs: NewIPSet()}
 	var prev time.Duration
 	for i := 1; i <= 10; i++ {

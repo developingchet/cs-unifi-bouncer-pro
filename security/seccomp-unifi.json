@@ -55,6 +55,7 @@
         "lseek",
         "madvise",
         "membarrier",
+        "mkdirat",
         "mmap",
         "mprotect",
         "msync",

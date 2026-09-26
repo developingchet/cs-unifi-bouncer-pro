@@ -63,7 +63,7 @@ func TestZoneManager_RepairsSparseShardPolicy(t *testing.T) {
 		ID: "tml-3", Name: "crowdsec-block-v4-3", Type: "IPV4_ADDRESSES",
 		Items: []controller.TrafficMatchingListItem{{Type: "IP_ADDRESS", Value: "1.2.3.4"}},
 	}})
-	v4 := NewShardManager(testSite, false, 5, zoneTestNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "zone")
+	v4 := NewShardManager(testSite, false, 5, zoneTestNamer(t), ctrl, store, zerolog.Nop(), 0, false, "zone")
 	if err := v4.EnsureShards(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestZoneManager_AdoptsAndRepairsPolicyWithoutCache(t *testing.T) {
 		ID: "policy-3", Name: "crowdsec-policy-wan-lan-v4-3", Description: "test",
 		Enabled: true, Action: "BLOCK", TrafficMatchingListIDs: []string{"old-group"},
 	}})
-	v4 := NewShardManager(testSite, false, 5, zoneTestNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "zone")
+	v4 := NewShardManager(testSite, false, 5, zoneTestNamer(t), ctrl, store, zerolog.Nop(), 0, false, "zone")
 	if err := v4.EnsureShards(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +356,7 @@ func TestZoneManager_FilterReplacementRetainsCoverageAndRetries(t *testing.T) {
 func ensuredZoneV4Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
 	namer := zoneTestNamer(t)
-	sm := NewShardManager(testSite, false, 5, namer, ctrl, store, zerolog.Nop(), 0, nil, false, "zone")
+	sm := NewShardManager(testSite, false, 5, namer, ctrl, store, zerolog.Nop(), 0, false, "zone")
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards (v4): %v", err)
 	}
@@ -378,7 +378,7 @@ func ensuredZoneV4Shard(t *testing.T, ctrl controller.Controller, store storage.
 func ensuredZoneV6Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
 	namer := zoneTestNamer(t)
-	sm := NewShardManager(testSite, true, 5, namer, ctrl, store, zerolog.Nop(), 0, nil, false, "zone")
+	sm := NewShardManager(testSite, true, 5, namer, ctrl, store, zerolog.Nop(), 0, false, "zone")
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards (v6): %v", err)
 	}

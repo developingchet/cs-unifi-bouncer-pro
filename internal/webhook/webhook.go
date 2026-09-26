@@ -23,6 +23,16 @@ const (
 	drainBudget = 5 * time.Second
 )
 
+// Event names, the values WEBHOOK_EVENTS accepts.
+const (
+	EventCircuitBreakerOpen  = "circuit_breaker_open"
+	EventCircuitBreakerClose = "circuit_breaker_close"
+	EventReconcileDrift      = "reconcile_drift"
+)
+
+// Events lists every event the bouncer fires.
+var Events = []string{EventCircuitBreakerOpen, EventCircuitBreakerClose, EventReconcileDrift}
+
 // Event is the JSON payload sent to the webhook endpoint.
 type Event struct {
 	Event     string    `json:"event"`

@@ -24,7 +24,7 @@ Automatically translates CrowdSec ban decisions into UniFi firewall rules — bl
 - **Shard management** — Automatic creation of multiple Firewall Groups / Traffic Matching Lists when IP count exceeds capacity (10,000 per shard)
 - **ACID persistence** — bbolt-backed ban tracking with TTL-aware auto-expiry; bans survive container restarts and are never double-applied
 - **Template-based naming** — Go templates for all managed object names; prevents conflicts in multi-instance deployments
-- **Prometheus metrics** — 23 `crowdsec_unifi_*` metrics covering decisions, jobs, API calls, active bans, shard occupancy, decision latency, and circuit breaker state
+- **Prometheus metrics** — 24 `crowdsec_unifi_*` metrics covering decisions, jobs, API calls, active bans, shard occupancy, decision latency, and circuit breaker state
 - **CrowdSec usage-metrics** — Pushes decision telemetry to LAPI `/v1/usage-metrics` on a configurable interval (default 30 min); spec-compliant with CrowdSec remediation component requirements
 - **Ban history audit trail** — Ring-buffer event log (up to 10,000 entries) records every ban, unban, and expiry; queryable via `status bans`, `status ip`, and `status history` CLI subcommands
 - **External blocklist import** — Fetch plain-text IP/CIDR lists from external URLs on a configurable interval; bans auto-expire if the URL becomes unreachable
@@ -83,7 +83,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `UNIFI_URL` | **required** | Controller base URL, e.g. `https://192.168.1.1` |
+| `UNIFI_URL` | **required** | Controller base URL, e.g. `https://192.168.1.1`. Must not contain a username or password; use `UNIFI_USERNAME`/`UNIFI_PASSWORD` |
 | `UNIFI_API_KEY` | **required** ¹ | UniFi API key (preferred) |
 | `UNIFI_USERNAME` | **required** ¹ | Local admin username (fallback if no API key) |
 | `UNIFI_PASSWORD` | **required** ¹ | Local admin password (fallback if no API key) |
@@ -92,7 +92,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `UNIFI_REQUIRE_HTTPS` | `true` | Require an HTTPS controller URL; set `false` explicitly to use HTTP |
 | `UNIFI_CA_CERT` | — | Path to a custom CA certificate file |
 | `UNIFI_HTTP_TIMEOUT` | `120s` | Per-request HTTP timeout |
-| `UNIFI_API_DEBUG` | `false` | Log raw HTTP request/response bodies |
+| `UNIFI_API_DEBUG` | `false` | Log each UniFi API call's method, URL, status and timing plus connection trace events, at `debug` level (needs `LOG_LEVEL=debug` or `trace`). Headers, cookies, tokens, API keys and bodies are never logged; the login request is not traced |
 | `ENABLE_IPV6` | `false` | Enable IPv6 TCP dialing to the UniFi controller. Leave `false` unless your controller is reachable over IPv6. This is separate from `FIREWALL_ENABLE_IPV6` which controls IPv6 firewall rule creation. |
 
 ¹ Provide either `UNIFI_API_KEY` **or** both `UNIFI_USERNAME` + `UNIFI_PASSWORD`. Username/password supports legacy firewall rules only; the zone-based firewall and the Cloudflare whitelist require an API key.
@@ -115,7 +115,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BLOCK_WHITELIST` | — | Comma-separated IPs/CIDRs to never block. Add your public WAN IP; private ranges are skipped automatically. |
+| `BLOCK_WHITELIST` | — | Comma-separated IPs/CIDRs to never block. Add your public WAN IP; private ranges are skipped automatically. On startup, stored bans the whitelist now covers are lifted, so adding an address takes effect on restart. |
 | `BLOCK_SCENARIO_EXCLUDE` | — | Comma-separated scenario substrings to skip |
 | `BLOCK_MIN_DURATION` | — | Ignore bans shorter than this duration, e.g. `1h` |
 | `BLOCK_SCENARIO_DURATION_MAP` | — | Per-scenario ban duration overrides. Comma- or semicolon-separated `key=duration` pairs matched as substrings. The longest matching key wins and may exceed `BAN_TTL`. Example: `ssh-bf=168h;http-probing=24h` |
@@ -130,16 +130,17 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `FIREWALL_GROUP_CAPACITY` | `10000` | Max IPs per firewall group shard (shared default) |
 | `FIREWALL_GROUP_CAPACITY_V4` | — | Per-family override for IPv4 shard capacity |
 | `FIREWALL_GROUP_CAPACITY_V6` | — | Per-family override for IPv6 shard capacity |
-| `FIREWALL_API_SHARD_DELAY` | `250ms` | Minimum pause between consecutive UniFi API write calls. Prevents the controller stacking back-to-back ruleset regenerations. `0` disables. |
-| `FIREWALL_FLUSH_CONCURRENCY` | `1` | Maximum concurrent group `PUT` calls in-flight. `1` = fully serialized (recommended). Increase only for multi-site setups. |
+| `FIREWALL_API_SHARD_DELAY` | `250ms` | Pause before each legacy rule create after the first, before creating a new shard's rule or policies, and before deleting a pruned or drained group. Group membership `PUT`s are not delayed. `0` disables. |
 | `FIREWALL_LOG_DROPS` | `false` | Enable logging rules on the firewall objects |
 | `FIREWALL_CONNECTION_STATES` | `NEW,INVALID` | Zone block policy connection states. `ALL` also blocks established and related traffic, including replies to connections initiated inside the network. |
 | `FIREWALL_RECONCILE_ON_START` | `true` | Sync UniFi state with bbolt on startup |
 | `FIREWALL_RECONCILE_INTERVAL` | `10m` | Periodically repair membership and missing policies/rules; `0s` = disabled |
 | `SYNC_INTERVAL` | `30s` | How often dirty shards are flushed to UniFi after a decision block. Also the retry interval for failed flushes. Minimum: `5s` |
-| `SHARD_LIMIT` | `10000` | Max IPs per shard before creating a new one |
+| `SHARD_LIMIT` | `10000` | Max IPs per shard before creating a new one, in both zone and legacy mode. Caps `FIREWALL_GROUP_CAPACITY[_V4/_V6]` |
 | `CIRCUIT_BREAKER_THRESHOLD` | `5` | Number of consecutive sync failures before the circuit breaker opens and suspends syncs |
 | `CIRCUIT_BREAKER_RESET_INTERVAL` | `60s` | How long to wait in the open state before allowing a probe request (half-open) |
+
+`FIREWALL_FLUSH_CONCURRENCY` is no longer used (shards are written one at a time); setting it logs a warning at startup.
 
 ### Legacy firewall mode
 
@@ -176,12 +177,14 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `POLICY_NAME_TEMPLATE` | `crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}` | Go template for zone policy names |
 | `OBJECT_DESCRIPTION` | `Managed by cs-unifi-bouncer-pro. Do not edit manually.` | Description field on all managed objects |
 
+Templates are rendered at startup and must produce a non-empty name that includes `{{.Index}}`. Available fields: `.Family`, `.Index`, `.Site`, `.SrcZone`, `.DstZone`.
+
 ### Batch Sync & Shard Management
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SYNC_INTERVAL` | `30s` | How often dirty shards are retried after a failed flush. Minimum: `5s` |
-| `SHARD_LIMIT` | `10000` | Maximum IPs per shard. When a shard is full, a new shard is created automatically |
+| `SHARD_LIMIT` | `10000` | Maximum IPs per shard (Traffic Matching List or firewall group). Effective group capacity is the smaller of `FIREWALL_GROUP_CAPACITY[_V4/_V6]` and `SHARD_LIMIT`. When a shard is full, a new shard (group plus rule or policies) is created automatically; nothing is dropped |
 | `SHARD_MERGE_THRESHOLD` | `0` | IPs at or below this count make a shard eligible for consolidation. `0` = auto (50% of `SHARD_LIMIT`). `-1` = disable rebalancing |
 | `CIRCUIT_BREAKER_THRESHOLD` | `5` | Consecutive sync failures before the circuit breaker opens |
 | `CIRCUIT_BREAKER_RESET_INTERVAL` | `60s` | Cooldown before the breaker allows a probe request |
@@ -195,8 +198,8 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATA_DIR` | `/data` | Directory for the bbolt database file |
-| `BAN_TTL` | `168h` | How long to keep a ban record if CrowdSec sends no expiry (7 days) |
-| `JANITOR_INTERVAL` | `1h` | How often the janitor prunes expired bans from bbolt |
+| `BAN_TTL` | `168h` | Maximum ban length (7 days). A decision with no duration, an unparseable one, or one longer than `BAN_TTL` expires at `now + BAN_TTL`; `BLOCK_SCENARIO_DURATION_MAP` overrides are not capped. If CrowdSec still holds the decision, a restart or the `CROWDSEC_RESYNC_INTERVAL` re-read applies it again. Also caps manual `ban --duration` and how long a failing blocklist feed keeps its bans |
+| `JANITOR_INTERVAL` | `1h` | How often the janitor lifts expired ban claims, records `expire` history events and updates `db_size_bytes`; the unban reaches UniFi at the next sync |
 | `HISTORY_MAX_EVENTS` | `10000` | Maximum audit trail events kept in the ring buffer |
 
 ### External blocklists
@@ -211,7 +214,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WEBHOOK_URL` | — | Webhook POST URL; leave empty to disable |
-| `WEBHOOK_EVENTS` | — | Comma-separated event names: `circuit_breaker_open`, `circuit_breaker_close`, `reconcile_drift` |
+| `WEBHOOK_EVENTS` | — | Comma-separated event names: `circuit_breaker_open`, `circuit_breaker_close`, `reconcile_drift`. Empty = all; an unknown name stops startup. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#webhook-notifications) for when each fires and the payload |
 
 ### Session management
 
@@ -384,12 +387,12 @@ Available at `:9090/metrics` (configurable via `METRICS_ADDR`):
 | `crowdsec_unifi_active_bans` | Gauge | Bans the bouncer tracks, labelled by site and address family, including any not yet on the controller |
 | `crowdsec_unifi_unsynced_ips` | Gauge | Bans held in shards that are not enforced yet: the shard object or its block policy/rule is missing on the controller, or the controller refused the entry itself. Alert when above 0 for more than a few minutes |
 | `crowdsec_unifi_shard_create_failures_total` | Counter | Failed attempts to create a shard object. Creates back off exponentially (30s up to 30m); the log line carries the controller's reason |
-| `crowdsec_unifi_decisions_processed_total` | Counter | Decisions received from CrowdSec, by action and origin |
+| `crowdsec_unifi_decisions_processed_total` | Counter | Decisions received from CrowdSec, labelled by `action` (`ban`, `unban`) and `source` (`stream`, `resync`) |
 | `crowdsec_unifi_decisions_filtered_total` | Counter | Decisions rejected at each filter stage |
 | `crowdsec_unifi_api_calls_total` | Counter | UniFi API calls, by endpoint and status |
 | `crowdsec_unifi_api_duration_seconds` | Histogram | UniFi API call latency |
 | `crowdsec_unifi_auth_errors_total` | Counter | Authentication failures against the UniFi controller |
-| `crowdsec_unifi_reauth_total` | Counter | Re-authentication attempts |
+| `crowdsec_unifi_reauth_total` | Counter | Successful username/password logins to the controller, including the initial login |
 | `crowdsec_unifi_reconcile_duration_seconds` | Histogram | Full reconcile duration, by trigger type |
 | `crowdsec_unifi_reconcile_delta` | Gauge | IPs added/removed during last reconcile, by site |
 | `crowdsec_unifi_firewall_group_size` | Gauge | Members per firewall group shard |
@@ -400,11 +403,13 @@ Available at `:9090/metrics` (configurable via `METRICS_ADDR`):
 | `crowdsec_unifi_dirty_shards` | Gauge | Shards pending sync at the last SyncDirty call |
 | `crowdsec_unifi_last_sync_timestamp_seconds` | Gauge | Unix timestamp of the last completed `SyncDirty` call. Use to alert when no sync has occurred for an extended period (e.g. > 5 min) |
 | `crowdsec_unifi_shard_occupancy_ratio` | Gauge | Fraction of shard capacity in use (`ip_count / shard_limit`), labelled by family, shard, site. `1.0` = shard full; alert at `> 0.9` |
-| `crowdsec_unifi_decision_latency_seconds` | Histogram | Time from a CrowdSec decision passing the filter pipeline to a successful UniFi API write. Buckets: 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0 s. Alert: p95 > 10 s indicates a controller sync bottleneck |
+| `crowdsec_unifi_decision_latency_seconds` | Histogram | Time from receiving a ban decision to recording it in the ban database and in-memory shard. Measured before the controller write, so it does not include UniFi API time; use `shard_sync_duration_seconds` and `unsynced_ips` for that. Buckets: 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0 s |
 | `crowdsec_unifi_circuit_breaker_open` | Gauge | `1` when the firewall sync circuit breaker is open (controller unreachable); `0` when closed. Alert: value == 1 for > 60 s requires immediate attention |
 | `crowdsec_unifi_shards_rebalanced_total` | Counter | Total shards drained by the rebalance pass, labelled by family and site |
 | `crowdsec_unifi_decisions_in_flight` | Gauge | Decisions currently being processed by the job handler |
 | `crowdsec_unifi_cloudflare_whitelist_sync_errors_total` | Counter | Total Cloudflare whitelist sync failures |
+
+The `shard` label is the group name (e.g. `crowdsec-block-v4-0`) on `firewall_group_size` and `shard_occupancy_ratio`, and the numeric shard index on `shard_ip_count`, `shard_sync_total` and `shard_sync_duration_seconds`.
 
 ### CrowdSec usage metrics
 
@@ -434,7 +439,7 @@ Available at `:8081` (configurable via `HEALTH_ADDR`):
 | Command | Description |
 |---------|-------------|
 | `run` | Start the daemon (default) |
-| `healthcheck` | Exit 0 if healthy; exit 1 otherwise. Used by Docker `HEALTHCHECK`. |
+| `healthcheck` | Exit 0 if healthy; exit 1 otherwise. Used by Docker `HEALTHCHECK`. Reads only `HEALTH_ADDR`, so it also works outside the daemon's environment (for example under systemd). |
 | `reconcile` | Connect to UniFi and CrowdSec, run a one-shot full reconcile, then exit |
 | `status` | Read-only bbolt inspection — prints ban counts, group/policy counts, DB size. Stop the daemon first to release the database lock. |
 | `status bans`, `status ip`, `status history` | Inspect bans and event history offline after stopping the daemon. |
@@ -582,7 +587,7 @@ SIGHUP reloads the process's current environment. Changes to `.env` or a Kuberne
 
 Filter changes stage a new block policy before removing the old one. If policy reconciliation fails after the configuration commits, the error is logged and the next reconciliation retries; some pairs may already have updated.
 
-Only zone pair changes (`ZONE_PAIRS`) are applied via SIGHUP. All other config changes require a restart. In legacy mode, SIGHUP is a no-op (logged as a warning).
+Only zone pair changes (`ZONE_PAIRS`) are applied via SIGHUP. All other config changes require a restart. In legacy mode (no site resolved to zone mode), SIGHUP logs a warning that zone reload is skipped and does nothing else.
 
 ---
 

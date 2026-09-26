@@ -133,7 +133,6 @@ type ShardManager struct {
 	store      storage.Store
 	log        zerolog.Logger
 	flushDelay time.Duration
-	flushSem   chan struct{} // shared semaphore; nil = unlimited
 	dryRun     bool
 	mode       string // "legacy" or "zone" (used for log messaging only)
 
@@ -176,7 +175,7 @@ type ShardManager struct {
 // NewShardManager creates a ShardManager. Call EnsureShards to initialize from the API.
 func NewShardManager(site string, ipv6 bool, capacity int, namer *Namer,
 	ctrl controller.Controller, store storage.Store, log zerolog.Logger,
-	flushDelay time.Duration, flushSem chan struct{}, dryRun bool, mode string) *ShardManager {
+	flushDelay time.Duration, dryRun bool, mode string) *ShardManager {
 	if mode == "" {
 		mode = "legacy"
 	}
@@ -197,7 +196,6 @@ func NewShardManager(site string, ipv6 bool, capacity int, namer *Namer,
 		store:      store,
 		log:        log,
 		flushDelay: flushDelay,
-		flushSem:   flushSem,
 		dryRun:     dryRun,
 		mode:       mode,
 		fam: &ShardFamily{
@@ -322,18 +320,24 @@ func (sm *ShardManager) addIPLocked(ip string) (owner int, allocated bool) {
 func (sm *ShardManager) RemoveIP(ip string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	if sm.removeIPLocked(ip) {
+		sm.updateMetricsLocked()
+	}
+}
 
+// removeIPLocked drops ip from its shard and the owner map, and reports
+// whether it was tracked. Callers hold sm.mu and refresh metrics.
+func (sm *ShardManager) removeIPLocked(ip string) bool {
 	family := sm.fam
 	shardIdx, owned := family.ipOwner[ip]
 	if !owned {
-		return
+		return false
 	}
-
 	if shard := sm.findShardByIndexLocked(family, shardIdx); shard != nil {
 		shard.IPs.Remove(ip)
 	}
 	delete(family.ipOwner, ip)
-	sm.updateMetricsLocked()
+	return true
 }
 
 // Add adds an IP to the manager family and returns shard details for callers

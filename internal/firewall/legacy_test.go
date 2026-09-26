@@ -23,7 +23,7 @@ func newTestLegacyManager(ctrl controller.Controller, store storage.Store, namer
 
 func ensuredV4Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
-	sm := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
+	sm := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "legacy")
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
@@ -43,7 +43,7 @@ func ensuredV4Shard(t *testing.T, ctrl controller.Controller, store storage.Stor
 
 func ensuredV6Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
-	sm := NewShardManager(testSite, true, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
+	sm := NewShardManager(testSite, true, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "legacy")
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestLegacyManager_RepairsSparseShardRuleReference(t *testing.T) {
 	if err := store.SetPolicy("crowdsec-drop-v4-3", storage.PolicyRecord{UnifiID: "rule-3", Site: testSite, Mode: "legacy"}); err != nil {
 		t.Fatal(err)
 	}
-	v4 := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
+	v4 := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "legacy")
 	if err := v4.EnsureShards(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestLegacyManager_AdoptsAndRepairsRuleWithoutCache(t *testing.T) {
 		Enabled: true, RuleIndex: 22003, Action: "drop", Ruleset: "WAN_IN",
 		Protocol: "all", SrcFirewallGroupIDs: []string{"old-group"},
 	}})
-	v4 := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
+	v4 := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "legacy")
 	if err := v4.EnsureShards(ctx); err != nil {
 		t.Fatal(err)
 	}

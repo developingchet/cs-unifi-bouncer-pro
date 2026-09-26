@@ -11,6 +11,7 @@ import (
 
 	"github.com/crowdsecurity/crowdsec/pkg/models"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/lapihttp"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 )
 
@@ -82,7 +83,7 @@ func (b *Bouncer) fetchActiveDecisions(ctx context.Context) ([]*models.Decision,
 		return nil, fmt.Errorf("build decision list request: %w", err)
 	}
 	req.Header.Set("X-Api-Key", b.cfg.CrowdSecLAPIKey)
-	req.Header.Set("User-Agent", userAgent(BinaryVersion))
+	req.Header.Set("User-Agent", lapihttp.UserAgent(BinaryVersion))
 
 	resp, err := b.lapiResyncHTTP.Do(req)
 	if err != nil {

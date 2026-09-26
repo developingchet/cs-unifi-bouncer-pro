@@ -5,11 +5,12 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
-	"text/template"
 	"time"
 
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/webhook"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/v2"
 )
@@ -47,7 +48,6 @@ type Config struct {
 	FirewallGroupCapacityV4   int           `koanf:"firewall_group_capacity_v4"`
 	FirewallGroupCapacityV6   int           `koanf:"firewall_group_capacity_v6"`
 	FirewallAPIShardDelay     time.Duration `koanf:"firewall_api_shard_delay"`
-	FirewallFlushConcurrency  int           `koanf:"firewall_flush_concurrency"`
 	FirewallLogDrops          bool          `koanf:"firewall_log_drops"`
 	FirewallConnectionStates  string        `koanf:"firewall_connection_states"`
 	FirewallReconcileOnStart  bool          `koanf:"firewall_reconcile_on_start"`
@@ -336,7 +336,6 @@ func defaults() map[string]interface{} {
 		"enable_ipv6":                    false,
 		"firewall_group_capacity":        10000,
 		"firewall_api_shard_delay":       "250ms",
-		"firewall_flush_concurrency":     1,
 		"firewall_connection_states":     "NEW,INVALID",
 		"firewall_reconcile_on_start":    true,
 		"firewall_reconcile_interval":    "10m",
@@ -372,7 +371,7 @@ func defaults() map[string]interface{} {
 		"log_format":                     "json",
 		"metrics_enabled":                true,
 		"metrics_addr":                   ":9090",
-		"health_addr":                    ":8081",
+		"health_addr":                    defaultHealthAddr,
 		"janitor_interval":               "1h",
 		"shutdown_grace_period":          "30s",
 		"health_check_lapi":              true,
@@ -383,6 +382,18 @@ func defaults() map[string]interface{} {
 		"unifi_require_https":            true,
 		"unifi_sites_auto":               false,
 	}
+}
+
+const defaultHealthAddr = ":8081"
+
+// HealthAddrFromEnv returns HEALTH_ADDR without loading the rest of the
+// configuration, so the healthcheck subcommand also works where the other
+// settings are not in its environment (a systemd EnvironmentFile).
+func HealthAddrFromEnv() string {
+	if addr := stripEnvQuotes(strings.TrimSpace(os.Getenv("HEALTH_ADDR"))); addr != "" {
+		return addr
+	}
+	return defaultHealthAddr
 }
 
 // stripEnvQuotes removes a single layer of matching surrounding single or double
@@ -465,6 +476,10 @@ func Load() (*Config, error) {
 		cfg.DeprecationWarnings = append(cfg.DeprecationWarnings,
 			"FIREWALL_BATCH_WINDOW is deprecated; use SYNC_INTERVAL instead")
 	}
+	if os.Getenv("FIREWALL_FLUSH_CONCURRENCY") != "" {
+		cfg.DeprecationWarnings = append(cfg.DeprecationWarnings,
+			"FIREWALL_FLUSH_CONCURRENCY has no effect: shards are written one at a time; remove it")
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -505,6 +520,11 @@ func (c *Config) validateController() error {
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return fmt.Errorf("UNIFI_URL must be an absolute http:// or https:// URL")
 	}
+	// Credentials belong in UNIFI_USERNAME/UNIFI_PASSWORD: a URL is printed
+	// by diagnose and by UNIFI_API_DEBUG request logs.
+	if u.User != nil {
+		return fmt.Errorf("UNIFI_URL must not contain a username or password; use UNIFI_USERNAME and UNIFI_PASSWORD")
+	}
 	if u.Scheme == "http" {
 		if c.UnifiRequireHTTPS {
 			return fmt.Errorf("UNIFI_URL uses http:// — set UNIFI_REQUIRE_HTTPS=false to allow (not recommended)")
@@ -531,6 +551,11 @@ func (c *Config) validateFirewall() error {
 	if !validModes[c.FirewallMode] {
 		return fmt.Errorf("FIREWALL_MODE must be auto, legacy, or zone; got %q", c.FirewallMode)
 	}
+	// Zone policies and traffic matching lists live on the integration API,
+	// which accepts API keys only.
+	if c.FirewallMode == "zone" && c.UnifiAPIKey == "" {
+		return fmt.Errorf("FIREWALL_MODE=zone requires UNIFI_API_KEY; a username and password can only manage legacy firewall rules")
+	}
 
 	validActions := map[string]bool{"drop": true, "reject": true}
 	if !validActions[c.FirewallBlockAction] {
@@ -540,14 +565,13 @@ func (c *Config) validateFirewall() error {
 		return err
 	}
 
-	// Validate Go templates
 	for _, pair := range []struct{ name, tmpl string }{
 		{"GROUP_NAME_TEMPLATE", c.GroupNameTemplate},
 		{"RULE_NAME_TEMPLATE", c.RuleNameTemplate},
 		{"POLICY_NAME_TEMPLATE", c.PolicyNameTemplate},
 	} {
-		if _, err := template.New("").Parse(pair.tmpl); err != nil {
-			return fmt.Errorf("%s is invalid Go template: %w", pair.name, err)
+		if err := validateNameTemplate(pair.name, pair.tmpl); err != nil {
+			return err
 		}
 	}
 
@@ -601,6 +625,9 @@ func (c *Config) validateOperational() error {
 	if lapiURL.Scheme == "http" && !isLoopbackHost(lapiURL.Hostname()) && !c.CrowdSecLAPIAllowHTTP {
 		return fmt.Errorf("CROWDSEC_LAPI_URL uses plaintext HTTP outside loopback; set CROWDSEC_LAPI_ALLOW_HTTP=true only on a trusted local network")
 	}
+	if c.MetricsEnabled && c.MetricsAddr == c.HealthAddr {
+		return fmt.Errorf("METRICS_ADDR and HEALTH_ADDR must differ; both are %q", c.MetricsAddr)
+	}
 	if len(c.UnifiSites) == 0 && !c.UnifiSitesAuto {
 		return fmt.Errorf("UNIFI_SITES must list at least one site, or set UNIFI_SITES_AUTO=true")
 	}
@@ -650,8 +677,31 @@ func (c *Config) validateTiming() error {
 	if c.ShutdownGracePeriod <= 0 {
 		return fmt.Errorf("SHUTDOWN_GRACE_PERIOD must be > 0; got %s", c.ShutdownGracePeriod)
 	}
-	if c.FirewallFlushConcurrency < 1 {
-		return fmt.Errorf("FIREWALL_FLUSH_CONCURRENCY must be >= 1; got %d", c.FirewallFlushConcurrency)
+	// A zero client timeout means no timeout, so a stalled controller would
+	// hang every sync.
+	if c.UnifiHTTPTimeout <= 0 {
+		return fmt.Errorf("UNIFI_HTTP_TIMEOUT must be > 0; got %s", c.UnifiHTTPTimeout)
+	}
+	if c.SessionReauthTimeout <= 0 {
+		return fmt.Errorf("SESSION_REAUTH_TIMEOUT must be > 0; got %s", c.SessionReauthTimeout)
+	}
+	if c.CircuitBreakerThreshold < 1 {
+		return fmt.Errorf("CIRCUIT_BREAKER_THRESHOLD must be >= 1; got %d", c.CircuitBreakerThreshold)
+	}
+	if c.CircuitBreakerResetInterval <= 0 {
+		return fmt.Errorf("CIRCUIT_BREAKER_RESET_INTERVAL must be > 0; got %s", c.CircuitBreakerResetInterval)
+	}
+	for _, d := range []struct {
+		name  string
+		value time.Duration
+	}{
+		{"FIREWALL_API_SHARD_DELAY", c.FirewallAPIShardDelay},
+		{"FIREWALL_RECONCILE_INTERVAL", c.FirewallReconcileInterval},
+		{"SESSION_REAUTH_MIN_GAP", c.SessionReauthMinGap},
+	} {
+		if d.value < 0 {
+			return fmt.Errorf("%s must not be negative; got %s", d.name, d.value)
+		}
 	}
 	if c.DecisionRateLimit < 0 {
 		return fmt.Errorf("DECISION_RATE_LIMIT must be >= 0; got %d", c.DecisionRateLimit)
@@ -676,6 +726,11 @@ func (c *Config) validateFeeds() error {
 	}
 	if c.WebhookURL != "" && !isHTTPURL(c.WebhookURL) {
 		return fmt.Errorf("WEBHOOK_URL must be an absolute http:// or https:// URL")
+	}
+	for _, event := range c.WebhookEvents {
+		if !slices.Contains(webhook.Events, event) {
+			return fmt.Errorf("WEBHOOK_EVENTS: unknown event %q; valid events are %s", event, strings.Join(webhook.Events, ", "))
+		}
 	}
 	return nil
 }
@@ -739,13 +794,13 @@ func (c *Config) InsecureLAPIURLWarning() string {
 	return ""
 }
 
-// isLoopbackHost reports whether host is the loopback address or "localhost".
 // isHTTPURL reports whether raw is an absolute http:// or https:// URL.
 func isHTTPURL(raw string) bool {
 	u, err := url.Parse(raw)
 	return err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https")
 }
 
+// isLoopbackHost reports whether host is the loopback address or "localhost".
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
@@ -780,7 +835,7 @@ func injectFileSecrets(k *koanf.Koanf) error {
 		filePath = stripEnvQuotes(filePath)
 		content, err := os.ReadFile(filePath)
 		if err != nil {
-			return fmt.Errorf("reading secret file for %s (%s): %w", key, filePath, err)
+			return fmt.Errorf("%s_FILE: cannot read %s: %w", strings.ToUpper(key), filePath, err)
 		}
 		val := strings.TrimSpace(string(content))
 		if err := k.Set(key, val); err != nil {

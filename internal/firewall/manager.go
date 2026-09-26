@@ -55,15 +55,14 @@ type Manager interface {
 
 // ManagerConfig holds all firewall manager configuration.
 type ManagerConfig struct {
-	FirewallMode     string // "auto", "legacy", "zone"
-	EnableIPv6       bool
-	GroupCapacityV4  int
-	GroupCapacityV6  int
-	DryRun           bool
-	APIShardDelay    time.Duration
-	FlushConcurrency int
-	LegacyCfg        LegacyConfig
-	ZoneCfg          ZoneConfig
+	FirewallMode    string // "auto", "legacy", "zone"
+	EnableIPv6      bool
+	GroupCapacityV4 int
+	GroupCapacityV6 int
+	DryRun          bool
+	APIShardDelay   time.Duration
+	LegacyCfg       LegacyConfig
+	ZoneCfg         ZoneConfig
 
 	// Circuit breaker settings. Zero values use defaults (5 failures, 60s reset).
 	CircuitBreakerThreshold     int
@@ -97,9 +96,6 @@ type managerImpl struct {
 	legacyMgr *LegacyManager
 	zoneMgr   *ZoneManager
 
-	// Shared semaphore for concurrent flush limiting
-	flushSem chan struct{}
-
 	// Cached resolved mode per site (avoids repeated HasFeature API calls)
 	siteMode map[string]string
 	siteMu   sync.RWMutex
@@ -125,11 +121,6 @@ type managerImpl struct {
 
 // NewManager constructs a Manager.
 func NewManager(cfg ManagerConfig, ctrl controller.Controller, store storage.Store, namer *Namer, log zerolog.Logger) Manager {
-	conc := cfg.FlushConcurrency
-	if conc < 1 {
-		conc = 1
-	}
-
 	legacyMgr := NewLegacyManager(cfg.LegacyCfg, namer, ctrl, store, log)
 	zoneMgr := NewZoneManager(cfg.ZoneCfg, namer, ctrl, store, log)
 
@@ -143,7 +134,6 @@ func NewManager(cfg ManagerConfig, ctrl controller.Controller, store storage.Sto
 		v6Mgrs:    make(map[string]*ShardManager),
 		legacyMgr: legacyMgr,
 		zoneMgr:   zoneMgr,
-		flushSem:  make(chan struct{}, conc),
 		siteMode:  make(map[string]string),
 		cb:        newCircuitBreaker(cfg.CircuitBreakerThreshold, cfg.CircuitBreakerResetInterval),
 	}
@@ -172,7 +162,7 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		m.siteMu.Unlock()
 
 		v4 := NewShardManager(site, false, v4Cap, m.namer, m.ctrl, m.store, m.log,
-			m.cfg.APIShardDelay, m.flushSem, m.cfg.DryRun, mode)
+			m.cfg.APIShardDelay, m.cfg.DryRun, mode)
 		if err := v4.EnsureShards(ctx); err != nil {
 			return fmt.Errorf("ensure v4 shards for site %s: %w", site, err)
 		}
@@ -186,7 +176,7 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 
 		if m.cfg.EnableIPv6 {
 			v6 := NewShardManager(site, true, v6Cap, m.namer, m.ctrl, m.store, m.log,
-				m.cfg.APIShardDelay, m.flushSem, m.cfg.DryRun, mode)
+				m.cfg.APIShardDelay, m.cfg.DryRun, mode)
 			if err := v6.EnsureShards(ctx); err != nil {
 				return fmt.Errorf("ensure v6 shards for site %s: %w", site, err)
 			}
@@ -363,9 +353,17 @@ func (m *managerImpl) ApplyUnban(ctx context.Context, site, ip string, ipv6 bool
 	return nil
 }
 
-// ZoneManager returns the underlying ZoneManager, or nil in legacy mode.
+// ZoneManager returns the zone manager, or nil when no site resolved to zone
+// mode, so callers such as the SIGHUP reload skip legacy-only deployments.
 func (m *managerImpl) ZoneManager() *ZoneManager {
-	return m.zoneMgr
+	m.siteMu.RLock()
+	defer m.siteMu.RUnlock()
+	for _, mode := range m.siteMode {
+		if mode == "zone" {
+			return m.zoneMgr
+		}
+	}
+	return nil
 }
 
 // ensureNewShardInfrastructure provisions the firewall rule/policy for a newly created shard.

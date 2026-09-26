@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/capabilities"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/lapihttp"
 	"github.com/rs/zerolog"
 )
 
@@ -223,7 +224,7 @@ func (r *Reporter) push(ctx context.Context) error {
 	}
 	req.Header.Set("X-Api-Key", r.apiKey)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "crowdsec-unifi-bouncer/v"+r.version)
+	req.Header.Set("User-Agent", lapihttp.UserAgent(r.version))
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {

@@ -80,14 +80,18 @@ Decisions from CrowdSec pass through eight stages before being enqueued. Each st
 
 | Stage | Condition | Rationale |
 |-------|-----------|-----------|
-| `action` | Decision action is not `ban` | Delete events are handled separately as unban jobs |
-| `scenario-exclude` | Scenario matches a configured exclude substring | Skip scenarios inappropriate for IP banning (e.g. account compromise) |
-| `origin` | Origin not in `CROWDSEC_ORIGINS` (when set) | Optionally restrict to local CrowdSec decisions |
-| `scope` | Scope is not `ip` or `range` | UniFi accepts only IP addresses and CIDRs |
-| `parse` | IP address is malformed | Defensive — reject garbage values from upstream |
-| `private-ip` | IP is RFC 1918, loopback, link-local, or ULA | Private addresses must not be blocked at the network edge |
-| `whitelist` | IP matches `BLOCK_WHITELIST` | Trusted ranges (e.g. office CGNAT) |
-| `min-duration` | Decision duration is below `BLOCK_MIN_DURATION` | Filter out short test decisions |
+| `1_action` | Decision action is neither `ban` nor `delete` | Only bans and their deletions change firewall state |
+| `2_scenario_exclude` | Scenario matches a configured exclude substring | Skip scenarios inappropriate for IP banning (e.g. account compromise) |
+| `3_origin` | Origin not in `CROWDSEC_ORIGINS` (when set) | Optionally restrict to local CrowdSec decisions |
+| `4_scope` | Scope is not `ip` or `range` | UniFi accepts only IP addresses and CIDRs |
+| `5_parse` | Required field missing (`missing_field`), IP malformed (`parse_error`), or range broader than `/8` IPv4 / `/32` IPv6 (`range_too_broad`) | Defensive — reject garbage values and oversized ranges from upstream |
+| `6_private` | IP is RFC 1918, loopback, link-local, or ULA | Private addresses must not be blocked at the network edge |
+| `7_whitelist` | IP matches `BLOCK_WHITELIST` | Trusted ranges (e.g. office CGNAT) |
+| `8_min_duration` | Decision duration is below `BLOCK_MIN_DURATION` | Filter out short test decisions |
+
+Deletions skip stages 2, 3, 6, 7 and 8. A deletion only releases the claim its own decision made (a no-op if the ban was never applied), so narrowing `BLOCK_SCENARIO_EXCLUDE`, `CROWDSEC_ORIGINS` or `BLOCK_WHITELIST` does not strand bans applied before the change.
+
+On startup, before the firewall manager loads the database, stored bans that the current `BLOCK_WHITELIST`, the private-address check or the range limit would refuse are deleted from bbolt (`banstate.DropUnbannable`), with a warning listing them. Reconcile then removes them from the controller, so a whitelist change takes effect on restart.
 
 The pipeline is implemented as a single function (`decision.Filter`) that returns a `FilterResult` struct. No goroutines, no channels — just a fast sequential check.
 
@@ -194,10 +198,11 @@ Separately, every `CROWDSEC_RESYNC_INTERVAL` (default 1 hour) the bouncer re-rea
 
 A background goroutine runs every `JANITOR_INTERVAL` (default 1 h):
 
-- Prunes expired bans from the `bans` bucket (entries older than `BAN_TTL`)
-- Calls `ApplyUnban` on the firewall manager for each pruned IP
-- Writes an `action=expire` event to the audit trail ring buffer
+- Lifts ban claims whose expiry has passed; the IP is unbanned when no claim remains, and the unban reaches UniFi at the next sync
+- Writes an `action=expire` event to the audit trail ring buffer for each lifted ban
 - Updates the `crowdsec_unifi_db_size_bytes` gauge
+
+Claim expiries are set when a decision is received: a decision with no duration, an unparseable one, or one longer than `BAN_TTL` expires at `now + BAN_TTL`. A `BLOCK_SCENARIO_DURATION_MAP` override is not capped. If CrowdSec still holds the decision, a restart or the periodic resync applies it again for another `BAN_TTL`.
 
 ### Ban History (Audit Trail)
 
@@ -211,13 +216,13 @@ These are used by the `status history` and `status ip` CLI subcommands to surfac
 
 ### External Blocklists
 
-`internal/blocklist.Manager` fetches plain-text IP/CIDR URLs on startup and on a ticker. Each URL owns a separate claim for every valid entry. Refreshing a feed extends those claims to `now + 2×interval`; if a feed remains unreachable, its claims expire. The firewall ban remains while any other feed or CrowdSec decision still claims the IP.
+`internal/blocklist.Manager` fetches plain-text IP/CIDR URLs on startup and on a ticker. Each URL owns a separate claim for every valid entry. Refreshing a feed extends those claims to `now + 2×interval`; a failed fetch keeps extending the claims from the last good fetch for up to `BAN_TTL`, after which they expire. The firewall ban remains while any other feed or CrowdSec decision still claims the IP.
 
 ### Webhook Notifications
 
 `internal/webhook.Notifier` posts a small JSON payload to a configured URL when named events are fired. The notifier is a no-op when the URL is empty or the event name is not in the allowed set. HTTP errors are logged at `warn` level and never propagate to the caller.
 
-Circuit breaker state changes (`OnCircuitBreakerOpen` / `OnCircuitBreakerClose` callbacks on `ManagerConfig`) and reconcile drift are the three currently supported event types. The callbacks are plain `func()` values — the `firewall` package has no import dependency on `webhook`.
+Circuit breaker state changes (`OnCircuitBreakerOpen` / `OnCircuitBreakerClose` callbacks on `ManagerConfig`) and reconcile drift (a periodic reconcile with `added + removed >= 100`) are the three currently supported event types. The payload is `{"event", "timestamp", "detail"}`; `detail` is `{"added", "removed"}` for `reconcile_drift` and omitted otherwise. `WEBHOOK_EVENTS` accepts only these three names. The callbacks are plain `func()` values — the `firewall` package has no import dependency on `webhook`.
 
 ---
 
@@ -240,7 +245,7 @@ Updating a firewall group requires a `PUT` request with the full member list. Is
 
 Instead, `ApplyBan` / `ApplyUnban` accumulate IP changes in memory and mark the shard as `dirty`. After every CrowdSec decision batch, `SyncDirty` flushes all dirty shards: a single `PUT` with the full updated member list per shard. Failed flushes leave the shard dirty for retry at the next `SYNC_INTERVAL` tick.
 
-New shards are created automatically when a shard reaches `FIREWALL_GROUP_CAPACITY`.
+New shards are created automatically when a shard reaches its capacity: the smaller of `FIREWALL_GROUP_CAPACITY` (or its `_V4`/`_V6` override) and `SHARD_LIMIT`.
 
 ---
 
@@ -252,7 +257,7 @@ All managed UniFi objects are named using Go `text/template` patterns configured
 - `RULE_NAME_TEMPLATE` — legacy WAN_IN rules
 - `POLICY_NAME_TEMPLATE` — zone policies
 
-Template variables include `.Family` (v4/v6), `.Index` (shard), `.Site`, `.SrcZone`, and `.DstZone`.
+Template variables include `.Family` (v4/v6), `.Index` (shard), `.Site`, `.SrcZone`, and `.DstZone`. Each template is rendered at startup for two shard indexes; startup fails if rendering errors, the name is empty, or both indexes give the same name (the template lacks `{{.Index}}`).
 
 This design allows:
 
@@ -266,11 +271,11 @@ This design allows:
 
 ### Prometheus metrics
 
-20 metrics under the `crowdsec_unifi_` namespace cover the full lifecycle:
+24 metrics under the `crowdsec_unifi_` namespace cover the full lifecycle:
 
-- **Counters**: decisions processed/filtered, API calls, auth errors, reauth attempts, shard syncs, shards rebalanced
-- **Histograms**: API call duration (per endpoint), reconcile duration (per trigger), decision latency (filter pipeline → successful UniFi write)
-- **Gauges**: active bans (per site/family), firewall group size, DB size, dirty shards, last sync timestamp, shard IP count, shard occupancy ratio, circuit breaker state, reconcile delta
+- **Counters**: decisions processed/filtered, API calls, auth errors, successful logins (reauth), shard syncs, shard create failures, shards rebalanced, Cloudflare whitelist sync errors
+- **Histograms**: API call duration (per endpoint), reconcile duration (per trigger), shard sync duration, decision latency (decision received → recorded in bbolt and the in-memory shard, before the controller write)
+- **Gauges**: active bans (per site/family), unsynced IPs, firewall group size, DB size, dirty shards, last sync timestamp, shard IP count, shard occupancy ratio, circuit breaker state, reconcile delta, decisions in flight
 
 ### CrowdSec usage metrics
 
@@ -354,7 +359,7 @@ The race detector (`go test -race ./...`) is run in CI for all packages. Concurr
 | Multi-site | No | Yes |
 | Firewall mode | Legacy only | Auto / legacy / zone |
 | Object naming | Hardcoded strings | Go templates |
-| Prometheus metrics | None | 20 `crowdsec_unifi_*` metrics |
+| Prometheus metrics | None | 24 `crowdsec_unifi_*` metrics |
 | Log redaction | None | `RedactWriter` (regex-based) |
 | Dry-run mode | No | Yes |
 | Startup reconcile | No | Yes |

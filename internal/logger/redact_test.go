@@ -107,3 +107,20 @@ func TestRedactPreservesStructuredLog(t *testing.T) {
 		t.Fatalf("unexpected redacted output: %s", got)
 	}
 }
+
+func TestRedactSessionAndTokens(t *testing.T) {
+	tests := []struct{ name, input, secret string }{
+		{"cookie header", `Cookie: unifises=s3ss10nv4lue`, "s3ss10nv4lue"},
+		{"set-cookie json", `{"set-cookie":"TOKEN=eyJhbGciOiJIUzI1NiJ9.abc; Path=/"}`, "eyJhbGciOiJIUzI1NiJ9"},
+		{"csrf header", `X-Csrf-Token: 0f1e2d3c4b5a`, "0f1e2d3c4b5a"},
+		{"updated csrf header", `"X-Updated-Csrf-Token":"9a8b7c6d"`, "9a8b7c6d"},
+		{"url token", `GET https://feeds.example/list.txt?token=feedsecret99 failed`, "feedsecret99"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := redact(tt.input); strings.Contains(got, tt.secret) {
+				t.Errorf("secret not redacted: %q", got)
+			}
+		})
+	}
+}
