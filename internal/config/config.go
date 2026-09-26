@@ -615,6 +615,15 @@ func (c *Config) Validate() error {
 	if len(c.BlocklistURLs) > 0 && c.BlocklistRefreshInterval <= 0 {
 		return fmt.Errorf("BLOCKLIST_REFRESH_INTERVAL must be > 0 when BLOCKLIST_URLS is set")
 	}
+	// Entries are named by position, never echoed: these URLs often carry tokens.
+	for i, raw := range c.BlocklistURLs {
+		if !isHTTPURL(raw) {
+			return fmt.Errorf("BLOCKLIST_URLS entry %d must be an absolute http:// or https:// URL", i+1)
+		}
+	}
+	if c.WebhookURL != "" && !isHTTPURL(c.WebhookURL) {
+		return fmt.Errorf("WEBHOOK_URL must be an absolute http:// or https:// URL")
+	}
 
 	// Validate Cloudflare whitelist config
 	if c.CloudflareWhitelistEnabled {
@@ -672,6 +681,12 @@ func (c *Config) InsecureLAPIURLWarning() string {
 }
 
 // isLoopbackHost reports whether host is the loopback address or "localhost".
+// isHTTPURL reports whether raw is an absolute http:// or https:// URL.
+func isHTTPURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https")
+}
+
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true

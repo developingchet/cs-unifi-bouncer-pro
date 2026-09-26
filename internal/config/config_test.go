@@ -129,6 +129,39 @@ func TestLoadRejectsNonPositiveBlocklistRefresh(t *testing.T) {
 	}
 }
 
+func TestLoadValidatesFeedAndWebhookURLs(t *testing.T) {
+	tests := []struct {
+		name, env, value, wantErr string
+	}{
+		{name: "valid feed", env: "BLOCKLIST_URLS", value: "https://example.com/list.txt?token=secret"},
+		{name: "feed without scheme", env: "BLOCKLIST_URLS", value: "https://ok.example/a,example.com/list.txt?token=secret", wantErr: "BLOCKLIST_URLS entry 2"},
+		{name: "feed with other scheme", env: "BLOCKLIST_URLS", value: "file:///etc/passwd", wantErr: "BLOCKLIST_URLS entry 1"},
+		{name: "valid webhook", env: "WEBHOOK_URL", value: "https://hooks.example/abc"},
+		{name: "webhook without host", env: "WEBHOOK_URL", value: "https://", wantErr: "WEBHOOK_URL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("UNIFI_URL", "https://192.168.1.1")
+			t.Setenv("UNIFI_API_KEY", "key")
+			t.Setenv("CROWDSEC_LAPI_KEY", "lapi-key")
+			t.Setenv(tt.env, tt.value)
+			_, err := Load()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Load = %v, want success", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Load = %v, want error mentioning %q", err, tt.wantErr)
+			}
+			if strings.Contains(err.Error(), "secret") {
+				t.Errorf("error leaks the URL token: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsInvalidControllerURL(t *testing.T) {
 	for _, raw := range []string{"ftp://controller.example", "controller.example", "https://"} {
 		t.Run(raw, func(t *testing.T) {

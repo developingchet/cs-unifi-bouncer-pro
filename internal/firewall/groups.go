@@ -511,11 +511,17 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 func (sm *ShardManager) AddIP(_ context.Context, ip, ipFamily string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	sm.addIPLocked(ip, ipFamily)
+	return nil
+}
 
+// addIPLocked places ip and returns the index of the shard that holds it and
+// whether that shard was allocated by this call. Callers hold sm.mu.
+func (sm *ShardManager) addIPLocked(ip, ipFamily string) (owner int, allocated bool) {
 	family := sm.familyStateLocked(ipFamily)
 
-	if _, owned := family.ipOwner[ip]; owned {
-		return nil
+	if idx, owned := family.ipOwner[ip]; owned {
+		return idx, false
 	}
 
 	for _, shard := range family.Shards {
@@ -526,7 +532,7 @@ func (sm *ShardManager) AddIP(_ context.Context, ip, ipFamily string) error {
 			shard.IPs.Add(ip)
 			family.ipOwner[ip] = shard.Index
 			sm.updateMetricsLocked()
-			return nil
+			return shard.Index, false
 		}
 	}
 
@@ -542,7 +548,7 @@ func (sm *ShardManager) AddIP(_ context.Context, ip, ipFamily string) error {
 	shard.IPs.Add(ip)
 	family.ipOwner[ip] = shard.Index
 	sm.updateMetricsLocked()
-	return nil
+	return shard.Index, true
 }
 
 // RemoveIP removes ip from whichever shard owns it. No-op if not tracked.
@@ -565,32 +571,19 @@ func (sm *ShardManager) RemoveIP(ip, ipFamily string) {
 
 // Add adds an IP to the manager family and returns shard details for callers
 // that need to provision rule/policy infrastructure when a new shard appears.
-func (sm *ShardManager) Add(ctx context.Context, ip string) (shardName string, newShardIdx int, err error) {
-	sm.mu.RLock()
-	family := sm.families[sm.family]
-	before := len(family.Shards)
-	sm.mu.RUnlock()
-
-	if err := sm.AddIP(ctx, ip, sm.family); err != nil {
-		return "", -1, err
-	}
-
-	sm.mu.RLock()
-	family = sm.families[sm.family]
-	ownerIdx, owned := family.ipOwner[ip]
-	after := len(family.Shards)
-	sm.mu.RUnlock()
-	if !owned {
-		return "", -1, nil
-	}
+// newShardIdx is the index of a shard this call allocated, or -1. It is
+// decided under the lock, so concurrent adds never both report one shard.
+func (sm *ShardManager) Add(_ context.Context, ip string) (shardName string, newShardIdx int, err error) {
+	sm.mu.Lock()
+	ownerIdx, allocated := sm.addIPLocked(ip, sm.family)
+	sm.mu.Unlock()
 
 	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: ownerIdx, Site: sm.site})
 	if err != nil {
 		return "", -1, err
 	}
-
 	newShardIdx = -1
-	if after > before && ownerIdx >= before {
+	if allocated {
 		newShardIdx = ownerIdx
 	}
 	return name, newShardIdx, nil

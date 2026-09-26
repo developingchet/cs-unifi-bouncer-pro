@@ -89,17 +89,12 @@ func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards,
 	// match what the bouncer creates — a rule the bouncer couldn't have made is
 	// never touched even if its description coincidentally matches.
 	for _, r := range existingRules {
-		if r.Description != lm.cfg.Description {
-			continue
+		owned, err := lm.ownsRule(site, r)
+		if err != nil {
+			return err
 		}
-		if prefix := lm.namer.RulePrefix(); prefix == "" || !strings.HasPrefix(r.Name, prefix) {
-			cached, err := getCachedPolicy(lm.store, site, r.Name)
-			if err != nil {
-				return fmt.Errorf("check rule ownership %s: %w", r.Name, err)
-			}
-			if cached == nil || cached.UnifiID != r.ID || cached.Site != site || cached.Mode != "legacy" {
-				continue
-			}
+		if !owned {
+			continue
 		}
 		if r.Action != lm.cfg.BlockAction {
 			continue // the bouncer only creates rules with the configured block action
@@ -126,6 +121,28 @@ func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards,
 		}
 	}
 	return provisionFailure(failed)
+}
+
+// ownsRule reports whether the orphan sweep may treat r as the bouncer's own.
+// A rule with the managed description is owned when it carries the managed
+// name prefix or is cached by ID. The classic API does not store
+// descriptions, so an empty one proves nothing: such a rule is owned only when
+// the cache holds its exact ID. Without the cache it is left alone.
+func (lm *LegacyManager) ownsRule(site string, r controller.FirewallRule) (bool, error) {
+	switch r.Description {
+	case lm.cfg.Description:
+		if prefix := lm.namer.RulePrefix(); prefix != "" && strings.HasPrefix(r.Name, prefix) {
+			return true, nil
+		}
+	case "":
+	default:
+		return false, nil
+	}
+	cached, err := getCachedPolicy(lm.store, site, r.Name)
+	if err != nil {
+		return false, fmt.Errorf("check rule ownership %s: %w", r.Name, err)
+	}
+	return cached != nil && cached.UnifiID == r.ID && cached.Site == site && cached.Mode == "legacy", nil
 }
 
 // ensureRulesForFamily ensures the drop rule of every active shard in one

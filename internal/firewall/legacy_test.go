@@ -400,6 +400,45 @@ func TestLegacyManager_EnsureRules_OrphanedAPIRule_Deleted(t *testing.T) {
 	}
 }
 
+// TestLegacyManager_EnsureRules_OrphanWithoutDescription covers the classic
+// API, which does not store descriptions: an orphan the bouncer cached by ID
+// is swept, but an undescribed rule it has no record of is never deleted, even
+// when its name looks managed.
+func TestLegacyManager_EnsureRules_OrphanWithoutDescription(t *testing.T) {
+	tests := []struct {
+		name       string
+		cached     bool
+		wantDelete bool
+	}{
+		{name: "cached by ID: swept", cached: true, wantDelete: true},
+		{name: "no record: kept", cached: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := testutil.NewMockController()
+			store := newBboltStore(t)
+			v4 := ensuredV4Shard(t, ctrl, store)
+			lm := newTestLegacyManager(ctrl, store, testNamer(t))
+			orphan := controller.FirewallRule{
+				ID: "orphan-rule-id", Name: "crowdsec-drop-v4-9",
+				Ruleset: "WAN_IN", Action: "drop", SrcFirewallGroupIDs: []string{"gone-group"},
+			}
+			ctrl.SetRules(testSite, []controller.FirewallRule{orphan})
+			if tt.cached {
+				if err := setCachedPolicy(store, testSite, orphan.Name, storage.PolicyRecord{UnifiID: orphan.ID, Site: testSite, Mode: "legacy"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := lm.EnsureRules(context.Background(), testSite, v4, nil); err != nil {
+				t.Fatalf("EnsureRules: %v", err)
+			}
+			if got := ctrl.Calls("DeleteFirewallRule") == 1; got != tt.wantDelete {
+				t.Errorf("orphan deleted = %v, want %v", got, tt.wantDelete)
+			}
+		})
+	}
+}
+
 // TestLegacyManager_EnsureRules_UnmanagedAPIRule_Preserved verifies that a
 // pre-existing rule with a different description is left alone by the orphan sweep.
 func TestLegacyManager_EnsureRules_UnmanagedAPIRule_Preserved(t *testing.T) {

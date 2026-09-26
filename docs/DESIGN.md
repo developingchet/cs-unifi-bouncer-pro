@@ -186,7 +186,7 @@ On startup (when `FIREWALL_RECONCILE_ON_START=true`), once the first CrowdSec st
 3. Computes the symmetric difference
 4. Adds missing IPs and removes unexpected IPs
 
-This corrects drift caused by manual edits, controller restarts, or bouncer downtime. Waiting for the first batch matters when the database is new or was lost: until the LAPI resends the active decisions, bbolt holds none of them, and an earlier reconcile would remove every enforced ban from the controller. The periodic reconcile starts after the startup one. The reconcile result is logged and recorded in the `crowdsec_unifi_reconcile_duration_seconds` histogram.
+This corrects drift caused by manual edits, controller restarts, or bouncer downtime. Waiting for the first batch matters when the database is new or was lost: until the LAPI resends the active decisions, bbolt holds none of them, and an earlier reconcile would remove every enforced ban from the controller. If no batch arrives within 5 minutes (the LAPI is unreachable) and the database already holds bans, the reconciles start anyway from that database; an empty database keeps waiting. The periodic reconcile starts after the startup one. The reconcile result is logged and recorded in the `crowdsec_unifi_reconcile_duration_seconds` histogram.
 
 ### Janitor
 

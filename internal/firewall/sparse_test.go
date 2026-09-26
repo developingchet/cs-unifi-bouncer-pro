@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -113,6 +114,48 @@ func TestCreateShardObject_EmptyIDAdoptsExisting(t *testing.T) {
 				t.Fatalf("doCreateUniFiGroup = %q, %v; want %q, err %v", id, err, tt.wantID, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestAdd_ReportsEachNewShardOnce verifies that concurrent adds report every
+// allocated shard exactly once, so its policy or rule is provisioned once.
+func TestAdd_ReportsEachNewShardOnce(t *testing.T) {
+	sm := NewShardManager(testSite, false, 3, zoneTestNamer(t), testutil.NewMockController(), testutil.NewMockStore(), zerolog.Nop(), 0, nil, false, "zone")
+	if err := sm.EnsureShards(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	const adds = 60
+	reported := make(chan int, adds)
+	var wg sync.WaitGroup
+	for i := range adds {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, idx, err := sm.Add(context.Background(), fmt.Sprintf("203.0.113.%d", i+1))
+			if err != nil {
+				t.Error(err)
+			}
+			if idx >= 0 {
+				reported <- idx
+			}
+		}()
+	}
+	wg.Wait()
+	close(reported)
+	seen := map[int]int{}
+	for idx := range reported {
+		seen[idx]++
+	}
+	sm.mu.RLock()
+	shards := len(sm.families["v4"].Shards)
+	sm.mu.RUnlock()
+	if len(seen) != shards {
+		t.Errorf("reported %d new shards, allocated %d", len(seen), shards)
+	}
+	for idx, n := range seen {
+		if n != 1 {
+			t.Errorf("shard %d reported as new %d times", idx, n)
+		}
 	}
 }
 

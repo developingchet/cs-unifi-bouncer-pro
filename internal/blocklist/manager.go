@@ -38,7 +38,7 @@ func NewManager(urls []string, interval time.Duration, claims *banstate.Manager,
 	return &Manager{
 		urls: urls, interval: interval, claims: claims,
 		protected: protected, dryRun: dryRun, log: log,
-		client: &http.Client{Timeout: 30 * time.Second},
+		client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: checkFeedRedirect},
 	}
 }
 
