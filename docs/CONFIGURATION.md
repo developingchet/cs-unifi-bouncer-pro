@@ -422,7 +422,7 @@ The bouncer can periodically fetch plain-text IP/CIDR blocklists from external U
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BLOCKLIST_URLS` | — | Comma-separated list of URLs to fetch. Each URL must return a plain-text list with one IP address or CIDR per line. Lines beginning with `#` and blank lines are ignored. |
+| `BLOCKLIST_URLS` | — | Comma-separated list of URLs to fetch. Each URL must return a plain-text list with one IP address or CIDR per line. Anything after `#` or `;` is a comment, so annotated feeds such as Spamhaus DROP (`192.0.2.0/24 ; SBL123`) work; only the first field of a line is read. A `/32` or `/128` entry is stored as the bare address. Blank and comment-only lines are ignored. |
 | `BLOCKLIST_REFRESH_INTERVAL` | `24h` | How often to re-fetch and re-apply each URL. Bans applied from external blocklists have their expiry set to `now + 2×BLOCKLIST_REFRESH_INTERVAL`, so they auto-expire if the URL becomes unreachable. |
 
 ```bash

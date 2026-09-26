@@ -690,7 +690,7 @@ Common causes:
 |-------------|-------|-----|
 | `fetch ... connection refused` | URL unreachable from container | Verify outbound internet access; check the URL manually with `curl` |
 | `unexpected status 404` | URL returns non-200 | Verify the URL is correct |
-| `0 valid entries` | All lines are invalid or commented | Check the feed format (one IP or CIDR per line; `#` comments are skipped) |
+| `0 valid entries` | All lines are invalid or commented | Check the feed format (one IP or CIDR per line; text after `#` or `;` is a comment) |
 
 Blocklist bans are applied on startup and then every `BLOCKLIST_REFRESH_INTERVAL`. To force an immediate refresh, restart the container.
 

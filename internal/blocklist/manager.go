@@ -97,8 +97,8 @@ func (m *Manager) fetchURL(ctx context.Context, url string) error {
 	var skipped int
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		line := feedLineValue(scanner.Text())
+		if line == "" {
 			continue
 		}
 		ip, ipv6, ok := parseEntry(line)
@@ -130,6 +130,21 @@ func (m *Manager) fetchURL(ctx context.Context, url string) error {
 	m.log.Info().Str("url", display).Int("entries", len(entries)).Int("new", added).
 		Int("skipped", skipped).Msg("blocklist: fetch complete")
 	return nil
+}
+
+// feedLineValue returns the address field of a feed line: the text before
+// any "#" or ";" comment, up to the first whitespace. Common feeds annotate
+// entries inline (Spamhaus DROP: "192.0.2.0/24 ; SBL123"), and those lines
+// used to be skipped as unparseable. "" means the line holds no entry.
+func feedLineValue(line string) string {
+	if i := strings.IndexAny(line, "#;"); i >= 0 {
+		line = line[:i]
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
 }
 
 // parseEntry canonicalises one feed line the same way CrowdSec decisions are,
