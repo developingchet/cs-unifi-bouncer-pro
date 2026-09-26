@@ -170,30 +170,40 @@ func (sm *ShardManager) createPendingShard(ctx context.Context, shard *Shard, ip
 	return true, nil
 }
 
-// lookupTMLByName returns the ID of the TML named name, "" if there is none,
-// or the listing error.
+// Shard objects carry no description field on either API, so the name is the
+// only ownership marker. The adoption lookups below also require the shard's
+// own object type, so a same-named object of another kind (a port list, a
+// group of the other address family) is never taken over and overwritten.
+
+// lookupTMLByName returns the ID of the address TML of this family named
+// name, "" if there is none, or the listing error.
 func (sm *ShardManager) lookupTMLByName(ctx context.Context, name string) (string, error) {
 	tmls, err := sm.ctrl.ListTrafficMatchingLists(ctx, sm.site)
 	if err != nil {
 		return "", err
 	}
+	want := tmlTypeForFamily(Family(sm.ipv6))
 	for _, t := range tmls {
-		if t.Name == name {
+		if t.Name == name && t.Type == want {
 			return t.ID, nil
 		}
 	}
 	return "", nil
 }
 
-// lookupGroupByName returns the ID of the firewall group named name, "" if
-// there is none, or the listing error.
+// lookupGroupByName returns the ID of the address group of this family named
+// name, "" if there is none, or the listing error.
 func (sm *ShardManager) lookupGroupByName(ctx context.Context, name string) (string, error) {
 	groups, err := sm.ctrl.ListFirewallGroups(ctx, sm.site)
 	if err != nil {
 		return "", err
 	}
+	want := "address-group"
+	if sm.ipv6 {
+		want = "ipv6-address-group"
+	}
 	for _, g := range groups {
-		if g.Name == name {
+		if g.Name == name && g.GroupType == want {
 			return g.ID, nil
 		}
 	}

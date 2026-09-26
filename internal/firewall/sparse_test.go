@@ -178,6 +178,11 @@ func TestCreateShardObject_RefusedCreateAdoptsExisting(t *testing.T) {
 			listed: []controller.TrafficMatchingList{tmlWith("existing", "crowdsec-block-v4-0")}, wantID: "existing",
 		},
 		{
+			name:      "same name but a port list: not adopted",
+			createErr: errors.New("UniFi API returned HTTP 400: name already in use"), wantLookup: true, wantErr: true,
+			listed: []controller.TrafficMatchingList{{ID: "ports", Name: "crowdsec-block-v4-0", Type: "PORTS"}},
+		},
+		{
 			name:      "refused and nothing listed: create error kept",
 			createErr: errors.New("UniFi API returned HTTP 422: too many lists"), wantLookup: true, wantErr: true,
 		},
