@@ -3,12 +3,23 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 func setEnv(t *testing.T, key, val string) {
 	t.Helper()
 	t.Setenv(key, val)
+}
+
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	t.Setenv(key, "")
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestStripEnvQuotes(t *testing.T) {
@@ -33,12 +44,9 @@ func TestStripEnvQuotes(t *testing.T) {
 }
 
 func TestLoadMissingRequired(t *testing.T) {
-	// Clear any env vars that might be set
-	os.Unsetenv("UNIFI_URL")
-	os.Unsetenv("CROWDSEC_LAPI_KEY")
-	os.Unsetenv("UNIFI_API_KEY")
-	os.Unsetenv("UNIFI_USERNAME")
-	os.Unsetenv("UNIFI_PASSWORD")
+	for _, key := range []string{"UNIFI_URL", "CROWDSEC_LAPI_KEY", "UNIFI_API_KEY", "UNIFI_USERNAME", "UNIFI_PASSWORD"} {
+		unsetEnv(t, key)
+	}
 
 	_, err := Load()
 	if err == nil {
@@ -60,6 +68,142 @@ func TestLoadMinimalValid(t *testing.T) {
 	}
 	if cfg.UnifiAPIKey != "my-api-key" {
 		t.Errorf("UnifiAPIKey: got %q", cfg.UnifiAPIKey)
+	}
+	if !cfg.UnifiVerifyTLS {
+		t.Fatal("controller TLS verification should be enabled by default")
+	}
+	if !cfg.HealthCheckLAPI {
+		t.Fatal("LAPI readiness checks should be enabled by default")
+	}
+}
+
+func TestLoadRequiresHTTPSByDefault(t *testing.T) {
+	t.Setenv("UNIFI_URL", "http://192.168.1.1")
+	t.Setenv("UNIFI_API_KEY", "key")
+	t.Setenv("CROWDSEC_LAPI_KEY", "lapi-key")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "UNIFI_REQUIRE_HTTPS=false") {
+		t.Fatalf("HTTP controller should require explicit opt-out, got %v", err)
+	}
+	t.Setenv("UNIFI_REQUIRE_HTTPS", "false")
+	if _, err := Load(); err != nil {
+		t.Fatalf("explicit HTTP opt-out failed: %v", err)
+	}
+}
+
+func TestLoadRequiresExplicitNonLoopbackLAPIHTTP(t *testing.T) {
+	t.Setenv("UNIFI_URL", "https://192.168.1.1")
+	t.Setenv("UNIFI_API_KEY", "key")
+	t.Setenv("CROWDSEC_LAPI_KEY", "lapi-key")
+	t.Setenv("CROWDSEC_LAPI_URL", "http://crowdsec:8080")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CROWDSEC_LAPI_ALLOW_HTTP") {
+		t.Fatalf("plaintext LAPI was accepted: %v", err)
+	}
+	t.Setenv("CROWDSEC_LAPI_ALLOW_HTTP", "true")
+	if _, err := Load(); err != nil {
+		t.Fatalf("explicit same-host HTTP opt-in failed: %v", err)
+	}
+}
+
+func TestLoadRejectsScenarioZoneOverrides(t *testing.T) {
+	t.Setenv("UNIFI_URL", "https://192.168.1.1")
+	t.Setenv("UNIFI_API_KEY", "key")
+	t.Setenv("CROWDSEC_LAPI_KEY", "lapi-key")
+	t.Setenv("ZONE_PAIRS_SCENARIO_MAP", "ssh-bf=External->Internal")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ZONE_PAIRS_SCENARIO_MAP") {
+		t.Fatalf("unsupported override was accepted: %v", err)
+	}
+}
+
+func TestLoadRejectsNonPositiveBlocklistRefresh(t *testing.T) {
+	for _, interval := range []string{"0s", "-1s"} {
+		t.Run(interval, func(t *testing.T) {
+			t.Setenv("UNIFI_URL", "https://192.168.1.1")
+			t.Setenv("UNIFI_API_KEY", "key")
+			t.Setenv("CROWDSEC_LAPI_KEY", "lapi-key")
+			t.Setenv("BLOCKLIST_URLS", "https://example.com/list.txt")
+			t.Setenv("BLOCKLIST_REFRESH_INTERVAL", interval)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "BLOCKLIST_REFRESH_INTERVAL") {
+				t.Fatalf("Load with interval %q = %v, want validation error", interval, err)
+			}
+		})
+	}
+}
+
+func TestLoadValidatesFeedAndWebhookURLs(t *testing.T) {
+	tests := []struct {
+		name, env, value, wantErr string
+	}{
+		{name: "valid feed", env: "BLOCKLIST_URLS", value: "https://example.com/list.txt?token=secret"},
+		{name: "feed without scheme", env: "BLOCKLIST_URLS", value: "https://ok.example/a,example.com/list.txt?token=secret", wantErr: "BLOCKLIST_URLS entry 2"},
+		{name: "feed with other scheme", env: "BLOCKLIST_URLS", value: "file:///etc/passwd", wantErr: "BLOCKLIST_URLS entry 1"},
+		{name: "valid webhook", env: "WEBHOOK_URL", value: "https://hooks.example/abc"},
+		{name: "webhook without host", env: "WEBHOOK_URL", value: "https://", wantErr: "WEBHOOK_URL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("UNIFI_URL", "https://192.168.1.1")
+			t.Setenv("UNIFI_API_KEY", "key")
+			t.Setenv("CROWDSEC_LAPI_KEY", "lapi-key")
+			t.Setenv(tt.env, tt.value)
+			_, err := Load()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Load = %v, want success", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Load = %v, want error mentioning %q", err, tt.wantErr)
+			}
+			if strings.Contains(err.Error(), "secret") {
+				t.Errorf("error leaks the URL token: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsInvalidControllerURL(t *testing.T) {
+	for _, raw := range []string{"ftp://controller.example", "controller.example", "https://"} {
+		t.Run(raw, func(t *testing.T) {
+			if err := (&Config{UnifiURL: raw}).Validate(); err == nil || !strings.Contains(err.Error(), "UNIFI_URL") {
+				t.Fatalf("Validate(%q) = %v, want URL error", raw, err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsMisspelledCloudflareFlag(t *testing.T) {
+	t.Setenv("CLOUDFLARE_ZWHITELIST_ENABLED", "true")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CLOUDFLARE_WHITELIST_ENABLED") {
+		t.Fatalf("Load error = %v, want corrected flag name", err)
+	}
+}
+
+func TestParseFirewallConnectionStates(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  []string
+		bad   bool
+	}{
+		{input: "NEW,INVALID", want: []string{"NEW", "INVALID"}},
+		{input: "all"},
+		{input: "NEW,NEW", bad: true},
+		{input: "NEW,BOGUS", bad: true},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			got, err := (&Config{FirewallConnectionStates: tc.input}).ParseFirewallConnectionStates()
+			if (err != nil) != tc.bad || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("states = %v, %v; want %v, bad=%v", got, err, tc.want, tc.bad)
+			}
+		})
+	}
+}
+
+func TestParseZonePairsRejectsAmbiguousSeparator(t *testing.T) {
+	for _, raw := range []string{"External:80,443->Internal,External->DMZ", "External->Internal@10.0.0.1,", "External->Internal;", "External->Internal,"} {
+		if _, err := parseZonePairList(splitZonePairList(raw)); err == nil {
+			t.Errorf("ambiguous zone pairs %q should fail", raw)
+		}
 	}
 }
 
@@ -222,11 +366,11 @@ func TestParseCloudflareZonePairs(t *testing.T) {
 // This is the coverage gap that allowed the DstIPs-not-applied bug to ship.
 func TestParseCloudflareZonePairs_DstIPs(t *testing.T) {
 	cases := []struct {
-		name       string
-		input      string
-		wantSrc    string
-		wantDst    string
-		wantDstIPs []string
+		name         string
+		input        string
+		wantSrc      string
+		wantDst      string
+		wantDstIPs   []string
 		wantDstPorts []int
 	}{
 		{
@@ -410,6 +554,19 @@ func TestInvalidZonePairs(t *testing.T) {
 	}
 }
 
+func TestZoneModeRequiresAPIKey(t *testing.T) {
+	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
+	setEnv(t, "UNIFI_USERNAME", "admin")
+	setEnv(t, "UNIFI_PASSWORD", "secret")
+	setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
+	setEnv(t, "FIREWALL_MODE", "zone")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "FIREWALL_MODE=zone requires UNIFI_API_KEY") {
+		t.Fatalf("Load() error = %v, want the zone mode API key error", err)
+	}
+}
+
 func TestInvalidFirewallMode(t *testing.T) {
 	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
 	setEnv(t, "UNIFI_API_KEY", "key")
@@ -438,10 +595,9 @@ func TestDefaults(t *testing.T) {
 	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
 	setEnv(t, "UNIFI_API_KEY", "key")
 	setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
-	// Clear any previously set env vars that override defaults
-	os.Unsetenv("FIREWALL_MODE")
-	os.Unsetenv("ZONE_PAIRS")
-	os.Unsetenv("GROUP_NAME_TEMPLATE")
+	for _, key := range []string{"FIREWALL_MODE", "ZONE_PAIRS", "GROUP_NAME_TEMPLATE"} {
+		unsetEnv(t, key)
+	}
 
 	cfg, err := Load()
 	if err != nil {
@@ -479,6 +635,7 @@ func TestMultiSiteConfig(t *testing.T) {
 func TestLoad_QuotedEnvValues(t *testing.T) {
 	setEnv(t, "CROWDSEC_LAPI_KEY", "'test-key'")
 	setEnv(t, "CROWDSEC_LAPI_URL", "'http://crowdsec:8080'")
+	setEnv(t, "CROWDSEC_LAPI_ALLOW_HTTP", "true")
 	setEnv(t, "UNIFI_URL", "'https://192.168.1.1'")
 	setEnv(t, "UNIFI_API_KEY", `"test-api-key"`)
 
@@ -507,16 +664,12 @@ func baseEnv(t *testing.T) {
 	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
 	setEnv(t, "UNIFI_API_KEY", "key")
 	setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
-	// Reset fields that the new validation touches to their valid defaults
-	os.Unsetenv("LOG_LEVEL")
-	os.Unsetenv("LOG_FORMAT")
-	os.Unsetenv("BLOCK_WHITELIST")
-	os.Unsetenv("CROWDSEC_LAPI_URL")
-	os.Unsetenv("FIREWALL_GROUP_CAPACITY")
-	os.Unsetenv("BAN_TTL")
-	os.Unsetenv("JANITOR_INTERVAL")
-	os.Unsetenv("FIREWALL_MODE")
-	os.Unsetenv("ZONE_PAIRS")
+	for _, key := range []string{
+		"LOG_LEVEL", "LOG_FORMAT", "BLOCK_WHITELIST", "CROWDSEC_LAPI_URL",
+		"FIREWALL_GROUP_CAPACITY", "BAN_TTL", "JANITOR_INTERVAL", "FIREWALL_MODE", "ZONE_PAIRS",
+	} {
+		unsetEnv(t, key)
+	}
 }
 
 func TestValidation(t *testing.T) {
@@ -629,7 +782,7 @@ func TestValidation(t *testing.T) {
 func TestDeprecationAlias_FirewallBatchWindow(t *testing.T) {
 	baseEnv(t)
 	t.Setenv("FIREWALL_BATCH_WINDOW", "60s")
-	os.Unsetenv("SYNC_INTERVAL")
+	unsetEnv(t, "SYNC_INTERVAL")
 
 	cfg, err := Load()
 	if err != nil {
@@ -724,20 +877,20 @@ func TestParseZonePairs_DstIPs(t *testing.T) {
 			wantIPs: []string{"10.0.0.0/24"},
 		},
 		{
-			name:    "dst port plus dst IP",
-			pair:    "External->Internal:443@10.0.0.5,10.0.0.6",
-			wantSrc: "External",
-			wantDst: "Internal",
+			name:      "dst port plus dst IP",
+			pair:      "External->Internal:443@10.0.0.5,10.0.0.6",
+			wantSrc:   "External",
+			wantDst:   "Internal",
 			wantDstPs: []int{443},
-			wantIPs: []string{"10.0.0.5", "10.0.0.6"},
+			wantIPs:   []string{"10.0.0.5", "10.0.0.6"},
 		},
 		{
-			name:    "src port plus dst port plus dst IP",
-			pair:    "External:80->Internal:443@10.0.0.0/24",
-			wantSrc: "External",
-			wantDst: "Internal",
+			name:      "src port plus dst port plus dst IP",
+			pair:      "External:80->Internal:443@10.0.0.0/24",
+			wantSrc:   "External",
+			wantDst:   "Internal",
 			wantDstPs: []int{443},
-			wantIPs: []string{"10.0.0.0/24"},
+			wantIPs:   []string{"10.0.0.0/24"},
 		},
 		{
 			name:    "multiple IPs no port",
@@ -817,5 +970,66 @@ func TestParseZonePairs_DstIPs_MultiPair(t *testing.T) {
 	}
 	if len(pairs[1].DstIPs) != 1 || pairs[1].DstIPs[0] != "10.0.0.0/24" {
 		t.Errorf("second pair: DstIPs = %v, want [10.0.0.0/24]", pairs[1].DstIPs)
+	}
+}
+
+func TestParseScenarioDurationMapSeparators(t *testing.T) {
+	for _, input := range []string{"ssh-bf=168h,http-probing=24h", "ssh-bf=168h;http-probing=24h"} {
+		got, err := parseScenarioDurationMap(input)
+		if err != nil {
+			t.Fatalf("parse %q: %v", input, err)
+		}
+		if got["ssh-bf"] != 168*time.Hour || got["http-probing"] != 24*time.Hour {
+			t.Errorf("duration map %q parsed as %v", input, got)
+		}
+	}
+}
+
+func TestParseScenarioDurationMapRejectsInvalidEntries(t *testing.T) {
+	for _, input := range []string{"ssh-bf=-1h", "ssh-bf=24", "ssh-bf", "=24h", "ssh-bf=24h,http"} {
+		t.Run(input, func(t *testing.T) {
+			if got, err := parseScenarioDurationMap(input); err == nil {
+				t.Errorf("accepted %q as %v", input, got)
+			}
+		})
+	}
+}
+
+func TestValidateRuntimeLimits(t *testing.T) {
+	tests := []struct {
+		name   string
+		modify func(*Config)
+	}{
+		{"empty sites", func(c *Config) { c.UnifiSites = nil }},
+		{"zero poll interval", func(c *Config) { c.CrowdSecPollInterval = 0 }},
+		{"zero shutdown grace", func(c *Config) { c.ShutdownGracePeriod = 0 }},
+		{"negative rate limit", func(c *Config) { c.DecisionRateLimit = -1 }},
+		{"rate limit without burst", func(c *Config) { c.DecisionRateLimit = 10; c.DecisionBurstSize = 0 }},
+		{"cloudflare whitelist in legacy mode", func(c *Config) {
+			c.CloudflareWhitelistEnabled = true
+			c.CloudflareZonePairs = []string{"External->Internal"}
+			c.FirewallMode = "legacy"
+		}},
+		{"cloudflare whitelist without API key", func(c *Config) {
+			c.CloudflareWhitelistEnabled = true
+			c.CloudflareZonePairs = []string{"External->Internal"}
+			c.UnifiAPIKey = ""
+			c.UnifiUsername, c.UnifiPassword = "admin", "secret"
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setEnv(t, "UNIFI_URL", "https://192.168.1.1")
+			setEnv(t, "UNIFI_API_KEY", "my-api-key")
+			setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			tc.modify(cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Error("expected validation error")
+			}
+		})
 	}
 }

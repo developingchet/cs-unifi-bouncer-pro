@@ -6,9 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/testutil"
 	"github.com/rs/zerolog"
 )
@@ -30,26 +32,11 @@ type mockFirewallManager struct {
 	siteErrors map[string]error
 	// bannedSites tracks which sites had ApplyBan called.
 	bannedSites []string
-	// lastZonePairs records the zone pairs from the most recent ApplyBanWithZones call.
-	lastZonePairs []config.ZonePair
 }
 
 func (m *mockFirewallManager) ApplyBan(_ context.Context, site, ip string, ipv6 bool) error {
 	m.applyBanCalls++
 	m.bannedSites = append(m.bannedSites, site)
-	if m.siteErrors != nil {
-		if err, ok := m.siteErrors[site]; ok {
-			return err
-		}
-		return nil
-	}
-	return m.applyBanErr
-}
-
-func (m *mockFirewallManager) ApplyBanWithZones(_ context.Context, site, _ string, _ bool, zonePairs []config.ZonePair) error {
-	m.applyBanCalls++
-	m.bannedSites = append(m.bannedSites, site)
-	m.lastZonePairs = zonePairs
 	if m.siteErrors != nil {
 		if err, ok := m.siteErrors[site]; ok {
 			return err
@@ -78,6 +65,8 @@ func (m *mockFirewallManager) EnsureInfrastructure(_ context.Context, sites []st
 	return nil
 }
 
+func (m *mockFirewallManager) PrepareDrain(_ context.Context, _ []string) error { return nil }
+
 func (m *mockFirewallManager) SyncDirty(_ context.Context, sites []string) error {
 	return nil
 }
@@ -88,6 +77,10 @@ func (m *mockFirewallManager) Drain(_ context.Context, sites []string) error {
 
 func (m *mockFirewallManager) ZoneManager() *firewall.ZoneManager {
 	return nil
+}
+
+func newTestHandler(store storage.Store, fwMgr firewall.Manager, cfg *config.Config) JobHandler {
+	return makeJobHandler(store, banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun), cfg, nopRecorder{}, zerolog.Nop())
 }
 
 // testCfg returns a minimal config suitable for handler tests.
@@ -103,15 +96,14 @@ func testCfg(sites ...string) *config.Config {
 
 func TestJobHandler_BanAlreadyExists(t *testing.T) {
 	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
 	cfg := testCfg()
 	fwMgr := &mockFirewallManager{}
 
 	// Pre-record a ban
 	_ = store.BanRecord("1.2.3.4", time.Now().Add(time.Hour), false)
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
-	err := handler(context.Background(), SyncJob{Action: "ban", IP: "1.2.3.4"})
+	handler := newTestHandler(store, fwMgr, cfg)
+	err := handler(context.Background(), SyncJob{Action: "ban", Source: "crowdsec:id:1", IP: "1.2.3.4"})
 	if err != nil {
 		t.Errorf("expected nil error for already-banned IP, got %v", err)
 	}
@@ -122,13 +114,12 @@ func TestJobHandler_BanAlreadyExists(t *testing.T) {
 
 func TestJobHandler_UnbanNotBanned(t *testing.T) {
 	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
 	cfg := testCfg()
 	fwMgr := &mockFirewallManager{}
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
+	handler := newTestHandler(store, fwMgr, cfg)
 	// IP not in ban list — delete should be skipped
-	err := handler(context.Background(), SyncJob{Action: "delete", IP: "5.6.7.8"})
+	err := handler(context.Background(), SyncJob{Action: "delete", Source: "crowdsec:id:1", IP: "5.6.7.8"})
 	if err != nil {
 		t.Errorf("expected nil error for unban of non-banned IP, got %v", err)
 	}
@@ -139,14 +130,14 @@ func TestJobHandler_UnbanNotBanned(t *testing.T) {
 
 func TestJobHandler_ApplyBanSuccess(t *testing.T) {
 	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
 	cfg := testCfg("default", "site2")
 	fwMgr := &mockFirewallManager{}
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
+	handler := newTestHandler(store, fwMgr, cfg)
 	job := SyncJob{
 		Action:    "ban",
 		IP:        "203.0.113.1",
+		Source:    "crowdsec:id:1",
 		IPv6:      false,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
@@ -166,14 +157,13 @@ func TestJobHandler_ApplyBanSuccess(t *testing.T) {
 
 func TestJobHandler_ApplyUnbanSuccess(t *testing.T) {
 	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
 	cfg := testCfg()
 	fwMgr := &mockFirewallManager{}
 
 	_ = store.BanRecord("10.20.30.40", time.Now().Add(time.Hour), false)
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
-	if err := handler(context.Background(), SyncJob{Action: "delete", IP: "10.20.30.40"}); err != nil {
+	handler := newTestHandler(store, fwMgr, cfg)
+	if err := handler(context.Background(), SyncJob{Action: "delete", IP: "10.20.30.40", Source: "legacy"}); err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
 	if fwMgr.applyUnbanCalls != 1 {
@@ -187,12 +177,11 @@ func TestJobHandler_ApplyUnbanSuccess(t *testing.T) {
 
 func TestJobHandler_UnauthorizedRetriable(t *testing.T) {
 	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
 	cfg := testCfg()
 	fwMgr := &mockFirewallManager{applyBanErr: &controller.ErrUnauthorized{Msg: "test"}}
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
-	err := handler(context.Background(), SyncJob{Action: "ban", IP: "1.1.1.1"})
+	handler := newTestHandler(store, fwMgr, cfg)
+	err := handler(context.Background(), SyncJob{Action: "ban", Source: "crowdsec:id:1", IP: "1.1.1.1"})
 	if err == nil {
 		t.Fatal("expected ErrUnauthorized, got nil")
 	}
@@ -204,7 +193,6 @@ func TestJobHandler_UnauthorizedRetriable(t *testing.T) {
 
 func TestJobHandler_StorageError_Fatal(t *testing.T) {
 	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
 	cfg := testCfg()
 	fwMgr := &mockFirewallManager{}
 
@@ -212,10 +200,11 @@ func TestJobHandler_StorageError_Fatal(t *testing.T) {
 	// abort the job so the UniFi write is never attempted without a bbolt record.
 	store.SetError("BanRecord", errors.New("storage failure"))
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
+	handler := newTestHandler(store, fwMgr, cfg)
 	job := SyncJob{
 		Action:    "ban",
 		IP:        "2.2.2.2",
+		Source:    "crowdsec:id:1",
 		ExpiresAt: time.Now().Add(time.Hour),
 	}
 	if err := handler(context.Background(), job); err == nil {
@@ -225,7 +214,6 @@ func TestJobHandler_StorageError_Fatal(t *testing.T) {
 
 func TestJobHandler_DryRun(t *testing.T) {
 	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
 	cfg := &config.Config{
 		UnifiSites: []string{"default"},
 		BanTTL:     24 * time.Hour,
@@ -236,10 +224,11 @@ func TestJobHandler_DryRun(t *testing.T) {
 	// Handler itself doesn't check DryRun; that's in the manager. So just verify no error.
 	fwMgr := &mockFirewallManager{}
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
+	handler := newTestHandler(store, fwMgr, cfg)
 	job := SyncJob{
 		Action:    "ban",
 		IP:        "3.3.3.3",
+		Source:    "crowdsec:id:1",
 		ExpiresAt: time.Now().Add(time.Hour),
 	}
 	if err := handler(context.Background(), job); err != nil {
@@ -249,7 +238,6 @@ func TestJobHandler_DryRun(t *testing.T) {
 
 func TestHandler_ContinuesOnPerSiteFailure(t *testing.T) {
 	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
 	cfg := testCfg("site-a", "site-b")
 	fwMgr := &mockFirewallManager{
 		siteErrors: map[string]error{
@@ -257,10 +245,11 @@ func TestHandler_ContinuesOnPerSiteFailure(t *testing.T) {
 		},
 	}
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
+	handler := newTestHandler(store, fwMgr, cfg)
 	job := SyncJob{
 		Action:    "ban",
 		IP:        "1.2.3.4",
+		Source:    "crowdsec:id:1",
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
 	err := handler(context.Background(), job)
@@ -284,7 +273,6 @@ func TestHandler_ContinuesOnPerSiteFailure(t *testing.T) {
 
 func TestHandler_AuthErrorStopsAllSites(t *testing.T) {
 	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
 	cfg := testCfg("site-a", "site-b")
 	fwMgr := &mockFirewallManager{
 		siteErrors: map[string]error{
@@ -292,10 +280,11 @@ func TestHandler_AuthErrorStopsAllSites(t *testing.T) {
 		},
 	}
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
+	handler := newTestHandler(store, fwMgr, cfg)
 	job := SyncJob{
 		Action:    "ban",
 		IP:        "5.6.7.8",
+		Source:    "crowdsec:id:1",
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
 	err := handler(context.Background(), job)
@@ -319,18 +308,18 @@ func TestHandler_AuthErrorStopsAllSites(t *testing.T) {
 
 func TestJobHandler_BanTTLCapApplied(t *testing.T) {
 	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
 	cfg := &config.Config{
 		UnifiSites: []string{"default"},
 		BanTTL:     24 * time.Hour,
 	}
 	fwMgr := &mockFirewallManager{}
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
+	handler := newTestHandler(store, fwMgr, cfg)
 	// job.ExpiresAt is zero (permanent ban)
 	job := SyncJob{
 		Action: "ban",
 		IP:     "10.0.0.1",
+		Source: "crowdsec:id:1",
 		IPv6:   false,
 	}
 	if err := handler(context.Background(), job); err != nil {
@@ -354,17 +343,17 @@ func TestJobHandler_BanTTLCapApplied(t *testing.T) {
 
 func TestJobHandler_BanTTLCapAppliedWhenTooLong(t *testing.T) {
 	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
 	cfg := &config.Config{
 		UnifiSites: []string{"default"},
 		BanTTL:     24 * time.Hour,
 	}
 	fwMgr := &mockFirewallManager{}
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
+	handler := newTestHandler(store, fwMgr, cfg)
 	job := SyncJob{
 		Action:    "ban",
 		IP:        "10.0.0.2",
+		Source:    "crowdsec:id:1",
 		ExpiresAt: time.Now().Add(10 * 24 * time.Hour), // 10x BanTTL
 	}
 	if err := handler(context.Background(), job); err != nil {
@@ -379,20 +368,35 @@ func TestJobHandler_BanTTLCapAppliedWhenTooLong(t *testing.T) {
 	}
 }
 
+func TestJobHandlerScenarioOverrideCanExceedDefaultTTL(t *testing.T) {
+	store := testutil.NewMockStore()
+	cfg := &config.Config{UnifiSites: []string{"default"}, BanTTL: 24 * time.Hour}
+	handler := newTestHandler(store, &mockFirewallManager{}, cfg)
+	expiresAt := time.Now().Add(7 * 24 * time.Hour)
+	job := SyncJob{Action: "ban", IP: "10.0.0.4", Source: "crowdsec:id:4", ExpiresAt: expiresAt, DurationOverride: true}
+	if err := handler(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := store.BanGet(job.IP)
+	if err != nil || entry == nil || entry.ExpiresAt.Before(expiresAt.Add(-time.Second)) {
+		t.Fatalf("scenario override was capped by BAN_TTL: %+v, %v", entry, err)
+	}
+}
+
 func TestJobHandler_BanTTLCapNotAppliedWhenShort(t *testing.T) {
 	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
 	cfg := &config.Config{
 		UnifiSites: []string{"default"},
 		BanTTL:     24 * time.Hour,
 	}
 	fwMgr := &mockFirewallManager{}
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
+	handler := newTestHandler(store, fwMgr, cfg)
 	shortExpiry := time.Now().Add(cfg.BanTTL / 2) // 12 hours
 	job := SyncJob{
 		Action:    "ban",
 		IP:        "10.0.0.3",
+		Source:    "crowdsec:id:1",
 		ExpiresAt: shortExpiry,
 	}
 	if err := handler(context.Background(), job); err != nil {
@@ -408,108 +412,10 @@ func TestJobHandler_BanTTLCapNotAppliedWhenShort(t *testing.T) {
 	}
 }
 
-// TestHandler_ScenarioZoneOverride_Applied verifies that when job.Scenario matches
-// a key in ZonePairsScenarioMap, the handler calls ApplyBanWithZones with the
-// override zone pairs rather than ApplyBan.
-func TestHandler_ScenarioZoneOverride_Applied(t *testing.T) {
-	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
-	override := []config.ZonePair{{Src: "WAN", Dst: "LAN"}}
-	cfg := &config.Config{
-		UnifiSites: []string{"default"},
-		BanTTL:     24 * time.Hour,
-		ZonePairsScenarioMap: map[string][]config.ZonePair{
-			"ssh-bf": override,
-		},
-	}
-	fwMgr := &mockFirewallManager{}
-
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
-	job := SyncJob{
-		Action:    "ban",
-		IP:        "10.10.0.1",
-		ExpiresAt: time.Now().Add(time.Hour),
-		Scenario:  "crowdsec/ssh-bf",
-	}
-	if err := handler(context.Background(), job); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if fwMgr.applyBanCalls != 1 {
-		t.Errorf("expected 1 ban call, got %d", fwMgr.applyBanCalls)
-	}
-	if len(fwMgr.lastZonePairs) != 1 || fwMgr.lastZonePairs[0].Src != "WAN" {
-		t.Errorf("expected override zone pairs {WAN->LAN}, got %v", fwMgr.lastZonePairs)
-	}
-}
-
-// TestHandler_ScenarioZoneOverride_NoMatch verifies that when job.Scenario does
-// not match any key in ZonePairsScenarioMap, ApplyBan is called (no override).
-func TestHandler_ScenarioZoneOverride_NoMatch(t *testing.T) {
-	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
-	cfg := &config.Config{
-		UnifiSites: []string{"default"},
-		BanTTL:     24 * time.Hour,
-		ZonePairsScenarioMap: map[string][]config.ZonePair{
-			"ssh-bf": {{Src: "WAN", Dst: "LAN"}},
-		},
-	}
-	fwMgr := &mockFirewallManager{}
-
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
-	job := SyncJob{
-		Action:    "ban",
-		IP:        "10.10.0.2",
-		ExpiresAt: time.Now().Add(time.Hour),
-		Scenario:  "crowdsec/http-probing",
-	}
-	if err := handler(context.Background(), job); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if fwMgr.applyBanCalls != 1 {
-		t.Errorf("expected 1 ban call, got %d", fwMgr.applyBanCalls)
-	}
-	// lastZonePairs should be nil — ApplyBan was called, not ApplyBanWithZones.
-	if fwMgr.lastZonePairs != nil {
-		t.Errorf("expected no zone pair override, got %v", fwMgr.lastZonePairs)
-	}
-}
-
-// TestHandler_ScenarioZoneOverride_EmptyMap verifies that a nil
-// ZonePairsScenarioMap results in normal ApplyBan behavior (no override).
-func TestHandler_ScenarioZoneOverride_EmptyMap(t *testing.T) {
-	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
-	cfg := &config.Config{
-		UnifiSites:           []string{"default"},
-		BanTTL:               24 * time.Hour,
-		ZonePairsScenarioMap: nil,
-	}
-	fwMgr := &mockFirewallManager{}
-
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
-	job := SyncJob{
-		Action:    "ban",
-		IP:        "10.10.0.3",
-		ExpiresAt: time.Now().Add(time.Hour),
-		Scenario:  "crowdsec/ssh-bf",
-	}
-	if err := handler(context.Background(), job); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if fwMgr.applyBanCalls != 1 {
-		t.Errorf("expected 1 ban call, got %d", fwMgr.applyBanCalls)
-	}
-	if fwMgr.lastZonePairs != nil {
-		t.Errorf("expected no zone pair override for nil map, got %v", fwMgr.lastZonePairs)
-	}
-}
-
 // TestJobHandler_DryRunNoBboltWrites verifies that in DRY_RUN mode, the handler
 // does not write bans to bbolt (store.BanRecord/BanDelete are skipped).
 func TestJobHandler_DryRunNoBboltWrites(t *testing.T) {
 	store := testutil.NewMockStore()
-	ctrl := testutil.NewMockController()
 	cfg := &config.Config{
 		UnifiSites: []string{"default"},
 		BanTTL:     24 * time.Hour,
@@ -517,7 +423,7 @@ func TestJobHandler_DryRunNoBboltWrites(t *testing.T) {
 	}
 	fwMgr := &mockFirewallManager{}
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, nopRecorder{}, zerolog.Nop())
+	handler := newTestHandler(store, fwMgr, cfg)
 
 	// Execute a ban job in dry run
 	job := SyncJob{

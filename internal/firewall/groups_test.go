@@ -20,9 +20,8 @@ func testNamer(t *testing.T) *Namer {
 	n, err := NewNamer(
 		"crowdsec-block-{{.Family}}-{{.Index}}",
 		"crowdsec-drop-{{.Family}}-{{.Index}}",
-		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}",
-		"test",
-	)
+		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}")
+
 	if err != nil {
 		t.Fatalf("NewNamer: %v", err)
 	}
@@ -43,7 +42,7 @@ func newBboltStore(t *testing.T) storage.Store {
 // newV4ShardManager creates a new v4 ShardManager with a small capacity.
 func newV4ShardManager(t *testing.T, capacity int, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
-	return NewShardManager(testSite, false, capacity, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
+	return NewShardManager(testSite, false, capacity, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "legacy")
 }
 
 // TestEnsureShards_FirstRun verifies that lazy creation means an empty store
@@ -141,6 +140,83 @@ func TestEnsureShards_PrefersAPIOverCache(t *testing.T) {
 	}
 	if sm.Contains("old-ip") {
 		t.Error("Contains(\"old-ip\") = true; want false")
+	}
+}
+
+func TestEnsureShards_RecoversSparseAPIOnlyGroups(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	ctrl.SetGroups(testSite, []controller.FirewallGroup{
+		{ID: "group-0", Name: "crowdsec-block-v4-0", GroupMembers: []string{"1.1.1.1"}},
+		{ID: "group-3", Name: "crowdsec-block-v4-3", GroupMembers: []string{"2.2.2.2"}},
+	})
+	sm := newV4ShardManager(t, 1, ctrl, store)
+	if err := sm.EnsureShards(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	refs := sm.GroupRefs()
+	if len(refs) != 2 || refs[0].Index != 0 || refs[1].Index != 3 || refs[1].ID != "group-3" {
+		t.Fatalf("GroupRefs = %+v, want indices 0 and 3", refs)
+	}
+	if !sm.Contains("2.2.2.2") {
+		t.Fatal("API-only shard member was not adopted")
+	}
+	if cached, err := store.GetGroup(cacheKey(testSite, "crowdsec-block-v4-3")); err != nil || cached == nil || cached.UnifiID != "group-3" {
+		t.Fatalf("recovered cache = %+v, %v", cached, err)
+	}
+	if err := sm.AddIP(context.Background(), "3.3.3.3"); err != nil {
+		t.Fatal(err)
+	}
+	if pending := sm.findShardByIndexLocked(sm.fam, 4); pending == nil {
+		t.Fatal("overflow must allocate index 4 after sparse index 3")
+	}
+}
+
+func TestEnsureShards_SameNameAcrossSites(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	name := "crowdsec-block-v4-0"
+	if err := store.SetGroup(name, storage.GroupRecord{Site: "site-a", UnifiID: "group-a", Members: []string{"8.8.8.8"}}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl.SetGroups("site-a", []controller.FirewallGroup{{ID: "group-a", Name: name, GroupMembers: []string{"8.8.8.8"}}})
+	ctrl.SetGroups("site-b", []controller.FirewallGroup{{ID: "group-b", Name: name, GroupMembers: []string{"9.9.9.9"}}})
+	for _, tc := range []struct {
+		site, id, ip string
+	}{{"site-a", "group-a", "8.8.8.8"}, {"site-b", "group-b", "9.9.9.9"}} {
+		sm := NewShardManager(tc.site, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "legacy")
+		if err := sm.EnsureShards(ctx); err != nil {
+			t.Fatalf("%s: %v", tc.site, err)
+		}
+		if !sm.Contains(tc.ip) {
+			t.Fatalf("%s did not load its own group", tc.site)
+		}
+		rec, err := store.GetGroup(cacheKey(tc.site, name))
+		if err != nil || rec == nil || rec.UnifiID != tc.id {
+			t.Fatalf("%s cache: %+v, %v", tc.site, rec, err)
+		}
+	}
+	if rec, err := store.GetGroup(name); err != nil || rec != nil {
+		t.Fatalf("unscoped record remains: %+v, %v", rec, err)
+	}
+}
+
+func TestEnsureShards_CustomHexIndexWithoutCache(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	namer, err := NewNamer("crowdsec-block-{{.Family}}-{{printf \"%x\" .Index}}", "rule-{{.Index}}", "policy-{{.Index}}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl.SetGroups(testSite, []controller.FirewallGroup{{ID: "group-a", Name: "crowdsec-block-v4-a", GroupMembers: []string{"8.8.8.8"}}})
+	sm := NewShardManager(testSite, false, 5, namer, ctrl, store, zerolog.Nop(), 0, false, "legacy")
+	if err := sm.EnsureShards(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	refs := sm.GroupRefs()
+	if len(refs) != 1 || refs[0].Index != 10 || refs[0].ID != "group-a" {
+		t.Fatalf("custom shard not recovered: %+v", refs)
 	}
 }
 
@@ -588,7 +664,7 @@ func TestRemoveTail(t *testing.T) {
 // newZoneV4ShardManager creates a new v4 ShardManager in zone mode.
 func newZoneV4ShardManager(t *testing.T, capacity int, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
-	return NewShardManager(testSite, false, capacity, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "zone")
+	return NewShardManager(testSite, false, capacity, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "zone")
 }
 
 // TestCreateShard_SendsNonEmptyItems verifies that TML creation always
@@ -635,6 +711,69 @@ func TestCreateShard_SendsNonEmptyItems(t *testing.T) {
 	}
 }
 
+func TestPendingShardRetriesUpdateWithoutRecreating(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	sm := newZoneV4ShardManager(t, 5, ctrl, newBboltStore(t))
+	if err := sm.EnsureShards(context.Background()); err != nil {
+		t.Fatalf("EnsureShards: %v", err)
+	}
+	if _, _, err := sm.Add(context.Background(), "198.51.100.41"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	ctrl.SetError("UpdateTrafficMatchingList", fmt.Errorf("temporary update failure"))
+	if err := sm.FlushDirty(context.Background()); err == nil {
+		t.Fatal("expected first update to fail")
+	}
+	if err := sm.FlushDirty(context.Background()); err != nil {
+		t.Fatalf("retry FlushDirty: %v", err)
+	}
+	if got := ctrl.Calls("CreateTrafficMatchingList"); got != 1 {
+		t.Errorf("CreateTrafficMatchingList calls: got %d, want 1", got)
+	}
+	if got := ctrl.Calls("UpdateTrafficMatchingList"); got != 2 {
+		t.Errorf("UpdateTrafficMatchingList calls: got %d, want 2", got)
+	}
+	if refs := sm.GroupRefs(); len(refs) != 1 || refs[0].ID == "" {
+		t.Errorf("active groups after retry: got %+v, want one group with an ID", refs)
+	}
+}
+
+func TestActivationFailureRetriesWithoutRewritingGroup(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	sm := newZoneV4ShardManager(t, 5, ctrl, newBboltStore(t))
+	if err := sm.EnsureShards(context.Background()); err != nil {
+		t.Fatalf("EnsureShards: %v", err)
+	}
+	if _, _, err := sm.Add(context.Background(), "198.51.100.42"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	attempts := 0
+	sm.SetActivationCallback(func(context.Context, int, string) error {
+		attempts++
+		if attempts == 1 {
+			return fmt.Errorf("policy creation failed")
+		}
+		return nil
+	})
+	if err := sm.FlushDirty(context.Background()); err == nil {
+		t.Fatal("expected policy creation failure")
+	}
+	if err := sm.FlushDirty(context.Background()); err != nil {
+		t.Fatalf("retry FlushDirty: %v", err)
+	}
+	if attempts != 2 {
+		t.Errorf("activation attempts: got %d, want 2", attempts)
+	}
+	if got := ctrl.Calls("CreateTrafficMatchingList"); got != 1 {
+		t.Errorf("CreateTrafficMatchingList calls: got %d, want 1", got)
+	}
+	if got := ctrl.Calls("UpdateTrafficMatchingList"); got != 1 {
+		t.Errorf("UpdateTrafficMatchingList calls: got %d, want 1", got)
+	}
+}
+
 // TestSyncShard_SendsPlaceholderWhenEmpty verifies that syncShard sends
 // the RFC 5737 placeholder instead of an empty items array when all bans
 // have expired (UniFi API rejects empty items on both create and update).
@@ -660,7 +799,7 @@ func TestSyncShard_SendsPlaceholderWhenEmpty(t *testing.T) {
 	// Mark the shard as dirty with empty IPs (simulating all bans expired).
 	// Replace marks dirty internally, so just call Replace with empty slice.
 	sm.mu.Lock()
-	sm.families["v4"].Shards[0].IPs.Replace([]string{}) // empty set marks dirty
+	sm.fam.Shards[0].IPs.Replace([]string{}) // empty set marks dirty
 	sm.mu.Unlock()
 
 	beforeFlush := ctrl.Calls("UpdateTrafficMatchingList")
@@ -674,6 +813,10 @@ func TestSyncShard_SendsPlaceholderWhenEmpty(t *testing.T) {
 	// Verify UpdateTrafficMatchingList was called exactly once more (sending placeholder).
 	if got := ctrl.Calls("UpdateTrafficMatchingList") - beforeFlush; got != 1 {
 		t.Errorf("UpdateTrafficMatchingList calls: got %d, want 1", got)
+	}
+	rec, err := store.GetGroup(cacheKey(testSite, "crowdsec-block-v4-0"))
+	if err != nil || rec == nil || len(rec.Members) != 0 {
+		t.Fatalf("placeholder leaked into cache: %+v, %v", rec, err)
 	}
 }
 
@@ -716,7 +859,7 @@ func TestEnsureShards_FiltersPlaceholder(t *testing.T) {
 	// A TML whose only member is the RFC 5737 placeholder is treated as an orphan:
 	// the placeholder is stripped and, with zero real members, the shard is not
 	// loaded into the active shard slice (it will be cleaned up separately).
-	if got := len(sm.families["v4"].Shards); got != 0 {
+	if got := len(sm.fam.Shards); got != 0 {
 		t.Errorf("Shards len: got %d, want 0 (placeholder-only TML should not be loaded as a shard)", got)
 	}
 }
@@ -751,7 +894,7 @@ func TestSyncShard_PutNotFound_ResetsToPending(t *testing.T) {
 
 	// Verify we loaded an Active shard.
 	sm.mu.RLock()
-	family := sm.families["v4"]
+	family := sm.fam
 	if len(family.Shards) != 1 || family.Shards[0].State != ShardStateActive {
 		sm.mu.RUnlock()
 		t.Fatalf("expected 1 Active shard after EnsureShards")
@@ -763,7 +906,8 @@ func TestSyncShard_PutNotFound_ResetsToPending(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	// Inject a 404 on the next UpdateFirewallGroup call.
+	// The group is deleted outside the bouncer, so the next update returns 404.
+	ctrl.SetGroups(testSite, nil)
 	ctrl.SetError("UpdateFirewallGroup", &controller.ErrNotFound{URL: "/api/groups/" + shardID})
 
 	// syncAllFamilies should return nil (404 is handled gracefully).
@@ -773,7 +917,7 @@ func TestSyncShard_PutNotFound_ResetsToPending(t *testing.T) {
 
 	// Shard must now be Pending with an empty ID.
 	sm.mu.RLock()
-	family = sm.families["v4"]
+	family = sm.fam
 	gotState := family.Shards[0].State
 	gotID := family.Shards[0].ID
 	sm.mu.RUnlock()
@@ -786,7 +930,7 @@ func TestSyncShard_PutNotFound_ResetsToPending(t *testing.T) {
 	}
 
 	// bbolt record must have empty UnifiID.
-	rec, err := store.GetGroup(shardName)
+	rec, err := store.GetGroup(cacheKey(testSite, shardName))
 	if err != nil {
 		t.Fatalf("store.GetGroup: %v", err)
 	}

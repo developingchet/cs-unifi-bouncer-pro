@@ -2,6 +2,7 @@ package decision
 
 import (
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -46,11 +47,12 @@ func NewFilterConfig() FilterConfig {
 
 // FilterResult holds the decision after pipeline processing.
 type FilterResult struct {
-	Passed   bool
-	Action   string // "ban" or "delete"
-	Value    string // sanitized IP or CIDR
-	IPv6     bool
-	Duration time.Duration
+	Passed           bool
+	Action           string // "ban" or "delete"
+	Value            string // sanitized IP or CIDR
+	IPv6             bool
+	Duration         time.Duration
+	DurationOverride bool
 }
 
 // stage labels for metrics
@@ -65,9 +67,25 @@ const (
 	stageMinDur    = "8_min_duration"
 )
 
-// Filter runs a CrowdSec decision through the 8-stage pipeline.
+// Filter runs a new CrowdSec decision through the 8-stage pipeline.
 // Returns a FilterResult with Passed=true if the decision should be acted on.
 func Filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger) FilterResult {
+	return filter(d, cfg, log, false)
+}
+
+// FilterDeleted runs a deleted CrowdSec decision through the pipeline. The
+// stream reports a deletion with the decision's original type ("ban"), so the
+// caller has to say it is a deletion.
+func FilterDeleted(d *models.Decision, cfg FilterConfig, log zerolog.Logger) FilterResult {
+	return filter(d, cfg, log, true)
+}
+
+func filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger, deleted bool) FilterResult {
+	if d == nil || d.Type == nil || d.Scope == nil || d.Value == nil {
+		metrics.DecisionsFiltered.WithLabelValues(stageParse, "missing_field").Inc()
+		log.Warn().Msg("filtered: decision is missing required fields")
+		return FilterResult{}
+	}
 	action := strings.ToLower(*d.Type)
 	scope := strings.ToLower(*d.Scope)
 	value := *d.Value
@@ -87,17 +105,24 @@ func Filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger) FilterResu
 		return FilterResult{}
 	}
 
+	// Stages 2, 3, 6 and 7 decide what may be banned. A deletion skips them:
+	// it only releases the claim its own decision made, which is a no-op when
+	// the ban was never applied, and filtering it would strand a ban applied
+	// before BLOCK_SCENARIO_EXCLUDE, CROWDSEC_ORIGINS or BLOCK_WHITELIST changed.
+	if deleted {
+		action = "delete"
+	}
+	isBan := action == "ban"
+
 	// Stage 2: scenario exclude
-	for _, exc := range cfg.BlockScenarioExclude {
-		if exc != "" && strings.Contains(scenario, exc) {
-			metrics.DecisionsFiltered.WithLabelValues(stageScenario, "excluded_scenario").Inc()
-			log.Trace().Str("scenario", scenario).Str("exclude", exc).Msg("filtered: excluded scenario")
-			return FilterResult{}
-		}
+	if exc := excludedBy(scenario, cfg.BlockScenarioExclude); isBan && exc != "" {
+		metrics.DecisionsFiltered.WithLabelValues(stageScenario, "excluded_scenario").Inc()
+		log.Trace().Str("scenario", scenario).Str("exclude", exc).Msg("filtered: excluded scenario")
+		return FilterResult{}
 	}
 
 	// Stage 3: origin filter (empty = all allowed)
-	if len(cfg.AllowedOrigins) > 0 && !containsCI(cfg.AllowedOrigins, origin) {
+	if isBan && len(cfg.AllowedOrigins) > 0 && !containsCI(cfg.AllowedOrigins, origin) {
 		metrics.DecisionsFiltered.WithLabelValues(stageOrigin, "origin_not_allowed").Inc()
 		log.Trace().Str("origin", origin).Msg("filtered: origin not allowed")
 		return FilterResult{}
@@ -118,16 +143,21 @@ func Filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger) FilterResu
 		return FilterResult{}
 	}
 	isV6 := IsIPv6(sanitized)
+	if TooBroad(sanitized, isV6) {
+		metrics.DecisionsFiltered.WithLabelValues(stageParse, "range_too_broad").Inc()
+		log.Warn().Str("value", sanitized).Msg("filtered: range is broader than /8 (IPv4) or /32 (IPv6)")
+		return FilterResult{}
+	}
 
 	// Stage 6: reject private/loopback/link-local/ULA
-	if IsPrivate(sanitized) {
+	if isBan && IsPrivate(sanitized) {
 		metrics.DecisionsFiltered.WithLabelValues(stagePrivate, "private_ip").Inc()
 		log.Trace().Str("ip", sanitized).Msg("filtered: private/loopback/link-local IP")
 		return FilterResult{}
 	}
 
 	// Stage 7: reject whitelisted IPs/CIDRs
-	if IsWhitelisted(sanitized, cfg.Whitelist) {
+	if isBan && IsWhitelisted(sanitized, cfg.Whitelist) {
 		metrics.DecisionsFiltered.WithLabelValues(stageWhitelist, "whitelisted").Inc()
 		log.Trace().Str("ip", sanitized).Msg("filtered: whitelisted IP")
 		return FilterResult{}
@@ -141,30 +171,81 @@ func Filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger) FilterResu
 			dur = parsed
 		}
 	}
-	if action == "ban" && cfg.MinBanDuration > 0 && dur > 0 && dur < cfg.MinBanDuration {
+	if isBan && cfg.MinBanDuration > 0 && dur > 0 && dur < cfg.MinBanDuration {
 		metrics.DecisionsFiltered.WithLabelValues(stageMinDur, "too_short").Inc()
-		log.Trace().Str("ip", sanitized).Dur("duration", dur).Dur("min", cfg.MinBanDuration).Msg("filtered: ban duration too short")
+		log.Trace().Str("ip", sanitized).Stringer("duration", dur).Stringer("min", cfg.MinBanDuration).Msg("filtered: ban duration too short")
 		return FilterResult{}
 	}
 
 	// Per-scenario duration override: if the scenario contains any configured key
 	// as a substring, replace the duration with the mapped value.
-	if action == "ban" {
-		for prefix, overrideDur := range cfg.ScenarioDurationMap {
-			if prefix != "" && strings.Contains(scenario, prefix) {
+	matchedKey := ""
+	if isBan {
+		for key, overrideDur := range cfg.ScenarioDurationMap {
+			if key != "" && strings.Contains(scenario, key) && longerOrFirst(key, matchedKey) {
 				dur = overrideDur
-				break
+				matchedKey = key
 			}
 		}
 	}
 
 	return FilterResult{
-		Passed:   true,
-		Action:   action,
-		Value:    sanitized,
-		IPv6:     isV6,
-		Duration: dur,
+		Passed:           true,
+		Action:           action,
+		Value:            sanitized,
+		IPv6:             isV6,
+		Duration:         dur,
+		DurationOverride: matchedKey != "",
 	}
+}
+
+// Unbannable reports whether a sanitized address or range must never be
+// banned: broader than /8 or /32, private, or covered by the whitelist. These
+// are Filter's stage 5 range guard and stages 6 and 7 in one check.
+func Unbannable(value string, ipv6 bool, whitelist []*net.IPNet) bool {
+	return TooBroad(value, ipv6) || IsPrivate(value) || IsWhitelisted(value, whitelist)
+}
+
+// excludedBy returns the first non-empty entry of excludes that scenario
+// contains, or "" when none does.
+func excludedBy(scenario string, excludes []string) string {
+	for _, exc := range excludes {
+		if exc != "" && strings.Contains(scenario, exc) {
+			return exc
+		}
+	}
+	return ""
+}
+
+// Ranges broader than these prefixes are never banned: a range that large is
+// almost certainly a mistake or a hostile feed, and would cut off a large
+// share of the internet. Smaller private ranges are caught by stage 6.
+const (
+	minRangePrefixV4 = 8
+	minRangePrefixV6 = 32
+)
+
+// TooBroad reports whether value is a range broader than /8 (IPv4) or /32
+// (IPv6). A single address is never too broad.
+func TooBroad(value string, ipv6 bool) bool {
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil {
+		return false // a single address
+	}
+	if ipv6 {
+		return prefix.Bits() < minRangePrefixV6
+	}
+	return prefix.Bits() < minRangePrefixV4
+}
+
+// longerOrFirst reports whether key should replace matched as the scenario
+// duration override: the longest key wins, and equal lengths resolve by
+// lexical order so the result does not depend on map iteration order.
+func longerOrFirst(key, matched string) bool {
+	if len(key) != len(matched) {
+		return len(key) > len(matched)
+	}
+	return key < matched
 }
 
 func containsCI(haystack []string, needle string) bool {

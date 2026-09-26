@@ -3,90 +3,16 @@ package firewall
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/rs/zerolog"
 )
-
-// circuitBreakerState is the state of the circuit breaker.
-type circuitBreakerState int32
-
-const (
-	circuitClosed   circuitBreakerState = iota // normal: requests allowed
-	circuitOpen                                // tripped: requests blocked
-	circuitHalfOpen                            // probing: one request allowed
-)
-
-// circuitBreaker is a minimal three-state circuit breaker embedded in managerImpl.
-// It opens after N consecutive failures and resets to half-open after a timeout.
-type circuitBreaker struct {
-	mu         sync.Mutex
-	state      circuitBreakerState
-	failures   int
-	threshold  int
-	resetAfter time.Duration
-	openedAt   time.Time
-}
-
-func newCircuitBreaker(threshold int, resetAfter time.Duration) *circuitBreaker {
-	if threshold < 1 {
-		threshold = 5
-	}
-	if resetAfter <= 0 {
-		resetAfter = 60 * time.Second
-	}
-	return &circuitBreaker{threshold: threshold, resetAfter: resetAfter}
-}
-
-// allow returns true if the request should be allowed through.
-func (cb *circuitBreaker) allow() bool {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-	switch cb.state {
-	case circuitClosed:
-		return true
-	case circuitOpen:
-		if time.Since(cb.openedAt) >= cb.resetAfter {
-			cb.state = circuitHalfOpen
-			return true
-		}
-		return false
-	default: // circuitHalfOpen — probe already in progress, block concurrent callers
-		return false
-	}
-}
-
-// recordSuccess resets the breaker to closed state.
-// Returns true if the breaker was previously open or half-open (i.e. just recovered).
-func (cb *circuitBreaker) recordSuccess() bool {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-	wasOpen := cb.state != circuitClosed
-	cb.state = circuitClosed
-	cb.failures = 0
-	return wasOpen
-}
-
-// recordFailure increments the failure counter and opens the breaker when the threshold is crossed.
-// Returns true if the breaker just opened.
-func (cb *circuitBreaker) recordFailure() bool {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-	cb.failures++
-	if cb.state != circuitOpen && cb.failures >= cb.threshold {
-		cb.state = circuitOpen
-		cb.openedAt = time.Now()
-		return true
-	}
-	return false
-}
-
 
 // ReconcileResult summarizes a full reconcile operation.
 type ReconcileResult struct {
@@ -105,18 +31,16 @@ type Manager interface {
 	// ApplyBan adds an IP to the appropriate shard for all given sites.
 	ApplyBan(ctx context.Context, site, ip string, ipv6 bool) error
 
-	// ApplyBanWithZones adds an IP using the given zone pair override instead of
-	// the globally configured zone pairs. If zonePairs is empty it falls back to
-	// ApplyBan. In Phase 1 the IP is placed in the same default shard; full
-	// per-scenario shard provisioning is reserved for a future release.
-	ApplyBanWithZones(ctx context.Context, site, ip string, ipv6 bool, zonePairs []config.ZonePair) error
-
 	// ApplyUnban removes an IP from its shard for all given sites.
 	ApplyUnban(ctx context.Context, site, ip string, ipv6 bool) error
 
 	// EnsureInfrastructure bootstraps all firewall groups, rules, and policies
 	// for every configured site. Must be called before ApplyBan/ApplyUnban.
 	EnsureInfrastructure(ctx context.Context, sites []string) error
+
+	// PrepareDrain loads current managed objects without creating or changing
+	// firewall objects. Drain uses this snapshot for deletion or preview.
+	PrepareDrain(ctx context.Context, sites []string) error
 
 	// SyncDirty flushes all dirty shards to the UniFi API.
 	SyncDirty(ctx context.Context, sites []string) error
@@ -131,15 +55,14 @@ type Manager interface {
 
 // ManagerConfig holds all firewall manager configuration.
 type ManagerConfig struct {
-	FirewallMode     string // "auto", "legacy", "zone"
-	EnableIPv6       bool
-	GroupCapacityV4  int
-	GroupCapacityV6  int
-	DryRun           bool
-	APIShardDelay    time.Duration
-	FlushConcurrency int
-	LegacyCfg        LegacyConfig
-	ZoneCfg          ZoneConfig
+	FirewallMode    string // "auto", "legacy", "zone"
+	EnableIPv6      bool
+	GroupCapacityV4 int
+	GroupCapacityV6 int
+	DryRun          bool
+	APIShardDelay   time.Duration
+	LegacyCfg       LegacyConfig
+	ZoneCfg         ZoneConfig
 
 	// Circuit breaker settings. Zero values use defaults (5 failures, 60s reset).
 	CircuitBreakerThreshold     int
@@ -173,9 +96,6 @@ type managerImpl struct {
 	legacyMgr *LegacyManager
 	zoneMgr   *ZoneManager
 
-	// Shared semaphore for concurrent flush limiting
-	flushSem chan struct{}
-
 	// Cached resolved mode per site (avoids repeated HasFeature API calls)
 	siteMode map[string]string
 	siteMu   sync.RWMutex
@@ -201,11 +121,6 @@ type managerImpl struct {
 
 // NewManager constructs a Manager.
 func NewManager(cfg ManagerConfig, ctrl controller.Controller, store storage.Store, namer *Namer, log zerolog.Logger) Manager {
-	conc := cfg.FlushConcurrency
-	if conc < 1 {
-		conc = 1
-	}
-
 	legacyMgr := NewLegacyManager(cfg.LegacyCfg, namer, ctrl, store, log)
 	zoneMgr := NewZoneManager(cfg.ZoneCfg, namer, ctrl, store, log)
 
@@ -219,7 +134,6 @@ func NewManager(cfg ManagerConfig, ctrl controller.Controller, store storage.Sto
 		v6Mgrs:    make(map[string]*ShardManager),
 		legacyMgr: legacyMgr,
 		zoneMgr:   zoneMgr,
-		flushSem:  make(chan struct{}, conc),
 		siteMode:  make(map[string]string),
 		cb:        newCircuitBreaker(cfg.CircuitBreakerThreshold, cfg.CircuitBreakerResetInterval),
 	}
@@ -248,24 +162,13 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		m.siteMu.Unlock()
 
 		v4 := NewShardManager(site, false, v4Cap, m.namer, m.ctrl, m.store, m.log,
-			m.cfg.APIShardDelay, m.flushSem, m.cfg.DryRun, mode)
+			m.cfg.APIShardDelay, m.cfg.DryRun, mode)
 		if err := v4.EnsureShards(ctx); err != nil {
 			return fmt.Errorf("ensure v4 shards for site %s: %w", site, err)
 		}
 
 		// Clean up placeholder-only (orphaned) groups found in UniFi
-		for _, orphan := range v4.TakeOrphanedGroups() {
-			m.log.Info().Str("site", site).Str("group_name", orphan.Name).Str("group_id", orphan.UnifiID).
-				Msg("deleting orphaned placeholder-only group")
-			// Best-effort cleanup of any policies/rules that reference this group.
-			// This handles migration from pre-lazy-creation code where rules were created eagerly.
-			m.deleteOrphanedReferencingObjects(ctx, site, mode, orphan.UnifiID)
-			// Orphaned groups were never adopted into our memory management, so they have no policies/rules created by us.
-			// Delete the group object.
-			if err := v4.DeleteShardObject(ctx, orphan.UnifiID); err != nil {
-				m.log.Warn().Err(err).Str("group_id", orphan.UnifiID).Msg("failed to delete orphaned group (will continue)")
-			}
-		}
+		m.cleanupOrphanedShardGroups(ctx, site, mode, v4)
 
 		m.mu.Lock()
 		m.v4Mgrs[site] = v4
@@ -273,24 +176,13 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 
 		if m.cfg.EnableIPv6 {
 			v6 := NewShardManager(site, true, v6Cap, m.namer, m.ctrl, m.store, m.log,
-				m.cfg.APIShardDelay, m.flushSem, m.cfg.DryRun, mode)
+				m.cfg.APIShardDelay, m.cfg.DryRun, mode)
 			if err := v6.EnsureShards(ctx); err != nil {
 				return fmt.Errorf("ensure v6 shards for site %s: %w", site, err)
 			}
 
 			// Clean up placeholder-only (orphaned) groups found in UniFi
-			for _, orphan := range v6.TakeOrphanedGroups() {
-				m.log.Info().Str("site", site).Str("group_name", orphan.Name).Str("group_id", orphan.UnifiID).
-					Msg("deleting orphaned placeholder-only group")
-				// Best-effort cleanup of any policies/rules that reference this group.
-				// This handles migration from pre-lazy-creation code where rules were created eagerly.
-				m.deleteOrphanedReferencingObjects(ctx, site, mode, orphan.UnifiID)
-				// Orphaned groups were never adopted into our memory management, so they have no policies/rules created by us.
-				// Delete the group object.
-				if err := v6.DeleteShardObject(ctx, orphan.UnifiID); err != nil {
-					m.log.Warn().Err(err).Str("group_id", orphan.UnifiID).Msg("failed to delete orphaned group (will continue)")
-				}
-			}
+			m.cleanupOrphanedShardGroups(ctx, site, mode, v6)
 			m.mu.Lock()
 			m.v6Mgrs[site] = v6
 			m.mu.Unlock()
@@ -299,60 +191,10 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		m.mu.RLock()
 		v4Mgr := m.v4Mgrs[site]
 		v6Mgr := m.v6Mgrs[site]
-		// Set activation callbacks to provision infrastructure when Pending shards become Active.
-		// Use m.bgCtx (the long-lived daemon context) rather than the callback's ctx so that
-		// a cancelled startup context does not abort mid-run shard provisioning.
-		v4Mgr.SetActivationCallback(func(_ context.Context, shardIdx int, groupID string) {
-			if err := m.ensureNewShardInfrastructure(m.bgCtx, site, false, shardIdx, v4Mgr); err != nil {
-				m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).Str("group_id", groupID).
-					Msg("failed to provision infrastructure for newly activated v4 shard")
-			}
-		})
-		m.attachShardCallbacks(v4Mgr)
-		v4Mgr.SetMergeThreshold(m.cfg.ShardMergeThreshold)
-		onDrained := func(ctx context.Context, shardIdx int, groupID string) {
-			mode := m.cachedMode(site)
-			switch mode {
-			case "legacy":
-				if err := m.legacyMgr.DeleteRuleForShard(ctx, site, false, shardIdx); err != nil {
-					m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).
-						Msg("failed to delete rule for drained v4 shard")
-				}
-			case "zone":
-				if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, false, shardIdx); err != nil {
-					m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).
-						Msg("failed to delete policies for drained v4 shard")
-				}
-			}
-		}
-		v4Mgr.SetDrainCallback(onDrained)
+		m.wireShardManager(site, false, v4Mgr)
 		if m.cfg.EnableIPv6 && v6Mgr != nil {
-			v6Mgr.SetActivationCallback(func(_ context.Context, shardIdx int, groupID string) {
-				if err := m.ensureNewShardInfrastructure(m.bgCtx, site, true, shardIdx, v6Mgr); err != nil {
-					m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).Str("group_id", groupID).
-						Msg("failed to provision infrastructure for newly activated v6 shard")
-				}
-			})
-			m.attachShardCallbacks(v6Mgr)
-			v6Mgr.SetMergeThreshold(m.cfg.ShardMergeThreshold)
-			onDrainedV6 := func(ctx context.Context, shardIdx int, groupID string) {
-				mode := m.cachedMode(site)
-				switch mode {
-				case "legacy":
-					if err := m.legacyMgr.DeleteRuleForShard(ctx, site, true, shardIdx); err != nil {
-						m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).
-							Msg("failed to delete rule for drained v6 shard")
-					}
-				case "zone":
-					if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, true, shardIdx); err != nil {
-						m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).
-							Msg("failed to delete policies for drained v6 shard")
-					}
-				}
-			}
-			v6Mgr.SetDrainCallback(onDrainedV6)
+			m.wireShardManager(site, true, v6Mgr)
 		}
-
 		m.mu.RUnlock()
 
 		switch mode {
@@ -361,7 +203,7 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 				m.log.Info().Str("site", site).Str("mode", "legacy").
 					Msg("[DRY-RUN] would ensure legacy firewall rules for all shards")
 			} else {
-				if err := m.legacyMgr.EnsureRules(ctx, site, v4Mgr, v6Mgr); err != nil {
+				if err := m.tolerateShardFailures(site, m.legacyMgr.EnsureRules(ctx, site, v4Mgr, v6Mgr)); err != nil {
 					return fmt.Errorf("ensure legacy rules for site %s: %w", site, err)
 				}
 			}
@@ -374,12 +216,80 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 				if err := m.zoneMgr.Bootstrap(ctx, []string{site}); err != nil {
 					return fmt.Errorf("zone bootstrap for site %s: %w", site, err)
 				}
-				if err := m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr); err != nil {
+				if err := m.tolerateShardFailures(site, m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr)); err != nil {
 					return fmt.Errorf("ensure zone policies for site %s: %w", site, err)
 				}
 			}
 		}
 	}
+	return nil
+}
+
+// wireShardManager installs the activation, sync, merge and drain hooks on
+// one address family's shard manager for site.
+func (m *managerImpl) wireShardManager(site string, ipv6 bool, sm *ShardManager) {
+	fam := Family(ipv6)
+	activationFailedMsg := "failed to provision infrastructure for newly activated " + fam + " shard"
+	// Provision infrastructure when Pending shards become Active. Use m.bgCtx
+	// (the long-lived daemon context) rather than the callback's ctx so that
+	// a cancelled startup context does not abort mid-run shard provisioning.
+	sm.SetActivationCallback(func(_ context.Context, shardIdx int, groupID string) error {
+		if err := m.ensureNewShardInfrastructure(m.bgCtx, site, ipv6, shardIdx, sm); err != nil {
+			m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).Str("group_id", groupID).
+				Msg(activationFailedMsg)
+			return err
+		}
+		return nil
+	})
+	m.attachShardCallbacks(sm)
+	sm.SetMergeThreshold(m.cfg.ShardMergeThreshold)
+	sm.SetDrainCallback(func(ctx context.Context, shardIdx int, _ string) error {
+		switch m.cachedMode(site) {
+		case "legacy":
+			if err := m.legacyMgr.DeleteRuleForShard(ctx, site, ipv6, shardIdx); err != nil {
+				return fmt.Errorf("delete rule for drained %s shard %d: %w", fam, shardIdx, err)
+			}
+		case "zone":
+			if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, ipv6, shardIdx); err != nil {
+				return fmt.Errorf("delete policies for drained %s shard %d: %w", fam, shardIdx, err)
+			}
+		}
+		return nil
+	})
+}
+
+// cleanupOrphanedShardGroups deletes placeholder-only (orphaned) groups found
+// in UniFi for sm, along with any policies/rules that still reference them.
+// Orphaned groups were never adopted into our memory management, so they have
+// no policies/rules created by us beyond this best-effort migration cleanup.
+func (m *managerImpl) cleanupOrphanedShardGroups(ctx context.Context, site, mode string, sm *ShardManager) {
+	for _, orphan := range sm.TakeOrphanedGroups() {
+		if m.cfg.DryRun {
+			m.log.Info().Str("site", site).Str("group_name", orphan.Name).Msg("[DRY-RUN] would delete orphaned group")
+			continue
+		}
+		m.log.Info().Str("site", site).Str("group_name", orphan.Name).Str("group_id", orphan.UnifiID).
+			Msg("deleting orphaned placeholder-only group")
+		// Best-effort cleanup of any policies/rules that reference this group.
+		// This handles migration from pre-lazy-creation code where rules were created eagerly.
+		m.deleteOrphanedReferencingObjects(ctx, site, mode, orphan.UnifiID)
+		// Delete the group object.
+		if err := sm.DeleteShardObject(ctx, orphan.UnifiID); err != nil {
+			m.log.Warn().Err(err).Str("group_id", orphan.UnifiID).Msg("failed to delete orphaned group (will continue)")
+		}
+	}
+}
+
+// tolerateShardFailures lets startup continue when only individual shards
+// lack their block policy or rule. Those shards are retried on every sync and
+// counted in unsynced_ips, which is better than refusing to start and
+// enforcing nothing.
+func (m *managerImpl) tolerateShardFailures(site string, err error) error {
+	if err == nil || !IsShardProvisionError(err) {
+		return err
+	}
+	m.log.Error().Err(err).Str("site", site).
+		Msg("some shards have no block policy or rule; their bans are not enforced yet and are retried on every sync")
 	return nil
 }
 
@@ -410,8 +320,7 @@ func (m *managerImpl) ApplyBan(ctx context.Context, site, ip string, ipv6 bool) 
 		// New shard was allocated, but may still be Pending (not yet in UniFi).
 		// Check if the shard has a valid group ID (Active), otherwise infrastructure
 		// will be provisioned by the activation callback when the shard is flushed.
-		groupIDs := sm.GroupIDs()
-		if newShardIdx < len(groupIDs) && groupIDs[newShardIdx] != "" {
+		if sm.GroupIDAt(newShardIdx) != "" {
 			// Shard is Active: provision its firewall rule/policy immediately
 			if err2 := m.ensureNewShardInfrastructure(ctx, site, ipv6, newShardIdx, sm); err2 != nil {
 				m.log.Error().Err(err2).Str("site", site).Bool("ipv6", ipv6).Int("shard", newShardIdx).
@@ -421,21 +330,6 @@ func (m *managerImpl) ApplyBan(ctx context.Context, site, ip string, ipv6 bool) 
 	}
 
 	return nil
-}
-
-// ApplyBanWithZones applies a ban using an optional scenario-specific set of
-// zone pairs. When zonePairs is non-empty, the override is logged and the IP
-// is routed through the default shard (Phase 1 — per-scenario shard
-// provisioning is deferred). When zonePairs is empty the call is identical to
-// ApplyBan.
-func (m *managerImpl) ApplyBanWithZones(ctx context.Context, site, ip string, ipv6 bool, zonePairs []config.ZonePair) error {
-	if len(zonePairs) == 0 {
-		return m.ApplyBan(ctx, site, ip, ipv6)
-	}
-	m.log.Info().Str("site", site).Str("ip", ip).Bool("ipv6", ipv6).
-		Int("override_zone_pairs", len(zonePairs)).
-		Msg("applying ban with scenario zone pair override")
-	return m.ApplyBan(ctx, site, ip, ipv6)
 }
 
 // ApplyUnban removes an IP from its shard and schedules a batch flush.
@@ -459,383 +353,17 @@ func (m *managerImpl) ApplyUnban(ctx context.Context, site, ip string, ipv6 bool
 	return nil
 }
 
-// Reconcile performs a full diff between bbolt state and UniFi API state.
-func (m *managerImpl) Reconcile(ctx context.Context, sites []string) (*ReconcileResult, error) {
-	start := time.Now()
-	result := &ReconcileResult{}
-
-	for _, site := range sites {
-		added, removed, errs := m.reconcileSite(ctx, site)
-		result.Added += added
-		result.Removed += removed
-		result.Errors = append(result.Errors, errs...)
-
-		metrics.ReconcileDelta.WithLabelValues("added", site).Set(float64(added))
-		metrics.ReconcileDelta.WithLabelValues("removed", site).Set(float64(removed))
-	}
-
-	result.Elapsed = time.Since(start)
-	return result, nil
-}
-
-// reconcileSite diffs the bbolt ban list against all UniFi groups for one site.
-func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, removed int, errs []error) {
-	bans, err := m.store.BanList()
-	if err != nil {
-		return 0, 0, []error{fmt.Errorf("load ban list: %w", err)}
-	}
-
-	m.mu.RLock()
-	v4Mgr := m.v4Mgrs[site]
-	v6Mgr := m.v6Mgrs[site]
-	m.mu.RUnlock()
-
-	if v4Mgr == nil {
-		return
-	}
-
-	// Build desired sets from bbolt
-	desiredV4 := make(map[string]struct{})
-	desiredV6 := make(map[string]struct{})
-	for ip, entry := range bans {
-		if entry.IPv6 {
-			desiredV6[ip] = struct{}{}
-		} else {
-			desiredV4[ip] = struct{}{}
-		}
-	}
-
-	// Add missing IPs
-	for ip := range desiredV4 {
-		if ctx.Err() != nil {
-			return added, removed, append(errs, ctx.Err())
-		}
-		if !v4Mgr.Contains(ip) {
-			if _, _, err := v4Mgr.Add(ctx, ip); err != nil {
-				errs = append(errs, err)
-			} else {
-				added++
-			}
-		}
-	}
-
-	// Remove extra IPs from v4
-	for _, ip := range v4Mgr.AllMembers() {
-		if ctx.Err() != nil {
-			return added, removed, append(errs, ctx.Err())
-		}
-		if _, ok := desiredV4[ip]; !ok {
-			if _, err := v4Mgr.Remove(ctx, ip); err != nil {
-				errs = append(errs, err)
-			} else {
-				removed++
-			}
-		}
-	}
-
-	// IPv6
-	if v6Mgr != nil {
-		for ip := range desiredV6 {
-			if ctx.Err() != nil {
-				return added, removed, append(errs, ctx.Err())
-			}
-			if !v6Mgr.Contains(ip) {
-				if _, _, err := v6Mgr.Add(ctx, ip); err != nil {
-					errs = append(errs, err)
-				} else {
-					added++
-				}
-			}
-		}
-		for _, ip := range v6Mgr.AllMembers() {
-			if ctx.Err() != nil {
-				return added, removed, append(errs, ctx.Err())
-			}
-			if _, ok := desiredV6[ip]; !ok {
-				if _, err := v6Mgr.Remove(ctx, ip); err != nil {
-					errs = append(errs, err)
-				} else {
-					removed++
-				}
-			}
-		}
-	}
-
-	if m.cfg.DryRun {
-		if added > 0 || removed > 0 {
-			m.log.Info().Str("site", site).Int("would_add", added).Int("would_remove", removed).
-				Msg("[DRY-RUN] reconcile diff computed; no changes written to UniFi")
-		}
-	} else {
-		func() {
-			m.syncMu.Lock()
-			defer m.syncMu.Unlock()
-			if err := v4Mgr.syncAllFamilies(ctx); err != nil {
-				errs = append(errs, fmt.Errorf("v4 flush: %w", err))
-			}
-			if v6Mgr != nil {
-				if err := v6Mgr.syncAllFamilies(ctx); err != nil {
-					errs = append(errs, fmt.Errorf("v6 flush: %w", err))
-				}
-			}
-		}()
-		m.pruneEmptyTailShards(ctx, site, v4Mgr, v6Mgr)
-	}
-
-	return
-}
-
-// setRateLimitUntil records when the rate-limit window expires.
-func (m *managerImpl) setRateLimitUntil(t time.Time) {
-	m.rateLimitUntil.Store(t)
-}
-
-// isRateLimited returns true if we are still inside a rate-limit window.
-func (m *managerImpl) isRateLimited() (bool, time.Time) {
-	v := m.rateLimitUntil.Load()
-	if v == nil {
-		return false, time.Time{}
-	}
-	t := v.(time.Time)
-	return time.Now().Before(t), t
-}
-
-// attachShardCallbacks wires rate-limit and circuit-breaker callbacks onto mgr.
-// Called for both v4 and v6 ShardManagers to avoid duplicating the callback logic.
-func (m *managerImpl) attachShardCallbacks(mgr *ShardManager) {
-	mgr.SetRateLimitCallback(func(retryAfter time.Duration) {
-		m.setRateLimitUntil(time.Now().Add(retryAfter))
-	})
-	mgr.SetSyncCallbacks(
-		func() { // onSyncSuccess
-			if m.cb.recordSuccess() {
-				m.log.Info().Msg("circuit breaker closed: controller reachable again")
-				metrics.CircuitBreakerState.Set(0)
-				if m.cfg.OnCircuitBreakerClose != nil {
-					m.cfg.OnCircuitBreakerClose()
-				}
-			}
-		},
-		func() { // onSyncError
-			if tripped := m.cb.recordFailure(); tripped {
-				m.log.Error().Msg("circuit breaker opened: too many consecutive sync failures")
-				metrics.CircuitBreakerState.Set(1)
-				if m.cfg.OnCircuitBreakerOpen != nil {
-					m.cfg.OnCircuitBreakerOpen()
-				}
-			}
-		},
-	)
-}
-
-// SyncDirty flushes all dirty shards to the UniFi API for the given sites.
-// Errors are logged per-shard and those shards remain dirty for retry on the next call.
-// Updates the DirtyShards gauge with the pre-sync dirty count before flushing.
-// If the controller previously signalled rate-limiting, SyncDirty skips all flushes
-// until the Retry-After window has elapsed.
-func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
-	// Check rate-limit window before doing any work.
-	if limited, until := m.isRateLimited(); limited {
-		m.log.Info().Time("retry_after", until).Msg("SyncDirty skipped: rate-limited by controller")
-		return nil
-	}
-
-	// Check circuit breaker.
-	if !m.cb.allow() {
-		m.log.Info().Msg("SyncDirty skipped: circuit breaker open")
-		return nil
-	}
-
-	// First pass: snapshot dirty-shard counts per site so the Prometheus gauge
-	// reflects pre-sync state and we know whether to emit a per-site Info log.
-	siteDirty := make(map[string]int, len(sites))
-	var totalDirty int
-	for _, site := range sites {
-		m.mu.RLock()
-		v4 := m.v4Mgrs[site]
-		v6 := m.v6Mgrs[site]
-		m.mu.RUnlock()
-
-		n := 0
-		if v4 != nil {
-			n += v4.countDirty()
-		}
-		if v6 != nil {
-			n += v6.countDirty()
-		}
-		siteDirty[site] = n
-		totalDirty += n
-	}
-	metrics.DirtyShards.Set(float64(totalDirty))
-
-	// Second pass: flush and emit a per-site Info summary when work was done.
-	for _, site := range sites {
-		m.mu.RLock()
-		v4 := m.v4Mgrs[site]
-		v6 := m.v6Mgrs[site]
-		m.mu.RUnlock()
-
-		// Rebalance: merge under-filled shards before flushing so moved IPs
-		// are flushed together with the target shard in the same tick.
-		if v4 != nil {
-			if n := v4.Rebalance(ctx); n > 0 {
-				m.log.Info().Str("site", site).Int("merged", n).Str("family", "v4").
-					Msg("shard rebalance complete")
-			}
-		}
-		if v6 != nil {
-			if n := v6.Rebalance(ctx); n > 0 {
-				m.log.Info().Str("site", site).Int("merged", n).Str("family", "v6").
-					Msg("shard rebalance complete")
-			}
-		}
-
-		// Guard against concurrent flush (e.g. reconcile running at startup).
-		// TryLock: skip this site's flush rather than blocking the ticker goroutine.
-		if !m.syncMu.TryLock() {
-			m.log.Warn().Str("site", site).Msg("SyncDirty: skipping site flush — reconcile in progress")
-			continue
-		}
-		func() {
-			defer m.syncMu.Unlock()
-			if v4 != nil {
-				_ = v4.syncAllFamilies(ctx)
-			}
-			if v6 != nil {
-				_ = v6.syncAllFamilies(ctx)
-			}
-		}()
-
-		// Drain shards consolidated by the rebalance pass — must run after
-		// syncAllFamilies so target shards are flushed before donors are deleted.
-		if v4 != nil {
-			v4.drainDraining(ctx)
-		}
-		if v6 != nil {
-			v6.drainDraining(ctx)
-		}
-
-		if siteDirty[site] > 0 {
-			v4Total := 0
-			v6Total := 0
-			if v4 != nil {
-				v4Total = len(v4.AllMembers())
-			}
-			if v6 != nil {
-				v6Total = len(v6.AllMembers())
-			}
-			m.log.Info().
-				Str("site", site).
-				Int("v4_total", v4Total).
-				Int("v6_total", v6Total).
-				Int("dirty_shards_flushed", siteDirty[site]).
-				Msg("firewall sync complete")
-		}
-	}
-
-	// Update active_bans gauge from bbolt after every sync tick.
-	m.UpdateActiveBansMetric()
-	metrics.LastSyncTimestamp.Set(float64(time.Now().Unix()))
-	return nil
-}
-
-// Drain removes all managed firewall objects for the given sites and cleans up bbolt.
-// Order per site: policies/rules first, then TML groups, then bbolt cleanup.
-func (m *managerImpl) Drain(ctx context.Context, sites []string) error {
-	drainedPolicies := 0
-	drainedShards := 0
-
-	for _, site := range sites {
-		mode := m.cachedMode(site)
-
-		// 1. Delete policies/rules
-		if m.cfg.DryRun {
-			m.log.Info().Str("site", site).Str("mode", mode).
-				Msg("[DRY-RUN] would delete firewall policies/rules")
-		} else {
-			switch mode {
-			case "zone":
-				if err := m.zoneMgr.DeletePolicies(ctx, site); err != nil {
-					m.log.Warn().Err(err).Str("site", site).Msg("drain: delete zone policies error")
-				}
-			case "legacy":
-				if err := m.legacyMgr.DeleteRules(ctx, site); err != nil {
-					m.log.Warn().Err(err).Str("site", site).Msg("drain: delete legacy rules error")
-				}
-			}
-		}
-
-		// 2. Delete shard group objects
-		m.mu.RLock()
-		v4 := m.v4Mgrs[site]
-		v6 := m.v6Mgrs[site]
-		m.mu.RUnlock()
-
-		for _, sm := range []*ShardManager{v4, v6} {
-			if sm == nil {
-				continue
-			}
-			for _, groupID := range sm.GroupIDs() {
-				if groupID == "" {
-					continue
-				}
-				if m.cfg.DryRun {
-					m.log.Info().Str("site", site).Str("group_id", groupID).
-						Msg("[DRY-RUN] would delete shard group")
-				} else {
-					if err := sm.DeleteShardObject(ctx, groupID); err != nil {
-						m.log.Warn().Err(err).Str("site", site).Str("group_id", groupID).
-							Msg("drain: delete shard group error")
-					}
-				}
-				drainedShards++
-			}
-		}
-
-		// 3. Clean up bbolt group and policy records for this site
-		if !m.cfg.DryRun {
-			groups, err := m.store.ListGroups()
-			if err != nil {
-				m.log.Warn().Err(err).Str("site", site).Msg("drain: list groups error")
-			} else {
-				for name, rec := range groups {
-					if rec.Site != site {
-						continue
-					}
-					if err := m.store.DeleteGroup(name); err != nil {
-						m.log.Warn().Err(err).Str("group", name).Msg("drain: delete group from bbolt error")
-					}
-				}
-			}
-
-			policies, err := m.store.ListPolicies()
-			if err != nil {
-				m.log.Warn().Err(err).Str("site", site).Msg("drain: list policies error")
-			} else {
-				for name, rec := range policies {
-					if rec.Site != site {
-						continue
-					}
-					drainedPolicies++
-					if err := m.store.DeletePolicy(name); err != nil {
-						m.log.Warn().Err(err).Str("policy", name).Msg("drain: delete policy from bbolt error")
-					}
-				}
-			}
-		}
-	}
-
-	m.log.Info().
-		Int("policies", drainedPolicies).
-		Int("shards", drainedShards).
-		Bool("dry_run", m.cfg.DryRun).
-		Msg("drain complete")
-	return nil
-}
-
-// ZoneManager returns the underlying ZoneManager, or nil in legacy mode.
+// ZoneManager returns the zone manager, or nil when no site resolved to zone
+// mode, so callers such as the SIGHUP reload skip legacy-only deployments.
 func (m *managerImpl) ZoneManager() *ZoneManager {
-	return m.zoneMgr
+	m.siteMu.RLock()
+	defer m.siteMu.RUnlock()
+	for _, mode := range m.siteMode {
+		if mode == "zone" {
+			return m.zoneMgr
+		}
+	}
+	return nil
 }
 
 // ensureNewShardInfrastructure provisions the firewall rule/policy for a newly created shard.
@@ -856,16 +384,12 @@ func (m *managerImpl) ensureNewShardInfrastructure(ctx context.Context, site str
 	}
 
 	// Get the new shard's UniFi group ID
-	ids := sm.GroupIDs()
-	if shardIdx >= len(ids) {
-		return fmt.Errorf("shard %d not found (have %d shards)", shardIdx, len(ids))
-	}
-	groupID := ids[shardIdx]
+	groupID := sm.GroupIDAt(shardIdx)
 
 	// If the shard is still Pending (empty group ID), skip provisioning.
 	// Infrastructure will be provisioned later by the activation callback.
 	if groupID == "" {
-		return nil
+		return fmt.Errorf("active shard %d has no UniFi group ID", shardIdx)
 	}
 
 	mode := m.cachedMode(site)
@@ -876,74 +400,6 @@ func (m *managerImpl) ensureNewShardInfrastructure(ctx context.Context, site str
 		return m.zoneMgr.EnsurePoliciesForShard(ctx, site, groupID, ipv6, shardIdx)
 	}
 	return nil
-}
-
-// pruneEmptyTailShards deletes empty trailing shards (group + rule/policy) for both families.
-func (m *managerImpl) pruneEmptyTailShards(ctx context.Context, site string, v4, v6 *ShardManager) {
-	if m.cfg.DryRun {
-		return
-	}
-
-	mode := m.cachedMode(site)
-
-	type entry struct {
-		sm   *ShardManager
-		ipv6 bool
-	}
-
-	for _, e := range []entry{{v4, false}, {v6, true}} {
-		if e.sm == nil {
-			continue
-		}
-	pruneLoop:
-		for {
-			unifiID, shardIdx, ok := e.sm.PrunableTail()
-			if !ok {
-				break
-			}
-
-			// Delete rule/policy first (must succeed before deleting the group).
-			// UniFi will reject group deletion if policies/rules still reference it.
-			switch mode {
-			case "legacy":
-				if err := m.legacyMgr.DeleteRuleForShard(ctx, site, e.ipv6, shardIdx); err != nil {
-					m.log.Error().Err(err).Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
-						Msg("failed to delete rule for pruned shard; aborting group delete to avoid orphans")
-					break pruneLoop // stop pruning on error to avoid orphaning the group
-				}
-			case "zone":
-				if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, e.ipv6, shardIdx); err != nil {
-					m.log.Error().Err(err).Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
-						Msg("failed to delete policies for pruned shard; aborting group delete to avoid orphans")
-					break pruneLoop // stop pruning on error to avoid orphaning the group
-				}
-			}
-
-			// Apply delay before group delete
-			if m.cfg.APIShardDelay > 0 {
-				select {
-				case <-time.After(m.cfg.APIShardDelay):
-				case <-ctx.Done():
-					return
-				}
-			}
-
-			// Delete backing shard object from UniFi.
-			if err := e.sm.DeleteShardObject(ctx, unifiID); err != nil {
-				m.log.Error().Err(err).Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
-					Msg("failed to delete pruned shard object")
-				break // stop pruning on error to avoid inconsistency
-			}
-
-			// Finalize: remove from in-memory + bbolt
-			if err := e.sm.RemoveTail(); err != nil {
-				m.log.Warn().Err(err).Msg("RemoveTail bbolt error")
-			}
-
-			m.log.Info().Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
-				Msg("pruned empty shard and its firewall rule/policy")
-		}
-	}
 }
 
 // deleteOrphanedReferencingObjects performs best-effort cleanup of any policies/rules that reference
@@ -959,6 +415,10 @@ func (m *managerImpl) deleteOrphanedReferencingObjects(ctx context.Context, site
 			return
 		}
 		for _, rule := range rules {
+			if !m.ownsOrphanReference(site, "legacy", rule.Name, rule.ID, rule.Description) ||
+				(rule.Action != "drop" && rule.Action != "reject") {
+				continue
+			}
 			// Check if this rule references the orphaned group
 			for _, ruleGroupID := range rule.SrcFirewallGroupIDs {
 				if ruleGroupID == groupID {
@@ -981,6 +441,9 @@ func (m *managerImpl) deleteOrphanedReferencingObjects(ctx context.Context, site
 			return
 		}
 		for _, policy := range policies {
+			if !m.ownsOrphanReference(site, "zone", policy.Name, policy.ID, policy.Description) || policy.Action != "BLOCK" {
+				continue
+			}
 			// Check if this policy references the orphaned group
 			for _, policyGroupID := range policy.TrafficMatchingListIDs {
 				if policyGroupID == groupID {
@@ -998,6 +461,19 @@ func (m *managerImpl) deleteOrphanedReferencingObjects(ctx context.Context, site
 	}
 }
 
+func (m *managerImpl) ownsOrphanReference(site, mode, name, id, description string) bool {
+	if rec, err := getCachedPolicy(m.store, site, name); err == nil && rec != nil && rec.UnifiID == id && rec.Site == site && rec.Mode == mode {
+		return true
+	}
+	expectedDescription := m.cfg.ZoneCfg.Description
+	prefix := m.namer.PolicyPrefix()
+	if mode == "legacy" {
+		expectedDescription = m.cfg.LegacyCfg.Description
+		prefix = m.namer.RulePrefix()
+	}
+	return description == expectedDescription && prefix != "" && strings.HasPrefix(name, prefix)
+}
+
 // cachedMode returns the resolved firewall mode for a site (cached from EnsureInfrastructure).
 func (m *managerImpl) cachedMode(site string) string {
 	m.siteMu.RLock()
@@ -1011,11 +487,11 @@ func (m *managerImpl) resolveMode(ctx context.Context, site string) (string, err
 	if m.cfg.FirewallMode != "auto" {
 		return m.cfg.FirewallMode, nil
 	}
-	// Auto-detect
+	// A transient detection failure must not pick legacy mode on a zone-based
+	// controller: the legacy objects would be created but never enforced.
 	hasZone, err := m.ctrl.HasFeature(ctx, site, controller.FeatureZoneBasedFirewall)
 	if err != nil {
-		m.log.Warn().Err(err).Str("site", site).Msg("zone feature detection failed, falling back to legacy")
-		return "legacy", nil
+		return "", fmt.Errorf("detect zone-based firewall support: %w", err)
 	}
 	if hasZone {
 		return "zone", nil

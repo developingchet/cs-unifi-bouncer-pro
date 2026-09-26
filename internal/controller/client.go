@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptrace"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,22 +23,25 @@ import (
 
 // ClientConfig holds parameters for constructing a UniFi HTTP client.
 type ClientConfig struct {
-	BaseURL      string
-	Username     string
-	Password     string
-	APIKey       string
-	VerifyTLS    bool
-	CACertPath   string
-	Timeout      time.Duration
-	Debug        bool
-	ReauthMinGap time.Duration // thundering-herd guard: skip re-auth if last one was < this ago
-	EnableIPv6   bool          // dial IPv6 — false by default, set true only with working IPv6 path
+	BaseURL       string
+	Username      string
+	Password      string
+	APIKey        string
+	VerifyTLS     bool
+	CACertPath    string
+	Timeout       time.Duration
+	Debug         bool
+	ReauthMinGap  time.Duration // thundering-herd guard: skip re-auth if last one was < this ago
+	ReauthTimeout time.Duration
+	DryRun        bool
+	EnableIPv6    bool // dial IPv6 — false by default, set true only with working IPv6 path
 }
 
 // unifiClient implements Controller using direct HTTPS calls to the UniFi Network API.
 type unifiClient struct {
 	cfg          ClientConfig
 	http         *http.Client
+	layout       apiLayout
 	session      *sessionManager
 	featureCache map[string]map[string]bool // site -> feature -> bool
 	cacheMu      sync.RWMutex
@@ -98,11 +103,21 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 		Transport: transport,
 		Timeout:   cfg.Timeout,
 		Jar:       jar,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
+
+	layout, err := detectLayout(ctx, httpClient, cfg.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	log.Info().Str("layout", layout.name).Msg("detected UniFi controller layout")
 
 	c := &unifiClient{
 		cfg:          cfg,
 		http:         httpClient,
+		layout:       layout,
 		featureCache: make(map[string]map[string]bool),
 		zoneIDCache:  make(map[string]map[string]string),
 		siteIDCache:  make(map[string]string),
@@ -111,10 +126,11 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 
 	authCfg := AuthConfig{
 		BaseURL:       cfg.BaseURL,
+		LoginPath:     layout.loginPath,
 		Username:      cfg.Username,
 		Password:      cfg.Password,
 		APIKey:        cfg.APIKey,
-		ReauthTimeout: cfg.Timeout,
+		ReauthTimeout: cfg.ReauthTimeout,
 		ReauthMinGap:  cfg.ReauthMinGap,
 	}
 	c.session = newSessionManager(authCfg, httpClient, log)
@@ -127,6 +143,9 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 
 // apiDo executes an HTTP request, handling auth, metrics, and typed error translation.
 func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint string) (*http.Response, error) {
+	if c.cfg.DryRun && req.Method != http.MethodGet && req.Method != http.MethodHead {
+		return nil, fmt.Errorf("dry run: refusing %s %s", req.Method, req.URL.Path)
+	}
 	start := time.Now()
 	c.session.SetAuthHeader(req)
 
@@ -141,36 +160,7 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 
 	if c.cfg.Debug {
 		c.log.Debug().Str("method", req.Method).Str("url", req.URL.String()).Msg("unifi api request")
-
-		// Attach httptrace to ctx — must be done before req.WithContext so the
-		// trace is not overwritten. All callbacks fire on the goroutine that calls Do.
-		trace := &httptrace.ClientTrace{
-			GetConn: func(hostPort string) {
-				c.log.Debug().Str("hostport", hostPort).Msg("httptrace: GetConn")
-			},
-			GotConn: func(i httptrace.GotConnInfo) {
-				c.log.Debug().Bool("reused", i.Reused).Bool("was_idle", i.WasIdle).Msg("httptrace: GotConn")
-			},
-			ConnectStart: func(network, addr string) {
-				c.log.Debug().Str("network", network).Str("addr", addr).Msg("httptrace: ConnectStart")
-			},
-			ConnectDone: func(network, addr string, err error) {
-				c.log.Debug().Str("addr", addr).Err(err).Msg("httptrace: ConnectDone")
-			},
-			TLSHandshakeStart: func() {
-				c.log.Debug().Msg("httptrace: TLSHandshakeStart")
-			},
-			TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
-				c.log.Debug().Err(err).Msg("httptrace: TLSHandshakeDone")
-			},
-			WroteRequest: func(info httptrace.WroteRequestInfo) {
-				c.log.Debug().Err(info.Err).Msg("httptrace: WroteRequest")
-			},
-			GotFirstResponseByte: func() {
-				c.log.Debug().Msg("httptrace: GotFirstResponseByte")
-			},
-		}
-		ctx = httptrace.WithClientTrace(ctx, trace)
+		ctx = attachDebugTrace(ctx, c.log)
 	}
 
 	resp, err := c.http.Do(req.WithContext(ctx))
@@ -179,7 +169,7 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 	if err != nil {
 		if c.cfg.Debug {
 			c.log.Debug().Str("method", req.Method).Str("url", req.URL.String()).
-				Err(err).Dur("elapsed", elapsed).Msg("unifi api request failed")
+				Err(err).Stringer("elapsed", elapsed).Msg("unifi api request failed")
 		}
 		metrics.APICalls.WithLabelValues(endpoint, "error").Inc()
 		return nil, err
@@ -194,9 +184,19 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 
 	if c.cfg.Debug {
 		c.log.Debug().Str("method", req.Method).Str("url", req.URL.String()).
-			Int("status", resp.StatusCode).Dur("elapsed", elapsed).Msg("unifi api response")
+			Int("status", resp.StatusCode).Stringer("elapsed", elapsed).Msg("unifi api response")
 	}
 
+	if err := responseStatusError(resp, req); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// responseStatusError translates a non-2xx UniFi API response into a typed
+// error, closing the response body in the process. It returns nil for 2xx
+// responses, leaving the body open for the caller to read.
+func responseStatusError(resp *http.Response, req *http.Request) error {
 	switch resp.StatusCode {
 	case http.StatusBadRequest:
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -205,31 +205,65 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 		if len(body) == 4096 {
 			bodyStr += "...(truncated)"
 		}
-		return nil, fmt.Errorf("bad request: %s", bodyStr)
+		if msg := classicErrorMsg(body); strings.HasSuffix(msg, "Existed") {
+			// The classic API reports duplicate names as 400, not 409.
+			return &ErrConflict{Msg: msg}
+		}
+		return &ErrBadRequest{Body: bodyStr, Arg: classicErrorArg(body)}
 	case http.StatusUnauthorized:
 		_ = resp.Body.Close()
-		return nil, &ErrUnauthorized{Msg: "HTTP 401"}
+		return &ErrUnauthorized{Msg: "HTTP 401"}
 	case http.StatusNotFound:
 		_ = resp.Body.Close()
-		return nil, &ErrNotFound{URL: req.URL.Path}
+		return &ErrNotFound{URL: req.URL.Path}
 	case http.StatusTooManyRequests:
-		const minRateLimitBackoff = 1 * time.Second
-		retryAfter := 10 * time.Second
-		if ra := resp.Header.Get("Retry-After"); ra != "" {
-			if d, err := time.ParseDuration(ra + "s"); err == nil {
-				retryAfter = d
-			}
-		}
-		if retryAfter < minRateLimitBackoff {
-			retryAfter = minRateLimitBackoff
-		}
+		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 		_ = resp.Body.Close()
-		return nil, &ErrRateLimit{RetryAfter: retryAfter}
+		return &ErrRateLimit{RetryAfter: retryAfter}
 	case http.StatusConflict:
 		_ = resp.Body.Close()
-		return nil, &ErrConflict{Msg: "HTTP 409 conflict"}
+		return &ErrConflict{Msg: "HTTP 409 conflict"}
 	}
-	return resp, nil
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		return fmt.Errorf("UniFi API returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+// attachDebugTrace attaches an httptrace.ClientTrace to ctx that logs
+// connection lifecycle events at debug level. Must be called before
+// req.WithContext so the trace is not overwritten; all callbacks fire on the
+// goroutine that calls Do.
+func attachDebugTrace(ctx context.Context, log zerolog.Logger) context.Context {
+	trace := &httptrace.ClientTrace{
+		GetConn: func(hostPort string) {
+			log.Debug().Str("hostport", hostPort).Msg("httptrace: GetConn")
+		},
+		GotConn: func(i httptrace.GotConnInfo) {
+			log.Debug().Bool("reused", i.Reused).Bool("was_idle", i.WasIdle).Msg("httptrace: GotConn")
+		},
+		ConnectStart: func(network, addr string) {
+			log.Debug().Str("network", network).Str("addr", addr).Msg("httptrace: ConnectStart")
+		},
+		ConnectDone: func(network, addr string, err error) {
+			log.Debug().Str("addr", addr).Err(err).Msg("httptrace: ConnectDone")
+		},
+		TLSHandshakeStart: func() {
+			log.Debug().Msg("httptrace: TLSHandshakeStart")
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			log.Debug().Err(err).Msg("httptrace: TLSHandshakeDone")
+		},
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			log.Debug().Err(info.Err).Msg("httptrace: WroteRequest")
+		},
+		GotFirstResponseByte: func() {
+			log.Debug().Msg("httptrace: GotFirstResponseByte")
+		},
+	}
+	return httptrace.WithClientTrace(ctx, trace)
 }
 
 // withReauth executes fn, and on ErrUnauthorized calls EnsureAuth then retries once.
@@ -238,7 +272,8 @@ func (c *unifiClient) withReauth(ctx context.Context, fn func() error) error {
 	if err == nil {
 		return nil
 	}
-	if _, ok := err.(*ErrUnauthorized); !ok {
+	var unauthorized *ErrUnauthorized
+	if !errors.As(err, &unauthorized) {
 		return err
 	}
 	if authErr := c.session.EnsureAuth(ctx); authErr != nil {
@@ -247,9 +282,15 @@ func (c *unifiClient) withReauth(ctx context.Context, fn func() error) error {
 	return fn()
 }
 
-// Ping verifies the controller is reachable.
+// Ping verifies the controller is reachable and accepts the credentials. An
+// API key only authorizes the integration API; the classic /api/self answers
+// 404 to it on UniFi OS, so key-based clients ping the integration site list.
 func (c *unifiClient) Ping(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.cfg.BaseURL+"/api/self", nil)
+	url := c.networkURL("/api/self")
+	if c.cfg.APIKey != "" {
+		url = c.networkURL("/integration/v1/sites")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
@@ -372,22 +413,6 @@ func (c *unifiClient) DeleteZonePolicy(ctx context.Context, site string, id stri
 		return err
 	}
 	return deleteZonePolicyV1(ctx, c, siteID, id)
-}
-
-func (c *unifiClient) GetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string) (PolicyOrdering, error) {
-	siteID, err := getSiteID(ctx, c, site)
-	if err != nil {
-		return PolicyOrdering{}, err
-	}
-	return getPolicyOrderingV1(ctx, c, siteID, srcZoneID, dstZoneID)
-}
-
-func (c *unifiClient) SetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string, ordering PolicyOrdering) error {
-	siteID, err := getSiteID(ctx, c, site)
-	if err != nil {
-		return err
-	}
-	return setPolicyOrderingV1(ctx, c, siteID, srcZoneID, dstZoneID, ordering)
 }
 
 // ---- Traffic Matching Lists (integration v1) --------------------------------

@@ -2,51 +2,62 @@ package blocklist
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/feedhttp"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
 	"github.com/rs/zerolog"
 )
 
-// Manager periodically fetches plain-text IP/CIDR blocklists from configured
-// URLs and applies them through the firewall.Manager ban path.
+const (
+	maxFeedBytes   = 16 << 20
+	maxFeedEntries = 250_000
+)
+
 type Manager struct {
-	urls     []string
-	interval time.Duration
-	fwMgr    firewall.Manager
-	store    storage.Store
-	sites    []string
-	prefix   string
-	log      zerolog.Logger
-	client   *http.Client
+	urls      []string
+	interval  time.Duration
+	claims    *banstate.Manager
+	protected []*net.IPNet
+	dryRun    bool
+	log       zerolog.Logger
+	client    *http.Client
+
+	// maxOutage bounds how long a failing feed keeps its bans, measured from
+	// its last good fetch (or from startup). lastGood is only touched by Run.
+	maxOutage time.Duration
+	lastGood  map[string]time.Time
 }
 
-// NewManager creates a blocklist Manager.
-func NewManager(urls []string, interval time.Duration, prefix string,
-	fwMgr firewall.Manager, store storage.Store, sites []string, log zerolog.Logger,
+// NewManager builds a feed manager. maxOutage is how long an unreachable
+// feed keeps the bans from its last good fetch; the daemon passes BAN_TTL.
+func NewManager(urls []string, interval, maxOutage time.Duration, claims *banstate.Manager,
+	protected []*net.IPNet, dryRun bool, log zerolog.Logger,
 ) *Manager {
+	lastGood := make(map[string]time.Time, len(urls))
+	now := time.Now()
+	for _, url := range urls {
+		lastGood[url] = now
+	}
 	return &Manager{
-		urls:     urls,
-		interval: interval,
-		prefix:   prefix,
-		fwMgr:    fwMgr,
-		store:    store,
-		sites:    sites,
-		log:      log,
-		client:   &http.Client{Timeout: 30 * time.Second},
+		urls: urls, interval: interval, claims: claims,
+		protected: protected, dryRun: dryRun, log: log,
+		client:    &http.Client{Timeout: 30 * time.Second, CheckRedirect: feedhttp.CheckRedirect},
+		maxOutage: maxOutage, lastGood: lastGood,
 	}
 }
 
-// Run fetches all blocklists on startup and then on every interval tick until ctx is cancelled.
 func (m *Manager) Run(ctx context.Context) {
 	m.fetchAndApply(ctx)
-
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
 	for {
@@ -59,84 +70,137 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 }
 
-// fetchAndApply downloads each configured URL and bans all valid IPs/CIDRs found.
 func (m *Manager) fetchAndApply(ctx context.Context) {
 	for _, url := range m.urls {
 		if err := m.fetchURL(ctx, url); err != nil {
-			m.log.Error().Err(err).Str("url", url).Msg("blocklist: fetch failed")
+			m.log.Error().Err(err).Str("url", logger.SafeURL(url)).Msg("blocklist: fetch failed")
+			m.keepClaims(url)
+			continue
 		}
+		m.lastGood[url] = time.Now()
 	}
 }
 
+// keepClaims extends the bans from url's last successful fetch through
+// another two refresh intervals. A feed's bans lapse when a successful fetch
+// no longer lists them, not because the feed was unreachable: otherwise one
+// failed fetch let the whole list expire at the moment the next fetch was
+// due, and a longer outage unbanned all of it. A feed that has failed for
+// longer than maxOutage is treated as gone and its bans run out.
+func (m *Manager) keepClaims(url string) {
+	if m.dryRun {
+		return
+	}
+	display := logger.SafeURL(url)
+	down := time.Since(m.lastGood[url])
+	if m.maxOutage > 0 && down >= m.maxOutage {
+		m.log.Error().Str("url", display).Stringer("unreachable_for", down.Round(time.Minute)).
+			Msg("blocklist: feed failing for longer than BAN_TTL; its bans are no longer extended and will expire")
+		return
+	}
+	n, err := m.claims.ExtendSource("blocklist:"+display, time.Now().Add(m.interval*2))
+	if err != nil {
+		m.log.Error().Err(err).Str("url", display).Msg("blocklist: could not extend bans from the last successful fetch")
+		return
+	}
+	if n > 0 {
+		m.log.Warn().Str("url", display).Int("bans", n).Msg("blocklist: keeping bans from the last successful fetch")
+	}
+}
+
+// fetchURL downloads one feed and claims its addresses. Feed URLs often carry
+// an access token, so logs and claim sources use the redacted form.
 func (m *Manager) fetchURL(ctx context.Context, url string) error {
+	display := logger.SafeURL(url)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return fmt.Errorf("create request: %w", logger.SafeURLError(err, display))
 	}
-
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("fetch: %w", err)
+		return fmt.Errorf("fetch: %w", logger.SafeURLError(err, display))
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("server returned %d", resp.StatusCode)
 	}
+	if resp.ContentLength > maxFeedBytes {
+		return fmt.Errorf("blocklist exceeds %d bytes", maxFeedBytes)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes+1))
+	if err != nil {
+		return fmt.Errorf("read body: %w", err)
+	}
+	if len(body) > maxFeedBytes {
+		return fmt.Errorf("blocklist exceeds %d bytes", maxFeedBytes)
+	}
 
-	// Bans from external blocklists expire after 2x the refresh interval so they are
-	// refreshed each cycle and naturally expire if the URL becomes unreachable.
-	expiresAt := time.Now().Add(m.interval * 2)
-
-	var applied, skipped int
-	scanner := bufio.NewScanner(resp.Body)
+	var entries []banstate.ClaimRequest
+	seen := make(map[string]struct{})
+	var skipped int
+	scanner := bufio.NewScanner(bytes.NewReader(body))
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		line := feedLineValue(scanner.Text())
+		if line == "" {
 			continue
 		}
-
 		ip, ipv6, ok := parseEntry(line)
-		if !ok {
+		if !ok || decision.Unbannable(ip, ipv6, m.protected) {
 			skipped++
 			continue
 		}
-
-		if err := m.store.BanRecord(ip, expiresAt, ipv6); err != nil {
-			m.log.Warn().Err(err).Str("ip", ip).Msg("blocklist: failed to record ban in bbolt")
+		if _, duplicate := seen[ip]; duplicate {
 			continue
 		}
-		for _, site := range m.sites {
-			if err := m.fwMgr.ApplyBan(ctx, site, ip, ipv6); err != nil {
-				m.log.Warn().Err(err).Str("ip", ip).Str("site", site).Msg("blocklist: ApplyBan failed")
-			}
+		if len(entries) >= maxFeedEntries {
+			return fmt.Errorf("blocklist exceeds %d unique entries", maxFeedEntries)
 		}
-		applied++
+		seen[ip] = struct{}{}
+		entries = append(entries, banstate.ClaimRequest{IP: ip, IPv6: ipv6})
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read body: %w", err)
+		return fmt.Errorf("scan blocklist: %w", err)
 	}
-
-	m.log.Info().Str("url", url).Int("applied", applied).Int("skipped", skipped).
-		Msg("blocklist: fetch complete")
+	if len(entries) == 0 {
+		// An error page or truncated response served with 200 must not
+		// count as "the feed now lists nothing".
+		return fmt.Errorf("no valid entries (%d lines skipped)", skipped)
+	}
+	if m.dryRun {
+		m.log.Info().Str("url", display).Int("entries", len(entries)).Msg("[DRY-RUN] would import blocklist")
+		return nil
+	}
+	expiresAt := time.Now().Add(m.interval * 2)
+	added, err := m.claims.ClaimMany(ctx, entries, "blocklist:"+display, expiresAt)
+	if err != nil {
+		m.log.Warn().Err(err).Str("url", display).Msg("blocklist: some bans could not be applied yet; reconcile will retry")
+	}
+	m.log.Info().Str("url", display).Int("entries", len(entries)).Int("new", added).
+		Int("skipped", skipped).Msg("blocklist: fetch complete")
 	return nil
 }
 
-// parseEntry validates and normalises an IP or CIDR string.
-// Returns the canonical form, whether it is IPv6, and whether it is valid.
-func parseEntry(s string) (ip string, ipv6 bool, ok bool) {
-	// Try CIDR first
-	if _, network, err := net.ParseCIDR(s); err == nil {
-		is6 := network.IP.To4() == nil
-		return network.String(), is6, true
+// feedLineValue returns the address field of a feed line: the text before
+// any "#" or ";" comment, up to the first whitespace. Common feeds annotate
+// entries inline (Spamhaus DROP: "192.0.2.0/24 ; SBL123"), and those lines
+// used to be skipped as unparseable. "" means the line holds no entry.
+func feedLineValue(line string) string {
+	if i := strings.IndexAny(line, "#;"); i >= 0 {
+		line = line[:i]
 	}
-	// Then bare IP
-	parsed := net.ParseIP(s)
-	if parsed == nil {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+// parseEntry canonicalises one feed line the same way CrowdSec decisions are,
+// so a host prefix like 203.0.113.9/32 is stored as the bare address.
+func parseEntry(s string) (ip string, ipv6 bool, ok bool) {
+	canonical, _, err := decision.ParseAndSanitize(s)
+	if err != nil {
 		return "", false, false
 	}
-	if v4 := parsed.To4(); v4 != nil {
-		return v4.String(), false, true
-	}
-	return parsed.String(), true, true
+	return canonical, decision.IsIPv6(canonical), true
 }

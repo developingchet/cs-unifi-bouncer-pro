@@ -33,6 +33,7 @@ type FirewallRule struct {
 type ZonePolicy struct {
 	ID                     string
 	Name                   string
+	Index                  *int // controller order within a zone pair, when reported
 	Enabled                bool
 	Action                 string // "BLOCK", "ALLOW", "REJECT"
 	AllowReturnTraffic     bool   // only valid for ALLOW action
@@ -41,7 +42,6 @@ type ZonePolicy struct {
 	DstZone                string
 	IPVersion              string   // "IPV4", "IPV6", "BOTH"
 	TrafficMatchingListIDs []string // proxy API: source.ip_group_id (single ID)
-	Predefined             bool     // true for built-in policies managed by UniFi
 	ConnectionStateFilter  []string // e.g. ["NEW", "INVALID"]
 	LoggingEnabled         bool
 	SrcPortTMLID           string // TML of type "PORTS" for source port filter (empty = any)
@@ -51,9 +51,10 @@ type ZonePolicy struct {
 
 // Zone represents a UniFi network zone (topology discovery).
 type Zone struct {
-	ID     string
-	Name   string
-	Origin string // metadata.origin from integration v1 API, e.g. "USER_DEFINED"
+	ID         string
+	Name       string
+	NetworkIDs []string
+	Origin     string // metadata.origin from integration v1 API, e.g. "USER_DEFINED"
 }
 
 // TrafficMatchingList represents an integration v1 IP/port list (zone mode).
@@ -69,13 +70,6 @@ type TrafficMatchingList struct {
 type TrafficMatchingListItem struct {
 	Type  string `json:"-"` // "IP_ADDRESS", "SUBNET", "PORT_NUMBER"; omitted from JSON to match wire format
 	Value string
-}
-
-// PolicyOrdering holds the sorted list of user-defined policy IDs for a
-// specific source/destination zone pair.
-type PolicyOrdering struct {
-	BeforeSystemDefined []string
-	AfterSystemDefined  []string
 }
 
 // Controller is the UniFi API seam. All methods accept context for deadline control.
@@ -97,8 +91,6 @@ type Controller interface {
 	CreateZonePolicy(ctx context.Context, site string, p ZonePolicy) (ZonePolicy, error)
 	UpdateZonePolicy(ctx context.Context, site string, p ZonePolicy) error
 	DeleteZonePolicy(ctx context.Context, site string, id string) error
-	GetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string) (PolicyOrdering, error)
-	SetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string, ordering PolicyOrdering) error
 
 	// Traffic Matching Lists — integration v1, zone mode only
 	ListTrafficMatchingLists(ctx context.Context, site string) ([]TrafficMatchingList, error)
@@ -154,6 +146,20 @@ type ErrRateLimit struct {
 
 func (e *ErrRateLimit) Error() string {
 	return fmt.Sprintf("rate limited (retry after %s)", e.RetryAfter)
+}
+
+// ErrBadRequest is an HTTP 400 the controller returned for a request it
+// understood but refused, such as a firewall group member it does not accept.
+// The controller is healthy; retrying the same request fails the same way.
+type ErrBadRequest struct {
+	Body string
+	// Arg is the offending value the classic API names in meta.args (for
+	// api.err.FirewallGroupInvalidArgs, the rejected group member), or "".
+	Arg string
+}
+
+func (e *ErrBadRequest) Error() string {
+	return fmt.Sprintf("bad request: %s", e.Body)
 }
 
 // ErrConflict is returned when a create operation would cause a duplicate.

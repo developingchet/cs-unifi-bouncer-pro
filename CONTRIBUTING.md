@@ -25,7 +25,7 @@ Before opening an issue:
 
 A good bug report includes:
 
-- Sanitised Docker logs (`docker logs cs-unifi-bouncer-pro 2>&1 | grep -v "API_KEY\|PASSWORD"`)
+- Relevant Docker log lines, reviewed manually to remove credentials and private network details before sharing
 - UniFi controller version and firmware channel
 - CrowdSec version (`docker exec crowdsec cscli version`)
 - Firewall mode in use (`FIREWALL_MODE`)
@@ -61,7 +61,7 @@ Documentation PRs are always welcome — from typo fixes to new deployment examp
 
 | Tool | Minimum version |
 |------|----------------|
-| Go | 1.24 |
+| Go | 1.26.6 |
 | Docker | 20.10 |
 | Docker Compose | v2 |
 
@@ -99,7 +99,7 @@ All unit tests run without a live CrowdSec instance or UniFi controller. Externa
 All Go code must be formatted with `gofmt` and pass `go vet` before submission. The CI lint job (`golangci-lint`) enforces additional rules.
 
 ```bash
-gofmt -w ./...
+gofmt -w path/to/changed.go
 go vet ./...
 ```
 
@@ -165,7 +165,7 @@ Use temporary directories for tests that write to disk. Clean them up with `t.Te
 
 **Manual testing checklist before PR:**
 
-- [ ] `docker compose build && docker compose up -d` succeeds
+- [ ] `make docker-build` succeeds; deployment with `docker compose up -d` uses the published image configured in Compose
 - [ ] Bouncer appears in `docker exec crowdsec cscli bouncers list`
 - [ ] A test decision (`cscli decisions add -i 203.0.113.42 -t ban -d 1h`) appears in logs
 - [ ] Firewall group or zone policy is created/updated in the UniFi controller
@@ -194,7 +194,7 @@ Use temporary directories for tests that write to disk. Clean them up with `t.Te
 
 **PR checklist**
 
-- [ ] `gofmt -w ./...` applied
+- [ ] Changed Go files are formatted with `gofmt`
 - [ ] `go test -race ./...` passes
 - [ ] New exported functions have tests
 - [ ] Documentation updated if behaviour changed

@@ -2,6 +2,7 @@ package logger
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -92,5 +93,34 @@ func TestRedactXApiKeyHeader(t *testing.T) {
 	got := redact(input)
 	if strings.Contains(got, "my-unifi-key-value-12345678") {
 		t.Errorf("X-Api-Key value should be redacted, got: %q", got)
+	}
+}
+
+func TestRedactPreservesStructuredLog(t *testing.T) {
+	input := `{"password":"secret,with\"quote","status":"ok","api_key":"abcdef1234567890"}`
+	got := redact(input)
+	var fields map[string]string
+	if err := json.Unmarshal([]byte(got), &fields); err != nil {
+		t.Fatalf("redacted output is not JSON: %v; output: %s", err, got)
+	}
+	if fields["password"] != "[REDACTED]" || fields["api_key"] != "[REDACTED]" || fields["status"] != "ok" {
+		t.Fatalf("unexpected redacted output: %s", got)
+	}
+}
+
+func TestRedactSessionAndTokens(t *testing.T) {
+	tests := []struct{ name, input, secret string }{
+		{"cookie header", `Cookie: unifises=s3ss10nv4lue`, "s3ss10nv4lue"},
+		{"set-cookie json", `{"set-cookie":"TOKEN=eyJhbGciOiJIUzI1NiJ9.abc; Path=/"}`, "eyJhbGciOiJIUzI1NiJ9"},
+		{"csrf header", `X-Csrf-Token: 0f1e2d3c4b5a`, "0f1e2d3c4b5a"},
+		{"updated csrf header", `"X-Updated-Csrf-Token":"9a8b7c6d"`, "9a8b7c6d"},
+		{"url token", `GET https://feeds.example/list.txt?token=feedsecret99 failed`, "feedsecret99"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := redact(tt.input); strings.Contains(got, tt.secret) {
+				t.Errorf("secret not redacted: %q", got)
+			}
+		})
 	}
 }

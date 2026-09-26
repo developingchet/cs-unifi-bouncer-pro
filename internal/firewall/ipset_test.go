@@ -39,7 +39,7 @@ func TestIPSet_AddRemove(t *testing.T) {
 	}
 }
 
-func TestIPSet_PeekDirtyCommitClean(t *testing.T) {
+func TestIPSet_PeekDirtyMarkClean(t *testing.T) {
 	s := NewIPSet()
 	s.Add("1.1.1.1")
 	s.Add("2.2.2.2")
@@ -56,10 +56,10 @@ func TestIPSet_PeekDirtyCommitClean(t *testing.T) {
 		t.Fatal("PeekDirty must not clear dirty flag")
 	}
 
-	s.CommitClean()
+	s.MarkClean()
 	_, dirty = s.PeekDirty()
 	if dirty {
-		t.Fatal("expected clean after CommitClean")
+		t.Fatal("expected clean after MarkClean")
 	}
 }
 
@@ -103,5 +103,27 @@ func TestIPSet_Members(t *testing.T) {
 	// Members() must not affect dirty state
 	if s.IsDirty() {
 		t.Fatal("Members() must not dirty the set")
+	}
+}
+
+func TestIPSet_CommitFlushedKeepsConcurrentChangesDirty(t *testing.T) {
+	s := NewIPSet()
+	s.Add("1.1.1.1")
+	sent, dirty := s.PeekDirty()
+	if !dirty {
+		t.Fatal("expected dirty snapshot")
+	}
+	s.Add("2.2.2.2") // added while the first snapshot is being written
+	s.CommitFlushed(sent)
+	if !s.IsDirty() || !s.HasChangedFromFlushed() {
+		t.Fatal("change made during API write must remain pending")
+	}
+	if s.SkipUnchanged() {
+		t.Fatal("changed members cannot be skipped")
+	}
+	sent, _ = s.PeekDirty()
+	s.CommitFlushed(sent)
+	if s.IsDirty() || s.HasChangedFromFlushed() {
+		t.Fatal("matching successful write should leave the set clean")
 	}
 }

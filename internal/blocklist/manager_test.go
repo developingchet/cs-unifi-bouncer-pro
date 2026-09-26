@@ -9,7 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/testutil"
 	"github.com/rs/zerolog"
@@ -38,28 +39,20 @@ func (m *mockFWManager) ApplyBan(_ context.Context, _, _ string, _ bool) error {
 	return nil
 }
 
-func (m *mockFWManager) ApplyBanWithZones(_ context.Context, _, _ string, _ bool, _ []config.ZonePair) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.banErr != nil {
-		return m.banErr
-	}
-	m.banCalls++
-	return nil
-}
-func (m *mockFWManager) ApplyUnban(_ context.Context, _, _ string, _ bool) error { return nil }
+func (m *mockFWManager) ApplyUnban(_ context.Context, _, _ string, _ bool) error  { return nil }
 func (m *mockFWManager) EnsureInfrastructure(_ context.Context, _ []string) error { return nil }
+func (m *mockFWManager) PrepareDrain(_ context.Context, _ []string) error         { return nil }
 func (m *mockFWManager) Reconcile(_ context.Context, _ []string) (*firewall.ReconcileResult, error) {
 	return &firewall.ReconcileResult{}, nil
 }
-func (m *mockFWManager) SyncDirty(_ context.Context, _ []string) error  { return nil }
-func (m *mockFWManager) Drain(_ context.Context, _ []string) error       { return nil }
-func (m *mockFWManager) ZoneManager() *firewall.ZoneManager              { return nil }
+func (m *mockFWManager) SyncDirty(_ context.Context, _ []string) error { return nil }
+func (m *mockFWManager) Drain(_ context.Context, _ []string) error     { return nil }
+func (m *mockFWManager) ZoneManager() *firewall.ZoneManager            { return nil }
 
 func newTestManager(url string) (*Manager, *testutil.MockStore, *mockFWManager) {
 	store := testutil.NewMockStore()
 	fwMgr := &mockFWManager{}
-	mgr := NewManager([]string{url}, 24*time.Hour, "test", fwMgr, store, []string{"default"}, zerolog.Nop())
+	mgr := NewManager([]string{url}, 24*time.Hour, 7*24*time.Hour, banstate.New(store, fwMgr, []string{"default"}, false), nil, false, zerolog.Nop())
 	return mgr, store, fwMgr
 }
 
@@ -135,6 +128,49 @@ func TestManager_ServerError(t *testing.T) {
 	}
 }
 
+func TestManager_ProtectsPrivateAndWhitelistedRanges(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("10.0.0.0/8\n0.0.0.0/0\n198.51.100.0/24\n203.0.113.2\n"))
+	}))
+	defer srv.Close()
+	manager, store, fw := newTestManager(srv.URL)
+	whitelist, err := decision.ParseWhitelist([]string{"198.51.100.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.protected = whitelist
+	manager.fetchAndApply(context.Background())
+	bans, err := store.BanList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bans) != 1 || fw.BanCount() != 1 {
+		t.Fatalf("protected addresses reached firewall: bans=%v calls=%d", bans, fw.BanCount())
+	}
+	if _, ok := bans["203.0.113.2"]; !ok {
+		t.Fatal("public control address was not imported")
+	}
+}
+
+func TestManager_RejectsOversizedFeedBeforeApplying(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("203.0.113.2\n"))
+		_, _ = w.Write([]byte(strings.Repeat("#", maxFeedBytes)))
+	}))
+	defer srv.Close()
+	manager, store, fw := newTestManager(srv.URL)
+	if err := manager.fetchURL(context.Background(), srv.URL); err == nil {
+		t.Fatal("oversized feed was accepted")
+	}
+	bans, err := store.BanList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bans) != 0 || fw.BanCount() != 0 {
+		t.Fatalf("oversized feed was partially applied: bans=%d calls=%d", len(bans), fw.BanCount())
+	}
+}
+
 func TestManager_HTTPTimeout(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -159,6 +195,9 @@ func TestParseEntry(t *testing.T) {
 		{"1.2.3.4", "1.2.3.4", false, true},
 		{"203.0.113.0/24", "203.0.113.0/24", false, true},
 		{"2001:db8::1", "2001:db8::1", true, true},
+		{"203.0.113.99/32", "203.0.113.99", false, true},
+		{"2001:db8::7/128", "2001:db8::7", true, true},
+		{"2001:db8:5::/64", "2001:db8:5::/64", true, true},
 		{"not-an-ip", "", false, false},
 		{"", "", false, false},
 		{strings.Repeat("x", 100), "", false, false},

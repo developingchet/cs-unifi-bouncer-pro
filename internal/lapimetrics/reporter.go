@@ -1,4 +1,4 @@
-package lapi_metrics
+package lapimetrics
 
 import (
 	"bufio"
@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/capabilities"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/lapihttp"
 	"github.com/rs/zerolog"
 )
 
@@ -41,7 +42,7 @@ type originKey struct {
 }
 
 // NewReporter constructs a Reporter. If interval > 0 and < 10m, it is clamped to 10m.
-func NewReporter(lapiURL, apiKey, version string, interval time.Duration, log zerolog.Logger) *Reporter {
+func NewReporter(lapiURL, apiKey, version string, interval time.Duration, client *http.Client, log zerolog.Logger) *Reporter {
 	if interval > 0 && interval < minInterval {
 		log.Warn().
 			Dur("requested", interval).
@@ -56,7 +57,7 @@ func NewReporter(lapiURL, apiKey, version string, interval time.Duration, log ze
 		interval:    interval,
 		startupTime: time.Now(),
 		log:         log,
-		httpClient:  &http.Client{Timeout: 5 * time.Second},
+		httpClient:  client,
 		blocked:     make(map[originKey]int64),
 	}
 }
@@ -120,6 +121,18 @@ func (r *Reporter) push(ctx context.Context) error {
 	r.blocked = make(map[originKey]int64)
 	r.processed = 0
 	r.mu.Unlock()
+	delivered := false
+	defer func() {
+		if delivered {
+			return
+		}
+		r.mu.Lock()
+		for key, count := range blocked {
+			r.blocked[key] += count
+		}
+		r.processed += processed
+		r.mu.Unlock()
+	}()
 
 	now := time.Now()
 
@@ -211,7 +224,7 @@ func (r *Reporter) push(ctx context.Context) error {
 	}
 	req.Header.Set("X-Api-Key", r.apiKey)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "crowdsec-unifi-bouncer/v"+r.version)
+	req.Header.Set("User-Agent", lapihttp.UserAgent(r.version))
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
@@ -221,13 +234,9 @@ func (r *Reporter) push(ctx context.Context) error {
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		r.log.Warn().
-			Int("status", resp.StatusCode).
-			Str("url", url).
-			Str("response", strings.TrimSpace(string(bodyBytes))).
-			Msg("lapi usage-metrics returned non-2xx")
-		return nil
+		return fmt.Errorf("lapi usage-metrics returned HTTP %d from %s: %s", resp.StatusCode, url, strings.TrimSpace(string(bodyBytes)))
 	}
+	delivered = true
 	return nil
 }
 

@@ -20,9 +20,6 @@ type MockController struct {
 	zones    map[string][]controller.Zone
 	tmls     map[string][]controller.TrafficMatchingList
 
-	// Policy orderings keyed by "site:srcZoneID:dstZoneID"
-	orderings map[string]controller.PolicyOrdering
-
 	// Preset site ID mappings: internalReference -> UUID
 	siteIDs map[string]string
 
@@ -40,21 +37,35 @@ type MockController struct {
 
 	// Auto-increment ID counter for created resources
 	nextID int
+
+	// refusedMembers are group members UpdateFirewallGroup rejects the way
+	// the classic API does (HTTP 400 FirewallGroupInvalidArgs naming it).
+	refusedMembers map[string]bool
+}
+
+// RefuseGroupMember makes UpdateFirewallGroup fail with an ErrBadRequest
+// naming member whenever a write includes it.
+func (m *MockController) RefuseGroupMember(member string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.refusedMembers == nil {
+		m.refusedMembers = make(map[string]bool)
+	}
+	m.refusedMembers[member] = true
 }
 
 // NewMockController returns a zero-state MockController ready for use.
 func NewMockController() *MockController {
 	return &MockController{
-		groups:    make(map[string][]controller.FirewallGroup),
-		rules:     make(map[string][]controller.FirewallRule),
-		policies:  make(map[string][]controller.ZonePolicy),
-		zones:     make(map[string][]controller.Zone),
-		tmls:      make(map[string][]controller.TrafficMatchingList),
-		orderings: make(map[string]controller.PolicyOrdering),
-		siteIDs:   make(map[string]string),
-		features:  make(map[string]map[string]bool),
-		errors:    make(map[string]error),
-		calls:     make(map[string]int),
+		groups:   make(map[string][]controller.FirewallGroup),
+		rules:    make(map[string][]controller.FirewallRule),
+		policies: make(map[string][]controller.ZonePolicy),
+		zones:    make(map[string][]controller.Zone),
+		tmls:     make(map[string][]controller.TrafficMatchingList),
+		siteIDs:  make(map[string]string),
+		features: make(map[string]map[string]bool),
+		errors:   make(map[string]error),
+		calls:    make(map[string]int),
 	}
 }
 
@@ -171,6 +182,14 @@ func (m *MockController) UpdateFirewallGroup(ctx context.Context, site string, g
 	defer m.mu.Unlock()
 	if err := m.track("UpdateFirewallGroup"); err != nil {
 		return err
+	}
+	for _, member := range g.GroupMembers {
+		if m.refusedMembers[member] {
+			return &controller.ErrBadRequest{
+				Body: fmt.Sprintf(`{"meta":{"rc":"error","args":%q,"msg":"api.err.FirewallGroupInvalidArgs"},"data":[]}`, member),
+				Arg:  member,
+			}
+		}
 	}
 	for i, existing := range m.groups[site] {
 		if existing.ID == g.ID {
@@ -360,38 +379,6 @@ func (m *MockController) GetSiteID(ctx context.Context, siteName string) (string
 	}
 	// Passthrough: return siteName as its own ID (useful for tests that use UUID-like names directly).
 	return siteName, nil
-}
-
-// GetLastOrdering returns the ordering last set for the given zone pair.
-func (m *MockController) SetOrdering(site, srcZoneID, dstZoneID string, ordering controller.PolicyOrdering) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.orderings[site+":"+srcZoneID+":"+dstZoneID] = ordering
-}
-
-func (m *MockController) GetLastOrdering(site, srcZoneID, dstZoneID string) controller.PolicyOrdering {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.orderings[site+":"+srcZoneID+":"+dstZoneID]
-}
-
-func (m *MockController) GetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string) (controller.PolicyOrdering, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.track("GetPolicyOrdering"); err != nil {
-		return controller.PolicyOrdering{}, err
-	}
-	return m.orderings[site+":"+srcZoneID+":"+dstZoneID], nil
-}
-
-func (m *MockController) SetPolicyOrdering(ctx context.Context, site, srcZoneID, dstZoneID string, ordering controller.PolicyOrdering) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.track("SetPolicyOrdering"); err != nil {
-		return err
-	}
-	m.orderings[site+":"+srcZoneID+":"+dstZoneID] = ordering
-	return nil
 }
 
 func (m *MockController) DiscoverZones(ctx context.Context, site string) ([]controller.Zone, error) {

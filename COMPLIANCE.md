@@ -1,10 +1,10 @@
 # Security & Supply Chain Compliance
 
 This document describes the security posture and supply chain controls for
-cs-unifi-bouncer-pro. It is written for auditors, operators, and contributors
+cs-unifi-bouncer-pro. It is written for security reviewers and contributors
 who need to verify the integrity of published artifacts or assess the runtime
-hardening of deployed containers. It covers release **v1.0.0** and all
-subsequent releases produced by `.github/workflows/release.yml`.
+hardening of deployed containers. It describes the current
+`.github/workflows/release.yml` and container configuration.
 
 ---
 
@@ -16,7 +16,7 @@ controls below are applied to every published artifact.
 ### Trivy Vulnerability Scan
 
 Job `docker-scan`, step **"Trivy vulnerability scan"**
-(`aquasecurity/trivy-action@0.28.0`):
+(`aquasecurity/trivy-action@0.34.1`):
 
 - Scans the `linux/amd64` candidate image before anything is pushed.
 - `exit-code: "1"` — the workflow fails and no image is published if unfixed
@@ -33,7 +33,7 @@ long-lived signing key exists. The signature is bound to the exact release
 workflow identity.
 
 ```bash
-cosign verify developingchet/cs-unifi-bouncer-pro:v1.0.0 \
+cosign verify developingchet/cs-unifi-bouncer-pro:v1.2.5 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 ```
@@ -78,7 +78,7 @@ Job `docker-push`, step **"Build and push multi-arch image"**
 - Profile path: `security/seccomp-unifi.json`
 - Default action: `SCMP_ACT_ERRNO` — all syscalls are denied unless explicitly
   listed.
-- Allowlist: 91 syscalls required by the Go runtime, bbolt, and TLS network I/O.
+- Allowlist: the syscalls required by the Go runtime, bbolt, and TLS network I/O.
 
 CI validation runs on every push and pull request in two stages
 (`.github/workflows/ci.yml`):
@@ -153,7 +153,8 @@ use pinned versions. The table below is copied verbatim from the workflow files.
 | `actions/setup-go` | `@v5` | ci.yml, release.yml |
 | `actions/upload-artifact` | `@v4` | release.yml |
 | `anchore/sbom-action` | `@v0` | release.yml |
-| `aquasecurity/trivy-action` | `@0.28.0` | release.yml |
+| `aquasecurity/trivy-action` | `@0.34.1` | release.yml |
+| `github/codeql-action/upload-sarif` | `@v4` | release.yml |
 | `docker/build-push-action` | `@v5` | ci.yml, release.yml |
 | `docker/login-action` | `@v3` | release.yml |
 | `docker/metadata-action` | `@v5` | release.yml |
@@ -175,12 +176,12 @@ Independent verification of each supply chain claim:
 
 ```bash
 # Verify image signature
-cosign verify developingchet/cs-unifi-bouncer-pro:v1.0.0 \
+cosign verify developingchet/cs-unifi-bouncer-pro:v1.2.5 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 
 # Inspect SBOM attestation
-cosign verify-attestation developingchet/cs-unifi-bouncer-pro:v1.0.0 \
+cosign verify-attestation developingchet/cs-unifi-bouncer-pro:v1.2.5 \
   --type cyclonedx \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \

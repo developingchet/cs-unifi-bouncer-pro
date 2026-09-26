@@ -1,21 +1,24 @@
+version: "2"
+
 run:
   timeout: 5m
 
 linters:
+  default: none
   enable:
     - errcheck
     - govet
     - staticcheck
     - ineffassign
     - nilerr
-
-issues:
-  exclude-rules:
-    # Ignore unchecked errors on Close/Body.Close — common safe pattern
-    - text: "Error return value of .*(Close|Body.Close|resp.Body.Close). is not checked"
-      linters:
-        - errcheck
-    # Ignore unchecked errors on Write — common in HTTP handlers
-    - text: "Error return value of .*(Write|WriteString). is not checked"
-      linters:
-        - errcheck
+  exclusions:
+    rules:
+      - text: 'Error return value of .*Close.* is not checked'
+        linters:
+          - errcheck
+      - text: 'Error return value of .*(Write|WriteString).* is not checked'
+        linters:
+          - errcheck
+      - text: 'Error return value of `fmt\.Fprint.*` is not checked'
+        linters:
+          - errcheck

@@ -15,9 +15,10 @@ Common issues and solutions for cs-unifi-bouncer-pro.
 - [No Bans Being Applied](#no-bans-being-applied)
   - [No decisions in CrowdSec](#no-decisions-in-crowdsec)
   - [Decisions are being filtered](#decisions-are-being-filtered)
+  - [My own address is banned](#my-own-address-is-banned)
 - [Authentication Errors](#authentication-errors)
   - [UniFi controller returns 401](#unifi-controller-returns-401)
-  - [CrowdSec LAPI returns 401](#crowdsec-lapi-returns-401)
+  - [CrowdSec LAPI returns 401 or 403](#crowdsec-lapi-returns-401-or-403)
 - [Cloudflare Whitelist Issues](#cloudflare-whitelist-issues)
   - [Cloudflare ALLOW policies not created](#cloudflare-allow-policies-not-created)
   - [Cloudflare whitelist blocks legitimate traffic](#cloudflare-whitelist-blocks-legitimate-traffic)
@@ -28,6 +29,9 @@ Common issues and solutions for cs-unifi-bouncer-pro.
   - [Invalid port in ZONE_PAIRS or CLOUDFLARE_ZONE_PAIRS](#invalid-port-in-zone_pairs-or-cloudflare_zone_pairs)
 - [State and Reconcile Issues](#state-and-reconcile-issues)
   - [IPs not removed on unban](#ips-not-removed-on-unban)
+  - [Group edited in the UniFi UI](#group-edited-in-the-unifi-ui)
+  - [Bans stop applying after the controller restarts](#bans-stop-applying-after-the-controller-restarts)
+  - [Shard creation fails with "API returned empty ID"](#shard-creation-fails-with-api-returned-empty-id)
   - [Stale policies after removing a zone pair](#stale-policies-after-removing-a-zone-pair)
   - [Duplicate firewall groups after rename](#duplicate-firewall-groups-after-rename)
 - [Performance Issues](#performance-issues)
@@ -64,7 +68,12 @@ docker compose config | grep -E "UNIFI_URL|CROWDSEC_LAPI_KEY|UNIFI_API_KEY"
 grep -E "^(UNIFI_URL|CROWDSEC_LAPI_URL|CROWDSEC_LAPI_KEY)=" .env
 ```
 
-All three must be set and non-empty. `UNIFI_URL` and `CROWDSEC_LAPI_URL` must include a scheme (`http://` or `https://`).
+All three must be set and non-empty. `UNIFI_URL` and `CROWDSEC_LAPI_URL` must include a scheme (`http://` or `https://`) and must not contain a username or password; set `UNIFI_USERNAME`/`UNIFI_PASSWORD` instead.
+
+Other settings checked at startup:
+
+- `GROUP_NAME_TEMPLATE`, `RULE_NAME_TEMPLATE` and `POLICY_NAME_TEMPLATE` must render a non-empty name that includes `{{.Index}}`, using only `.Family`, `.Index`, `.Site`, `.SrcZone` and `.DstZone`.
+- `WEBHOOK_EVENTS` accepts only `circuit_breaker_open`, `circuit_breaker_close` and `reconcile_drift`.
 
 ---
 
@@ -112,7 +121,7 @@ All three must be set and non-empty. `UNIFI_URL` and `CROWDSEC_LAPI_URL` must in
    ```bash
    curl -k https://192.168.1.1 -o /dev/null -w "%{http_code}"
    ```
-2. `UNIFI_VERIFY_TLS` defaults to `false` (most controllers use self-signed certs). If you have enabled it, either set it back to `false` or provide a valid CA bundle via `UNIFI_CA_CERT`.
+2. `UNIFI_VERIFY_TLS` defaults to `true`. For a private controller certificate, provide its CA bundle via `UNIFI_CA_CERT`.
 
 ---
 
@@ -154,6 +163,7 @@ To verify the fix, enable debug logging and watch for `tcp4` in the trace:
 
 ```bash
 echo "UNIFI_API_DEBUG=true" >> .env
+echo "LOG_LEVEL=debug" >> .env   # UNIFI_API_DEBUG output is logged at debug level
 docker compose up -d --force-recreate cs-unifi-bouncer-pro
 docker logs cs-unifi-bouncer-pro | grep -E "ConnectStart|tcp"
 ```
@@ -204,6 +214,8 @@ docker compose up -d --force-recreate cs-unifi-bouncer-pro
 bbolt's storage layer (mmap-based database) requires several syscalls beyond basic
 file I/O: `flock` (advisory locking), `fallocate` (pre-allocation), `madvise` (mmap hint),
 `msync` (commit flush), and `getrandom` (TLS entropy for HTTPS connections).
+Creating a `DATA_DIR` that does not exist yet also needs `mkdirat`, so older
+profiles failed with `create data dir: mkdir ...: operation not permitted`.
 Older versions of the seccomp profile were missing some of these.
 
 **Fix** — pull the latest image which includes the corrected seccomp profile:
@@ -222,6 +234,7 @@ present in the `SCMP_ACT_ALLOW` names array within `security/seccomp-unifi.json`
 "flock",
 "getrandom",
 "madvise",
+"mkdirat",
 "msync",
 "pwrite64",
 "readv"
@@ -282,29 +295,70 @@ docker logs -f cs-unifi-bouncer-pro | grep 203.0.113.42
 
 ---
 
+### Some decisions are listed in CrowdSec but never banned
+
+**Symptom:** `cscli decisions list` shows a decision, it passes every filter,
+but its IP is not in any shard. Often it is part of a bulk import
+(`cscli decisions import`) where most of the import did arrive.
+
+**Cause:** The LAPI stream returns decisions created after the bouncer's
+previous poll. It stores `created_at` in whole seconds but keeps the poll
+time with sub-second precision, so a decision created in the same second as a
+poll is never streamed. A bouncer restart receives it, because the first poll
+after a restart returns every active decision.
+
+**Fix:** The bouncer re-reads every active decision each
+`CROWDSEC_RESYNC_INTERVAL` (default `1h`) and applies the ones it has no
+record of, logging `CrowdSec resync applied decisions the stream missed`.
+Lower the interval (minimum `5m`) to recover them sooner, or restart the
+bouncer.
+
+---
+
 ### Decisions are being filtered
 
-**Symptom:** CrowdSec has active decisions but the bouncer does not apply them. Enable debug logging:
+**Symptom:** CrowdSec has active decisions but the bouncer does not apply them. Check which filter stage rejected them:
 
 ```bash
-# Temporarily enable debug
-echo "LOG_LEVEL=debug" >> .env
-docker compose up -d --force-recreate cs-unifi-bouncer-pro
-docker logs -f cs-unifi-bouncer-pro
+curl -s http://localhost:9090/metrics | grep crowdsec_unifi_decisions_filtered_total
 ```
 
-Look for `"msg":"decision filtered"` lines. The `stage` field identifies which step rejected the decision:
+Each rejected decision is also logged with a `filtered: ...` message. Parse failures are logged at `warn`; the other stages log at `trace`, so set `LOG_LEVEL=trace` temporarily to see them:
+
+```bash
+echo "LOG_LEVEL=trace" >> .env
+docker compose up -d --force-recreate cs-unifi-bouncer-pro
+docker logs -f cs-unifi-bouncer-pro | grep filtered
+```
+
+The `stage` label on the metric identifies which step rejected the decision:
 
 | `stage` | Cause | Fix |
 |---------|-------|-----|
-| `action` | Decision action is `del` (delete event) | Normal — delete events are processed as unbans, not filtered |
-| `scenario-exclude` | Scenario matches `BLOCK_SCENARIO_EXCLUDE` | Expected — excluded scenarios are intentional |
-| `origin` | Origin not in `CROWDSEC_ORIGINS` | Lower or remove `CROWDSEC_ORIGINS` |
-| `scope` | Scope is not `ip` or `range` (e.g. ASN, country) | UniFi only accepts single IPs and CIDRs; this is a limitation |
-| `parse` | Malformed IP address | Indicates a bad decision in CrowdSec — check upstream |
-| `private-ip` | Private/reserved IP range | Expected — private IPs are never blocked |
-| `whitelist` | IP is in `BLOCK_WHITELIST` | Expected — your trusted range |
-| `min-duration` | Decision duration below `BLOCK_MIN_DURATION` | Lower or remove `BLOCK_MIN_DURATION` |
+| `1_action` | Decision type is neither `ban` nor `delete` (e.g. `captcha`) | Expected — only bans are enforced |
+| `2_scenario_exclude` | Scenario matches `BLOCK_SCENARIO_EXCLUDE` | Expected — excluded scenarios are intentional |
+| `3_origin` | Origin not in `CROWDSEC_ORIGINS` | Lower or remove `CROWDSEC_ORIGINS` |
+| `4_scope` | Scope is not `ip` or `range` (e.g. ASN, country) | UniFi only accepts single IPs and CIDRs; this is a limitation |
+| `5_parse` | Missing field, malformed IP address, or range broader than `/8` (IPv4) / `/32` (IPv6) | Indicates a bad decision in CrowdSec — check upstream |
+| `6_private` | Private/reserved IP range | Expected — private IPs are never blocked |
+| `7_whitelist` | IP is in `BLOCK_WHITELIST` | Expected — your trusted range |
+| `8_min_duration` | Decision duration below `BLOCK_MIN_DURATION` | Lower or remove `BLOCK_MIN_DURATION` |
+
+Deletions are only checked by stages 1, 4 and 5, so a deletion still lifts a ban applied before `BLOCK_SCENARIO_EXCLUDE`, `CROWDSEC_ORIGINS` or `BLOCK_WHITELIST` was narrowed.
+
+---
+
+### My own address is banned
+
+**Symptom:** A trusted address (your WAN IP, an office range) is blocked in UniFi.
+
+**Fix:** Add the address or range to `BLOCK_WHITELIST` and restart the bouncer. On startup, stored bans that `BLOCK_WHITELIST` now covers (as well as private addresses and ranges broader than `/8` IPv4 or `/32` IPv6) are deleted from the ban database, and a warning is logged:
+
+```
+lifted stored bans that are whitelisted, private or broader than /8 (IPv4) or /32 (IPv6); reconcile removes them from UniFi
+```
+
+The following reconcile removes them from the UniFi groups. New decisions for whitelisted addresses are rejected at stage `7_whitelist`.
 
 ---
 
@@ -329,9 +383,14 @@ Look for `"msg":"decision filtered"` lines. The `stage` field identifies which s
    docker compose up -d --force-recreate cs-unifi-bouncer-pro
    ```
 
+A site name that does not exist also draws a 401 from site-scoped requests.
+Startup checks `UNIFI_SITES` against the controller first and stops with
+`UNIFI_SITES: site "..." is not on the controller; available sites: ...`. Use
+the short name from the controller URL (`/manage/<name>/...`), not the display name.
+
 ---
 
-### CrowdSec LAPI returns 401
+### CrowdSec LAPI returns 401 or 403
 
 **Symptom:**
 
@@ -339,7 +398,9 @@ Look for `"msg":"decision filtered"` lines. The `stage` field identifies which s
 {"level":"error","error":"unauthorized (401)","msg":"stream error"}
 ```
 
-**Cause:** The bouncer's LAPI key has been deleted from CrowdSec.
+**Cause:** The bouncer's LAPI key has been deleted from CrowdSec, or was never
+registered. CrowdSec answers an unknown bouncer key with 403 Forbidden;
+`diagnose` reports both as `lapi_reachable FAIL ... check CROWDSEC_LAPI_KEY`.
 
 **Fix:**
 
@@ -371,6 +432,7 @@ Common causes and fixes:
 
 | Log message | Cause | Fix |
 |-------------|-------|-----|
+| Startup error mentioning `UNIFI_API_KEY` or `FIREWALL_MODE=legacy` | The Cloudflare whitelist needs zone mode and an API key | Set `UNIFI_API_KEY` and leave `FIREWALL_MODE` at `auto` or `zone` |
 | `CLOUDFLARE_ZONE_PAIRS is empty` | `CLOUDFLARE_ZONE_PAIRS` not set | Set `CLOUDFLARE_ZONE_PAIRS=External->Internal` (or your zone names) |
 | `resolve src zone ... not found` | Zone name in `CLOUDFLARE_ZONE_PAIRS` is wrong | Check zone names in Settings → Firewall → Zones; zone names are case-sensitive |
 | `fetch Cloudflare IPv4: ...` | Cannot reach Cloudflare IP list URL | Check outbound internet access from the container; verify `CLOUDFLARE_IPV4_URL` |
@@ -384,11 +446,12 @@ Common causes and fixes:
 **Fix:**
 
 ```bash
-# 1. Drain all managed policies
-docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro drain --force
+# 1. Stop the daemon to release the bbolt lock, then drain managed objects
+docker compose stop cs-unifi-bouncer-pro
+docker compose run --rm --no-deps cs-unifi-bouncer-pro drain --force
 
 # 2. Restart — ALLOW policies are created first (startup sync), then block shard policies
-docker compose up -d --force-recreate cs-unifi-bouncer-pro
+docker compose up -d cs-unifi-bouncer-pro
 ```
 
 ### Port filter TML not applied to whitelist policy
@@ -403,7 +466,7 @@ docker logs cs-unifi-bouncer-pro | grep -E "cloudflare.*port|ensure.*port TML"
 
 If you see `ensure src port TML failed` or `ensure dst port TML failed`, the port TML creation failed. Check for controller connectivity errors.
 
-**Fix:** If the TML could not be created, the ALLOW policy is still created but without a port filter. Restart the bouncer to retry TML creation.
+**Fix:** A failed port TML creation stops whitelist sync before an ALLOW policy is created. Correct the controller error and restart the bouncer to retry.
 
 ---
 
@@ -422,6 +485,20 @@ docker logs cs-unifi-bouncer-pro | grep firewall_mode
 The startup log line shows the detected or configured mode.
 
 **Fix:** Override the auto-detection by setting `FIREWALL_MODE=zone` or `FIREWALL_MODE=legacy` explicitly.
+
+### Startup fails: "uses the zone-based firewall, which requires UNIFI_API_KEY"
+
+**Cause:** The site has firewall zones, but the bouncer is logging in with `UNIFI_USERNAME`/`UNIFI_PASSWORD`. Zone policies can only be managed through the UniFi integration API, which does not accept username/password sessions.
+
+**Fix:** Create an API key (**Settings → Control Plane → Integrations**) and set `UNIFI_API_KEY`. To keep username/password and use legacy WAN_IN rules instead, set `FIREWALL_MODE=legacy`.
+
+### Login fails against a self-hosted controller
+
+**Symptom:** `login at /api/login returned HTTP 400` (or 401).
+
+**Check:** The startup line `detected UniFi controller layout` shows `"layout":"standalone"` for the self-hosted Network Application and `"layout":"unifi-os"` for UniFi OS consoles. If the layout is right, the credentials are wrong: use a local admin account, not a UI.com cloud account, and make sure first-run setup has finished in the controller UI.
+
+**Fix:** Correct `UNIFI_USERNAME`/`UNIFI_PASSWORD`. If the layout is wrong, check that `UNIFI_URL` points at the controller itself (e.g. `https://host:8443` for a self-hosted controller) and not at a reverse proxy that rewrites `/`.
 
 ---
 
@@ -485,10 +562,34 @@ docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro validate
 docker logs cs-unifi-bouncer-pro | grep '"action":"unban"'
 
 # Force a reconcile
-docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro reconcile
+docker compose stop cs-unifi-bouncer-pro
+docker compose run --rm --no-deps cs-unifi-bouncer-pro reconcile
+docker compose up -d cs-unifi-bouncer-pro
 ```
 
 The reconcile command compares bbolt state with the current UniFi firewall state and removes any IPs not in the active ban list.
+
+---
+
+### Group edited in the UniFi UI
+
+**Symptom:** Addresses were removed from (or added to) a `crowdsec-block-*` group by hand, and the change seems to stick.
+
+**Behaviour:** Each periodic reconcile (`FIREWALL_RECONCILE_INTERVAL`) compares every managed group with the bouncer's own state and rewrites any group that differs, logging `shard changed outside the bouncer; rewriting it`. Edit bans through CrowdSec (`cscli decisions`) or the `ban`/`unban` subcommands instead; manual group edits are reverted.
+
+### Bans stop applying after the controller restarts
+
+A controller that is shutting down or starting answers every API call with HTTP 404, and a self-hosted controller can take several minutes to start. The bouncer confirms a 404 by listing the controller's groups before treating a group as deleted, so shards are kept and retried until the controller is ready (`shard write returned 404 but the object still exists; controller is likely restarting`). Decisions received during the outage are applied once writes succeed. If the bouncer itself starts while the controller is still starting, it exits with `controller ... is not ready` and your restart policy retries it.
+
+### Shard creation fails with "API returned empty ID"
+
+**Symptom:** A create for a name that already exists, such as `crowdsec-block-v4-8`, fails on every sync; `/readyz` returns 503; `crowdsec_unifi_api_calls_total` counts failed creates; the number of IPs across the `crowdsec-block-*` groups is lower than the number of bans; some groups have no `crowdsec-policy-*` policy.
+
+**Cause:** Releases up to v1.2.5 numbered a new shard by counting shards. Once a shard number was missing (for example `crowdsec-block-v4-1` deleted), the next shard reused a number that was already taken, the controller refused the duplicate name, and every ban that did not fit in the existing shards stayed unapplied. Policies were also numbered by position rather than by shard number, so groups past the gap could be left without a block policy.
+
+**Fix:** Upgrade. A new shard now takes the number after the highest one in use. Every shard gets its policy by its real number. A create that is refused or answers without an ID adopts an existing object of that name. A shard whose policy or rule the controller refuses no longer stops the other shards from getting theirs; it is retried on every sync and its bans count in `crowdsec_unifi_unsynced_ips` until it is enforced. The first reconcile after the upgrade creates the missing policies and the overflow shard. No manual cleanup is needed.
+
+Durations in log lines carry their unit (`"elapsed":"2.467s"`). Earlier releases logged a bare number of milliseconds, so `"elapsed":2467.3` on `periodic reconcile complete` means about 2.5 seconds, not 41 minutes.
 
 ---
 
@@ -498,12 +599,12 @@ The reconcile command compares bbolt state with the current UniFi firewall state
 
 **Cause:** In versions before v1.1.2 the bouncer did not sweep for orphaned managed objects. Starting with v1.1.2, orphan cleanup runs automatically. v1.2.2 extends this with API-level sweeps that work even when the bbolt database has no record of the object.
 
-- **Block policies** (`ZONE_PAIRS`): at every `EnsurePolicies` call, policies tracked in bbolt for the site but no longer produced by the current config are deleted from UniFi and removed from bbolt. Since v1.2.2, a second API-level pass also sweeps any policy bearing the managed description and `BLOCK` action that is not in the expected set — catching orphans from a wiped database, a mode switch (zone→legacy or back), or a prior installation.
-- **Legacy rules**: since v1.2.2, `EnsureRules` sweeps for orphaned rules with the managed description, the configured block action (drop/reject), a ruleset in `WAN_IN`/`WANv6_IN`, and a non-empty source group — the combination of fields the bouncer always sets when creating a rule.
+- **Block policies** (`ZONE_PAIRS`): at every `EnsurePolicies` call, policies tracked in bbolt for the site but no longer produced by the current config are deleted from UniFi and removed from bbolt. An API-level pass also sweeps unmatched `BLOCK` policies with the managed description and static name prefix. Templates without a static prefix rely on the bbolt record for ownership.
+- **Legacy rules**: `EnsureRules` sweeps orphaned rules with the managed description, static name prefix or matching bbolt record, configured block action, managed ruleset, and a non-empty source group.
 - **Cloudflare ALLOW policies** (`CLOUDFLARE_ZONE_PAIRS`): at every Cloudflare sync, policies with the managed description and naming prefix (`crowdsec-whitelist-cloudflare-`) that are no longer in `CLOUDFLARE_ZONE_PAIRS` are deleted. Since v1.1.8, orphan detection is ID-based: only the exact policy returned by the ensure call is protected, so stale duplicate-named policies are also correctly removed. Since v1.2.2, setting `CLOUDFLARE_WHITELIST_ENABLED=false` automatically drains **all** Cloudflare whitelist policies and TMLs on startup — no manual cleanup needed when disabling the feature.
 - **Port-filter TMLs** (both `ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS`): TMLs named `crowdsec-ports-src-*`, `crowdsec-ports-dst-*`, `crowdsec-whitelist-cloudflare-srcports-*`, and `crowdsec-whitelist-cloudflare-dstports-*` that no longer correspond to a configured zone pair are deleted.
 
-The cleanup only targets objects that bear the bouncer's managed description **and** match the structural signature of what the bouncer creates (action, ruleset, source group). User-created policies are never touched.
+The cleanup requires ownership evidence from the cache or a static name prefix along with the managed description and expected rule shape. Keep custom name templates distinct from names used for manual policies.
 
 **Action (upgrade from < v1.1.2):** Restart the bouncer after upgrading. The orphan sweep runs at startup and will remove the stale objects automatically. No manual deletion is needed.
 
@@ -518,7 +619,7 @@ The cleanup only targets objects that bear the bouncer's managed description **a
 **Fix:**
 
 1. Delete the old firewall groups and rules manually from the UniFi console
-2. Run `docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro reconcile` to rebuild under the new names
+2. Stop the daemon, run `docker compose run --rm --no-deps cs-unifi-bouncer-pro reconcile`, then restart with `docker compose up -d cs-unifi-bouncer-pro`
 
 ---
 
@@ -537,8 +638,28 @@ The cleanup only targets objects that bear the bouncer's managed description **a
 **Fix:** This is usually transient. The bouncer will retry dirty shards at the next `SYNC_INTERVAL` tick (default `30s`). If the error is chronic:
 
 - Check UniFi controller connectivity
-- Increase `FIREWALL_API_SHARD_DELAY` to reduce request rate
+- Increase `FIREWALL_API_SHARD_DELAY` to space out rule/policy creates and group deletes (group membership `PUT`s are not delayed)
 - Review `crowdsec_unifi_dirty_shards` and `crowdsec_unifi_shard_sync_total{result="error"}` metrics
+
+---
+
+### A range ban for one host stopped all syncing (before this release)
+
+**Symptom:** After a decision such as `cscli decisions add -r 203.0.113.9/32`
+(or a blocklist line in that form), logs repeat
+`bad request: ... "args":"203.0.113.9/32","msg":"api.err.FirewallGroupInvalidArgs"`,
+the circuit breaker opens and no new bans reach UniFi.
+
+**Cause:** UniFi firewall groups refuse single-host prefixes (`/32`, `/128`)
+and accept only the bare address. Earlier versions stored the prefix, so every
+write of that shard failed, and the failures opened the breaker for all shards.
+
+**Fix:** Upgrade. Host prefixes are stored as the bare address, and bans saved
+in the old form are rekeyed at startup (logged once as "rekeyed bans stored as
+/32 or /128 host prefixes"). If the controller refuses any other entry and names
+it in the error, that entry alone is left out of its shard, logged as
+"controller refused a ban entry", and counted in
+`crowdsec_unifi_unsynced_ips`; the rest of the shard is still written.
 
 ---
 
@@ -549,7 +670,8 @@ are being pushed to UniFi. Logs show "SyncDirty skipped: circuit breaker open".
 
 **Cause:** The bouncer has seen `CIRCUIT_BREAKER_THRESHOLD` (default: 5)
 consecutive sync failures — typically due to the UniFi controller being
-unreachable or returning 5xx errors.
+unreachable or returning 5xx errors. A controller that answers HTTP 400
+(it refused the content of one shard) does not count toward the breaker.
 
 **Resolution:**
 1. Check UniFi controller health and network connectivity from the bouncer container.
@@ -606,7 +728,7 @@ Common causes:
 |-------------|-------|-----|
 | `fetch ... connection refused` | URL unreachable from container | Verify outbound internet access; check the URL manually with `curl` |
 | `unexpected status 404` | URL returns non-200 | Verify the URL is correct |
-| `0 valid entries` | All lines are invalid or commented | Check the feed format (one IP or CIDR per line; `#` comments are skipped) |
+| `0 valid entries` | All lines are invalid or commented | Check the feed format (one IP or CIDR per line; text after `#` or `;` is a comment) |
 
 Blocklist bans are applied on startup and then every `BLOCKLIST_REFRESH_INTERVAL`. To force an immediate refresh, restart the container.
 
@@ -628,9 +750,10 @@ Common causes:
 
 | Log message | Cause | Fix |
 |-------------|-------|-----|
-| `webhook: skipping unregistered event` | Event name not in `WEBHOOK_EVENTS` | Add the event to `WEBHOOK_EVENTS` |
-| `webhook: POST failed` (warn) | Network error or non-2xx response | Verify the URL is reachable from the container; webhook errors are non-fatal |
-| No log entries | `WEBHOOK_URL` is empty | Set `WEBHOOK_URL` in your `.env` |
+| `webhook: delivery failed` (warn) | Network error or timeout | Verify the URL is reachable from the container; webhook errors are non-fatal |
+| `webhook: server returned error status` (warn) | The endpoint answered 4xx or 5xx | Check the endpoint's own logs |
+| `webhook: queue full, event dropped` (warn) | The endpoint is too slow; more than 64 events are waiting | Check the endpoint's response time |
+| No log entries | `WEBHOOK_URL` is empty, the event is not listed in `WEBHOOK_EVENTS`, or the event has not happened | Set `WEBHOOK_URL`; add the event to `WEBHOOK_EVENTS` (or leave it empty for all events). `reconcile_drift` fires only when a periodic reconcile adds and removes 100 or more IPs in total |
 
 Webhook POSTs use a 5 second timeout and are never retried. The bouncer continues normally if a webhook call fails.
 

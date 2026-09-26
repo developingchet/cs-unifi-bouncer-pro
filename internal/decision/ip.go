@@ -3,6 +3,7 @@ package decision
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 )
 
@@ -13,11 +14,13 @@ func ParseAndSanitize(value string) (string, bool, error) {
 
 	// Try CIDR first
 	if strings.Contains(value, "/") {
-		ip, network, err := net.ParseCIDR(value)
+		_, network, err := net.ParseCIDR(value)
 		if err != nil {
 			return "", false, fmt.Errorf("invalid CIDR %q: %w", value, err)
 		}
-		_ = ip
+		if addr, ok := HostPrefixAddress(network.String()); ok {
+			return addr, false, nil
+		}
 		return network.String(), true, nil
 	}
 
@@ -32,6 +35,18 @@ func ParseAndSanitize(value string) (string, bool, error) {
 		return ip4.String(), false, nil
 	}
 	return ip.String(), false, nil
+}
+
+// HostPrefixAddress returns the bare address of a single-host prefix (an
+// IPv4 /32 or IPv6 /128) and true, or false for anything else. UniFi firewall
+// groups reject host prefixes (api.err.FirewallGroupInvalidArgs) and accept
+// the bare address, so bans are always stored in that form.
+func HostPrefixAddress(value string) (string, bool) {
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil || !prefix.IsSingleIP() {
+		return "", false
+	}
+	return prefix.Addr().Unmap().String(), true
 }
 
 // IsIPv6 returns true if the string is an IPv6 address or CIDR.
@@ -53,12 +68,14 @@ func IsIPv6(value string) bool {
 // IsPrivate returns true if the IP/CIDR is RFC1918, loopback, link-local, or ULA.
 func IsPrivate(value string) bool {
 	var ip net.IP
+	var network *net.IPNet
 	if strings.Contains(value, "/") {
-		parsedIP, _, err := net.ParseCIDR(value)
+		parsedIP, parsedNetwork, err := net.ParseCIDR(value)
 		if err != nil {
 			return false
 		}
 		ip = parsedIP
+		network = parsedNetwork
 	} else {
 		ip = net.ParseIP(value)
 	}
@@ -70,7 +87,7 @@ func IsPrivate(value string) bool {
 	ip16 := ip.To16()
 
 	for _, block := range privateBlocks {
-		if block.Contains(ip16) {
+		if block.Contains(ip16) || (network != nil && networksOverlap(network, block)) {
 			return true
 		}
 	}
@@ -112,13 +129,14 @@ var privateBlocks = func() []*net.IPNet {
 // IsWhitelisted checks if ip is covered by any of the whitelist CIDR entries.
 func IsWhitelisted(ip string, whitelist []*net.IPNet) bool {
 	var parsed net.IP
+	var network *net.IPNet
 	if strings.Contains(ip, "/") {
-		// For CIDR decisions, check if the network address is whitelisted
-		p, _, err := net.ParseCIDR(ip)
+		p, parsedNetwork, err := net.ParseCIDR(ip)
 		if err != nil {
 			return false
 		}
 		parsed = p
+		network = parsedNetwork
 	} else {
 		parsed = net.ParseIP(ip)
 		if parsed == nil {
@@ -127,11 +145,17 @@ func IsWhitelisted(ip string, whitelist []*net.IPNet) bool {
 	}
 
 	for _, wl := range whitelist {
-		if wl.Contains(parsed) {
+		if wl.Contains(parsed) || (network != nil && networksOverlap(network, wl)) {
 			return true
 		}
 	}
 	return false
+}
+
+// networksOverlap reports whether either network contains the other's base IP.
+// CIDR blocks are contiguous, so this detects every overlap for like families.
+func networksOverlap(a, b *net.IPNet) bool {
+	return a.Contains(b.IP) || b.Contains(a.IP)
 }
 
 // ParseWhitelist parses a slice of IP/CIDR strings into net.IPNet entries.
