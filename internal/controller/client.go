@@ -236,16 +236,7 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 		_ = resp.Body.Close()
 		return nil, &ErrNotFound{URL: req.URL.Path}
 	case http.StatusTooManyRequests:
-		const minRateLimitBackoff = 1 * time.Second
-		retryAfter := 10 * time.Second
-		if ra := resp.Header.Get("Retry-After"); ra != "" {
-			if d, err := time.ParseDuration(ra + "s"); err == nil {
-				retryAfter = d
-			}
-		}
-		if retryAfter < minRateLimitBackoff {
-			retryAfter = minRateLimitBackoff
-		}
+		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 		_ = resp.Body.Close()
 		return nil, &ErrRateLimit{RetryAfter: retryAfter}
 	case http.StatusConflict:
