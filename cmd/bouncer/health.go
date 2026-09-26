@@ -17,13 +17,9 @@ func healthcheckCmd() *cobra.Command {
 		Use:   "healthcheck",
 		Short: "Check health endpoint and exit",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
-			if err != nil {
-				return err
-			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
 			defer cancel()
-			healthURL, err := localHealthURL(cfg.HealthAddr)
+			healthURL, err := localHealthURL(config.HealthAddrFromEnv())
 			if err != nil {
 				return err
 			}

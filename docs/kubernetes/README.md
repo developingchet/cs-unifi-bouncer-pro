@@ -41,6 +41,7 @@
    ```bash
    kubectl apply -f docs/kubernetes/networkpolicy.yaml
    ```
+   Egress is allowed to DNS, the controller on 443 (UniFi OS) or 8443 (self-hosted Network Application), and the LAPI on 8080. If your controller or LAPI listens elsewhere, edit the ports first: a blocked controller shows as `connection refused` in the logs and `/readyz` returns 503.
 
 6. **Verify** the pod is running:
    ```bash

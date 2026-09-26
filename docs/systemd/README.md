@@ -32,6 +32,7 @@
    ```bash
    sudo systemctl status cs-unifi-bouncer-pro
    sudo journalctl -u cs-unifi-bouncer-pro -f
+   cs-unifi-bouncer-pro healthcheck   # probes /healthz on HEALTH_ADDR (default :8081)
    ```
 
 ## Hot-Reload (SIGHUP)
