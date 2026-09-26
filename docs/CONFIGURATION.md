@@ -40,7 +40,7 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `UNIFI_URL` | — | **Yes** | Controller URL including scheme, e.g. `https://192.168.1.1` or `https://unifi.local:8443`. Must not contain a username or password (`https://user:pass@host` stops startup); use `UNIFI_USERNAME`/`UNIFI_PASSWORD` instead. |
-| `UNIFI_API_KEY` | — | One of API key or user/pass | UniFi API key. Takes precedence over username/password. `_FILE` variant supported. |
+| `UNIFI_API_KEY` | — | One of API key or user/pass | UniFi API key. Takes precedence over username/password. `_FILE` variant supported. Keys are created under Settings > Control Plane > Integrations, which UniFi OS consoles and UniFi OS Server provide; the standalone self-hosted Network Application has no such page, so use a username and password there (legacy mode). |
 | `UNIFI_USERNAME` | — | One of API key or user/pass | Local admin username. `_FILE` variant supported. |
 | `UNIFI_PASSWORD` | — | One of API key or user/pass | Local admin password. `_FILE` variant supported. |
 | `UNIFI_VERIFY_TLS` | `true` | No | Verify the controller's TLS certificate. Use `UNIFI_CA_CERT` for a private CA. |
