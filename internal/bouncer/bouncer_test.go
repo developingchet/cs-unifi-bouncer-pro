@@ -172,7 +172,7 @@ func TestBouncer_SkipsDecisionsWithoutIdentity(t *testing.T) {
 	}
 	action, scope, ip := "ban", "ip", "8.8.8.8"
 	d := &models.Decision{Type: &action, Scope: &scope, Value: &ip}
-	b.handleDecisionBlock(context.Background(), &models.DecisionsStreamResponse{New: []*models.Decision{d}, Deleted: []*models.Decision{d}})
+	b.handleDecisionBlock(context.Background(), &models.DecisionsStreamResponse{New: []*models.Decision{d}, Deleted: []*models.Decision{d}}, "stream")
 	if len(jobs) != 0 {
 		t.Fatalf("anonymous decisions reached handler: %+v", jobs)
 	}

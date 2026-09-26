@@ -285,6 +285,26 @@ docker logs -f cs-unifi-bouncer-pro | grep 203.0.113.42
 
 ---
 
+### Some decisions are listed in CrowdSec but never banned
+
+**Symptom:** `cscli decisions list` shows a decision, it passes every filter,
+but its IP is not in any shard. Often it is part of a bulk import
+(`cscli decisions import`) where most of the import did arrive.
+
+**Cause:** The LAPI stream returns decisions created after the bouncer's
+previous poll. It stores `created_at` in whole seconds but keeps the poll
+time with sub-second precision, so a decision created in the same second as a
+poll is never streamed. A bouncer restart receives it, because the first poll
+after a restart returns every active decision.
+
+**Fix:** The bouncer re-reads every active decision each
+`CROWDSEC_RESYNC_INTERVAL` (default `1h`) and applies the ones it has no
+record of, logging `CrowdSec resync applied decisions the stream missed`.
+Lower the interval (minimum `5m`) to recover them sooner, or restart the
+bouncer.
+
+---
+
 ### Decisions are being filtered
 
 **Symptom:** CrowdSec has active decisions but the bouncer does not apply them. Enable debug logging:

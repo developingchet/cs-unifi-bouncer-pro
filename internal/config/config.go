@@ -14,6 +14,10 @@ import (
 	"github.com/knadh/koanf/v2"
 )
 
+// minResyncInterval keeps the full decision re-read from hammering the LAPI:
+// with a large community blocklist one pull is tens of megabytes.
+const minResyncInterval = 5 * time.Minute
+
 // Config holds all application configuration.
 type Config struct {
 	// UniFi Controller Connection
@@ -83,13 +87,16 @@ type Config struct {
 	CloudflareZonePairs        []string      `koanf:"cloudflare_zone_pairs"`
 
 	// CrowdSec Decision Filtering
-	CrowdSecLAPIURL         string        `koanf:"crowdsec_lapi_url"`
-	CrowdSecLAPIKey         string        `koanf:"crowdsec_lapi_key"`
-	CrowdSecLAPIVerifyTLS   bool          `koanf:"crowdsec_lapi_verify_tls"`
-	CrowdSecLAPICACert      string        `koanf:"crowdsec_lapi_ca_cert"`
-	CrowdSecLAPIAllowHTTP   bool          `koanf:"crowdsec_lapi_allow_http"`
-	CrowdSecOrigins         []string      `koanf:"crowdsec_origins"`
-	CrowdSecPollInterval    time.Duration `koanf:"crowdsec_poll_interval"`
+	CrowdSecLAPIURL       string        `koanf:"crowdsec_lapi_url"`
+	CrowdSecLAPIKey       string        `koanf:"crowdsec_lapi_key"`
+	CrowdSecLAPIVerifyTLS bool          `koanf:"crowdsec_lapi_verify_tls"`
+	CrowdSecLAPICACert    string        `koanf:"crowdsec_lapi_ca_cert"`
+	CrowdSecLAPIAllowHTTP bool          `koanf:"crowdsec_lapi_allow_http"`
+	CrowdSecOrigins       []string      `koanf:"crowdsec_origins"`
+	CrowdSecPollInterval  time.Duration `koanf:"crowdsec_poll_interval"`
+	// CrowdSecResyncInterval is how often every active decision is re-read
+	// from the LAPI to recover bans the stream skipped; 0 disables it.
+	CrowdSecResyncInterval  time.Duration `koanf:"crowdsec_resync_interval"`
 	LAPIMetricsPushInterval time.Duration `koanf:"lapi_metrics_push_interval"`
 	BlockScenarioExclude    []string      `koanf:"block_scenario_exclude"`
 	BlockWhitelist          []string      `koanf:"block_whitelist"`
@@ -355,6 +362,7 @@ func defaults() map[string]interface{} {
 		"crowdsec_lapi_verify_tls":       true,
 		"crowdsec_lapi_allow_http":       false,
 		"crowdsec_poll_interval":         "30s",
+		"crowdsec_resync_interval":       "1h",
 		"lapi_metrics_push_interval":     "30m",
 		"session_reauth_min_gap":         "5s",
 		"session_reauth_timeout":         "10s",
@@ -599,6 +607,10 @@ func (c *Config) Validate() error {
 	if c.CrowdSecPollInterval <= 0 {
 		return fmt.Errorf("CROWDSEC_POLL_INTERVAL must be > 0; got %s", c.CrowdSecPollInterval)
 	}
+	if c.CrowdSecResyncInterval != 0 && c.CrowdSecResyncInterval < minResyncInterval {
+		return fmt.Errorf("CROWDSEC_RESYNC_INTERVAL must be 0 (disabled) or at least %s; got %s",
+			minResyncInterval, c.CrowdSecResyncInterval)
+	}
 	if c.ShutdownGracePeriod <= 0 {
 		return fmt.Errorf("SHUTDOWN_GRACE_PERIOD must be > 0; got %s", c.ShutdownGracePeriod)
 	}
@@ -643,6 +655,9 @@ func (c *Config) Validate() error {
 		}
 		if _, err := c.ParseCloudflareZonePairs(); err != nil {
 			return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: %w", err)
+		}
+		if !isHTTPURL(c.CloudflareIPv4URL) || !isHTTPURL(c.CloudflareIPv6URL) {
+			return fmt.Errorf("CLOUDFLARE_IPV4_URL and CLOUDFLARE_IPV6_URL must be absolute http:// or https:// URLs")
 		}
 	}
 

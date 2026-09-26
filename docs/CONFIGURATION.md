@@ -105,6 +105,9 @@ UNIFI_SITES=default,homelab,iot
 |----------|---------|----------|-------------|
 | `SYNC_INTERVAL` | `30s` | No | Retry interval for dirty shard flushes that failed after a decision batch. Shards are also flushed immediately after every decision batch. Minimum: `5s`. |
 | `SHARD_LIMIT` | `10000` | No | Maximum IPs per Traffic Matching List shard. When a shard is full, a new shard + zone policies are created automatically. UniFi integration v1 supports up to 10,000 items per TML. |
+| `SHARD_MERGE_THRESHOLD` | `0` | No | IPs at or below this count make a shard eligible for consolidation into another shard. `0` = auto (50% of `SHARD_LIMIT`). `-1` disables rebalancing. |
+| `CIRCUIT_BREAKER_THRESHOLD` | `5` | No | Consecutive shard sync failures before the circuit breaker opens and suspends syncs. |
+| `CIRCUIT_BREAKER_RESET_INTERVAL` | `60s` | No | How long the open breaker waits before allowing a probe request (half-open). |
 
 ### Firewall mode details
 
@@ -305,6 +308,7 @@ Zone names in `CLOUDFLARE_ZONE_PAIRS` are resolved independently of `ZONE_PAIRS`
 | `CROWDSEC_LAPI_ALLOW_HTTP` | `false` | No | Required for non-loopback HTTP; use only on a trusted local network |
 | `CROWDSEC_ORIGINS` | — | No | Comma-separated allowed decision origins. Empty = all origins accepted. Example: `crowdsec,lists` |
 | `CROWDSEC_POLL_INTERVAL` | `30s` | No | How often to poll the LAPI stream for new decisions |
+| `CROWDSEC_RESYNC_INTERVAL` | `1h` | No | How often every active decision is re-read from the LAPI (`GET /v1/decisions`) to apply bans the stream skipped. The LAPI stream can miss a decision created in the same second as a poll until the bouncer restarts; this recovers it. Only bans are recovered: a missed deletion still ends when the ban expires. `0` disables; otherwise minimum `5m`. Not run in `DRY_RUN`. |
 | `LAPI_METRICS_PUSH_INTERVAL` | `30m` | No | Interval for pushing metrics to LAPI `/v1/usage-metrics`; `0` disables; minimum enforced value is `10m` |
 
 ---

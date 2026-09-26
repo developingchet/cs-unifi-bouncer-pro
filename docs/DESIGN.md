@@ -188,6 +188,8 @@ On startup (when `FIREWALL_RECONCILE_ON_START=true`), once the first CrowdSec st
 
 This corrects drift caused by manual edits, controller restarts, or bouncer downtime. Waiting for the first batch matters when the database is new or was lost: until the LAPI resends the active decisions, bbolt holds none of them, and an earlier reconcile would remove every enforced ban from the controller. If no batch arrives within 5 minutes (the LAPI is unreachable) and the database already holds bans, the reconciles start anyway from that database; an empty database keeps waiting. The periodic reconcile starts after the startup one. The reconcile result is logged and recorded in the `crowdsec_unifi_reconcile_duration_seconds` histogram.
 
+Separately, every `CROWDSEC_RESYNC_INTERVAL` (default 1 hour) the bouncer re-reads all active decisions with `GET /v1/decisions`, which does not move the stream cursor, and applies any that pass the filters but have no claim in bbolt. This recovers decisions the stream skipped: the LAPI stores `created_at` in whole seconds and compares it with a sub-second poll time, so a decision created in the same second as a poll is otherwise only delivered after a restart. Missed deletions are not recovered this way; those bans end at their expiry.
+
 ### Janitor
 
 A background goroutine runs every `JANITOR_INTERVAL` (default 1 h):

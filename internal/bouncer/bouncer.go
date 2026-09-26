@@ -43,8 +43,13 @@ type Bouncer struct {
 	log       zerolog.Logger
 	streamBnc *csbouncer.StreamBouncer
 	lapiHTTP  *http.Client
-	recorder  MetricsRecorder
-	limiter   *rate.Limiter // nil when rate limiting is disabled
+	// lapiResyncHTTP has a longer timeout for the full decision list.
+	lapiResyncHTTP *http.Client
+	// resyncRejected holds the sources of decisions the filter rejected on
+	// the last resync. Only the resync goroutine touches it.
+	resyncRejected map[string]struct{}
+	recorder       MetricsRecorder
+	limiter        *rate.Limiter // nil when rate limiting is disabled
 	// onStartupSynced runs once, after the first decision batch is applied.
 	onStartupSynced func()
 }
@@ -78,6 +83,10 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 	if err != nil {
 		return nil, fmt.Errorf("configure LAPI HTTP client: %w", err)
 	}
+	resyncClient, err := lapihttp.NewClient(cfg.CrowdSecLAPIVerifyTLS, cfg.CrowdSecLAPICACert, resyncHTTPTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("configure LAPI resync client: %w", err)
+	}
 
 	// StreamBouncer.TickerInterval is a string like "30s"
 	tickerStr := cfg.CrowdSecPollInterval.String()
@@ -103,6 +112,8 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 		streamBnc: streamBnc,
 		lapiHTTP:  lapiClient,
 		recorder:  recorder,
+
+		lapiResyncHTTP: resyncClient,
 	}
 	if cfg.DecisionRateLimit > 0 {
 		b.limiter = rate.NewLimiter(rate.Limit(cfg.DecisionRateLimit), cfg.DecisionBurstSize)
@@ -128,6 +139,15 @@ func (b *Bouncer) Run(ctx context.Context) error {
 	if b.cfg.SyncInterval > 0 {
 		g.Go(func() error {
 			b.runPeriodicSync(gctx)
+			return nil
+		})
+	}
+
+	// Periodic full decision re-read: recovers bans the stream skipped.
+	// Dry-run records no claims, so every decision would look missing.
+	if b.cfg.CrowdSecResyncInterval > 0 && !b.cfg.DryRun {
+		g.Go(func() error {
+			b.runPeriodicResync(gctx)
 			return nil
 		})
 	}
@@ -173,7 +193,11 @@ func (b *Bouncer) runPeriodicSync(ctx context.Context) {
 func (b *Bouncer) processStream(ctx context.Context) error {
 	runErr := make(chan error, 1)
 	go func() { runErr <- b.streamBnc.Run(ctx) }()
+	return b.consumeStream(ctx, b.streamBnc.Stream, runErr)
+}
 
+// consumeStream applies decision blocks until ctx ends or the stream fails.
+func (b *Bouncer) consumeStream(ctx context.Context, stream <-chan *models.DecisionsStreamResponse, runErr <-chan error) error {
 	startupSynced := false
 	for {
 		select {
@@ -184,12 +208,12 @@ func (b *Bouncer) processStream(ctx context.Context) error {
 				return nil
 			}
 			return streamError(err)
-		case decisions, ok := <-b.streamBnc.Stream:
+		case decisions, ok := <-stream:
 			if !ok {
 				// Run closes the stream immediately before returning its error.
 				return streamError(<-runErr)
 			}
-			b.handleDecisionBlock(ctx, decisions)
+			b.handleDecisionBlock(ctx, decisions, "stream")
 			if err := b.fwMgr.SyncDirty(ctx, b.cfg.UnifiSites); err != nil {
 				b.log.Warn().Err(err).Msg("SyncDirty after decision block failed")
 			}
@@ -211,101 +235,79 @@ func streamError(err error) error {
 	return fmt.Errorf("CrowdSec stream closed: %w", err)
 }
 
-func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.DecisionsStreamResponse) {
+// handleDecisionBlock applies one batch of decisions. source labels the
+// decisions_processed metric: "stream" for the LAPI stream, "resync" for the
+// periodic full pull.
+func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.DecisionsStreamResponse, source string) {
 	if decisions == nil {
 		b.log.Warn().Msg("ignoring empty CrowdSec decision block")
 		return
 	}
-	source := "stream"
-
 	for _, d := range decisions.New {
-		result := decision.Filter(d, b.filterCfg, b.log)
-		if !result.Passed {
-			continue
-		}
-		decisionID := decisionSource(d)
-		if decisionID == "" {
-			b.log.Warn().Str("ip", result.Value).Msg("skipping CrowdSec decision without ID or UUID")
-			continue
-		}
-		metrics.DecisionsProcessed.WithLabelValues("ban", source).Inc()
-
-		// Apply rate limiter if configured.
-		if b.limiter != nil {
-			if err := b.limiter.Wait(ctx); err != nil {
-				return // ctx cancelled
-			}
-		}
-
-		origin := ""
-		if d.Origin != nil {
-			origin = *d.Origin
-		}
-		remType := ""
-		if d.Type != nil {
-			remType = *d.Type
-		}
-		scenario := ""
-		if d.Scenario != nil {
-			scenario = *d.Scenario
-		}
-
-		metrics.DecisionsInFlight.Inc()
-		err := b.handler(ctx, SyncJob{
-			Action:           "ban",
-			Source:           decisionID,
-			IP:               result.Value,
-			IPv6:             result.IPv6,
-			ExpiresAt:        expiresAt(result.Duration),
-			DurationOverride: result.DurationOverride,
-			Origin:           origin,
-			RemediationType:  remType,
-			Scenario:         scenario,
-			ReceivedAt:       time.Now(),
-		})
-		metrics.DecisionsInFlight.Dec()
-		if err != nil {
-			b.log.Error().Err(err).Str("ip", result.Value).Msg("failed to apply ban")
+		if !b.applyDecision(ctx, d, "ban", source) {
+			return
 		}
 	}
-
 	for _, d := range decisions.Deleted {
-		result := decision.Filter(d, b.filterCfg, b.log)
-		if !result.Passed {
-			continue
-		}
-		decisionID := decisionSource(d)
-		if decisionID == "" {
-			b.log.Warn().Str("ip", result.Value).Msg("skipping CrowdSec deletion without ID or UUID")
-			continue
-		}
-		metrics.DecisionsProcessed.WithLabelValues("unban", source).Inc()
-
-		// Apply rate limiter if configured.
-		if b.limiter != nil {
-			if err := b.limiter.Wait(ctx); err != nil {
-				return // ctx cancelled
-			}
-		}
-
-		scenario := ""
-		if d.Scenario != nil {
-			scenario = *d.Scenario
-		}
-
-		metrics.DecisionsInFlight.Inc()
-		err := b.handler(ctx, SyncJob{
-			Action:   "delete",
-			Source:   decisionID,
-			IP:       result.Value,
-			IPv6:     result.IPv6,
-			Scenario: scenario,
-		})
-		metrics.DecisionsInFlight.Dec()
-		if err != nil {
-			b.log.Error().Err(err).Str("ip", result.Value).Msg("failed to apply unban")
+		if !b.applyDecision(ctx, d, "delete", source) {
+			return
 		}
 	}
+}
+
+// applyDecision filters d and hands it to the job handler. It returns false
+// only when ctx was cancelled while waiting on the rate limiter.
+func (b *Bouncer) applyDecision(ctx context.Context, d *models.Decision, action, source string) bool {
+	result := decision.Filter(d, b.filterCfg, b.log)
+	if !result.Passed {
+		return true
+	}
+	decisionID := decisionSource(d)
+	if decisionID == "" {
+		b.log.Warn().Str("ip", result.Value).Str("action", action).Msg("skipping CrowdSec decision without ID or UUID")
+		return true
+	}
+	metricAction := "ban"
+	if action == "delete" {
+		metricAction = "unban"
+	}
+	metrics.DecisionsProcessed.WithLabelValues(metricAction, source).Inc()
+
+	if b.limiter != nil {
+		if err := b.limiter.Wait(ctx); err != nil {
+			return false
+		}
+	}
+
+	job := SyncJob{
+		Action:   action,
+		Source:   decisionID,
+		IP:       result.Value,
+		IPv6:     result.IPv6,
+		Scenario: deref(d.Scenario),
+	}
+	if action == "ban" {
+		job.ExpiresAt = expiresAt(result.Duration)
+		job.DurationOverride = result.DurationOverride
+		job.Origin = deref(d.Origin)
+		job.RemediationType = deref(d.Type)
+		job.ReceivedAt = time.Now()
+	}
+
+	metrics.DecisionsInFlight.Inc()
+	err := b.handler(ctx, job)
+	metrics.DecisionsInFlight.Dec()
+	if err != nil {
+		b.log.Error().Err(err).Str("ip", result.Value).Str("action", action).Msg("failed to apply decision")
+	}
+	return true
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 func decisionSource(d *models.Decision) string {

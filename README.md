@@ -106,7 +106,8 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `CROWDSEC_LAPI_VERIFY_TLS` | `true` | Verify the LAPI TLS certificate |
 | `CROWDSEC_LAPI_CA_CERT` | — | CA bundle for a private LAPI certificate |
 | `CROWDSEC_LAPI_ALLOW_HTTP` | `false` | Explicitly allow non-loopback plaintext HTTP on a trusted local network |
-| `CROWDSEC_POLL_INTERVAL` | `30s` | How often to poll LAPI when SSE is unavailable |
+| `CROWDSEC_POLL_INTERVAL` | `30s` | How often to poll the LAPI decision stream |
+| `CROWDSEC_RESYNC_INTERVAL` | `1h` | How often every active decision is re-read to apply bans the stream skipped; `0` disables, minimum `5m` |
 | `CROWDSEC_ORIGINS` | — | Comma-separated allowed origins; empty = all |
 | `LAPI_METRICS_PUSH_INTERVAL` | `30m` | Interval for pushing metrics to LAPI `/v1/usage-metrics`; `0` disables; minimum enforced value is `10m` |
 
