@@ -61,6 +61,49 @@ func TestEnsureRuleForShard_RepairsDrift(t *testing.T) {
 	}
 }
 
+// TestEnsureRuleForShard_AdoptsAfterCacheLoss verifies that a rule the bouncer
+// created is adopted by name once its cached ID is gone. The classic API does
+// not store descriptions, so a listed rule has an empty one.
+func TestEnsureRuleForShard_AdoptsAfterCacheLoss(t *testing.T) {
+	tests := []struct {
+		name        string
+		description string
+		wantErr     bool
+	}{
+		{name: "description not stored by controller", description: ""},
+		{name: "matching description", description: "test"}, // lm.cfg.Description
+		{name: "foreign rule with same name", description: "someone else's rule", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			ctrl := testutil.NewMockController()
+			store := newBboltStore(t)
+			v4 := ensuredV4Shard(t, ctrl, store)
+			lm := newTestLegacyManager(ctrl, store, testNamer(t))
+			groupID := v4.GroupIDs()[0]
+			if err := lm.EnsureRuleForShard(ctx, testSite, groupID, false, 0); err != nil {
+				t.Fatalf("first EnsureRuleForShard: %v", err)
+			}
+			rules, _ := ctrl.ListFirewallRules(ctx, testSite)
+			rules[0].Description = tt.description
+			ctrl.SetRules(testSite, rules)
+			if err := deleteCachedPolicy(store, testSite, rules[0].Name); err != nil {
+				t.Fatalf("clear cache: %v", err)
+			}
+			creates := ctrl.Calls("CreateFirewallRule")
+
+			err := lm.EnsureRuleForShard(ctx, testSite, groupID, false, 0)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("EnsureRuleForShard error = %v, want error %v", err, tt.wantErr)
+			}
+			if got := ctrl.Calls("CreateFirewallRule"); got != creates {
+				t.Errorf("CreateFirewallRule calls = %d, want %d (no duplicate)", got, creates)
+			}
+		})
+	}
+}
+
 // TestEnsurePoliciesForShard_RepairsDrift verifies that an existing zone
 // policy for a new shard is repaired in place.
 func TestEnsurePoliciesForShard_RepairsDrift(t *testing.T) {

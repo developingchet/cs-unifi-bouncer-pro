@@ -2,9 +2,11 @@ package firewall
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/testutil"
@@ -109,6 +111,54 @@ func TestCreateShardObject_EmptyIDAdoptsExisting(t *testing.T) {
 			id, err := sm.doCreateUniFiGroup(context.Background(), "crowdsec-block-v4-0")
 			if (err != nil) != tt.wantErr || id != tt.wantID {
 				t.Fatalf("doCreateUniFiGroup = %q, %v; want %q, err %v", id, err, tt.wantID, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestCreateShardObject_RefusedCreateAdoptsExisting covers controllers that
+// reject a duplicate name with a plain 4xx instead of a conflict: the existing
+// object is adopted instead of retrying the create forever. A rate-limited
+// create is not followed by a lookup.
+func TestCreateShardObject_RefusedCreateAdoptsExisting(t *testing.T) {
+	tests := []struct {
+		name       string
+		createErr  error
+		listed     []controller.TrafficMatchingList
+		wantID     string
+		wantErr    bool
+		wantLookup bool
+	}{
+		{
+			name:      "duplicate name as HTTP 400: adopted",
+			createErr: errors.New("UniFi API returned HTTP 400: name already in use"), wantLookup: true,
+			listed: []controller.TrafficMatchingList{tmlWith("existing", "crowdsec-block-v4-0")}, wantID: "existing",
+		},
+		{
+			name:      "refused and nothing listed: create error kept",
+			createErr: errors.New("UniFi API returned HTTP 422: too many lists"), wantLookup: true, wantErr: true,
+		},
+		{
+			name:      "rate limited: no lookup",
+			createErr: &controller.ErrRateLimit{RetryAfter: time.Second}, wantErr: true,
+			listed: []controller.TrafficMatchingList{tmlWith("existing", "crowdsec-block-v4-0")},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := testutil.NewMockController()
+			mock.SetTMLs(testSite, tt.listed)
+			mock.SetError("CreateTrafficMatchingList", tt.createErr)
+			sm := NewShardManager(testSite, false, 3, zoneTestNamer(t), mock, testutil.NewMockStore(), zerolog.Nop(), 0, nil, false, "zone")
+			id, err := sm.doCreateUniFiGroup(context.Background(), "crowdsec-block-v4-0")
+			if (err != nil) != tt.wantErr || id != tt.wantID {
+				t.Fatalf("doCreateUniFiGroup = %q, %v; want %q, err %v", id, err, tt.wantID, tt.wantErr)
+			}
+			if tt.wantErr && !errors.Is(err, tt.createErr) {
+				t.Errorf("error %v does not wrap the create error", err)
+			}
+			if got := mock.Calls("ListTrafficMatchingLists") > 0; got != tt.wantLookup {
+				t.Errorf("looked up existing object = %v, want %v", got, tt.wantLookup)
 			}
 		})
 	}

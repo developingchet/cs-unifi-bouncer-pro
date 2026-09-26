@@ -717,18 +717,20 @@ func (sm *ShardManager) allocShard(idx int) *Shard {
 
 // doCreateUniFiGroup creates the shard object (a TML in zone mode, a firewall
 // group in legacy mode) holding only the placeholder member, and returns its
-// ID. When the controller reports a conflict or answers without an ID, the
-// object may already exist under this name, so it is looked up and adopted
-// rather than created again on every sync.
+// ID. When a create fails or answers without an ID, the object may already
+// exist under this name, so it is looked up and adopted rather than created
+// again on every sync. Controllers report a duplicate name inconsistently
+// (409, or 400 with various messages), so any refusal is checked, except rate
+// limiting and cancellation, where another request would not help.
 func (sm *ShardManager) doCreateUniFiGroup(ctx context.Context, name string) (string, error) {
 	objectKind := sm.shardObjectKind()
 	id, err := sm.createShardObject(ctx, name)
-	var conflict *controller.ErrConflict
-	if err != nil && !errors.As(err, &conflict) {
-		return "", fmt.Errorf("create %s %s: %w", objectKind, name, err)
-	}
 	if err == nil && id != "" {
 		return id, nil
+	}
+	var rateLimited *controller.ErrRateLimit
+	if err != nil && (errors.As(err, &rateLimited) || ctx.Err() != nil) {
+		return "", fmt.Errorf("create %s %s: %w", objectKind, name, err)
 	}
 
 	existing, lookupErr := sm.lookupShardObjectByName(ctx, name)
@@ -797,6 +799,22 @@ func (sm *ShardManager) GroupRefs() []GroupRef {
 	return refs
 }
 
+// OwnedRefs returns Active and Draining shards that exist on the controller.
+// Their policies and rules must survive an orphan sweep: a Draining shard's
+// are removed only by its drain callback, once its IPs have moved.
+func (sm *ShardManager) OwnedRefs() []GroupRef {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	family := sm.families[sm.family]
+	refs := make([]GroupRef, 0, len(family.Shards))
+	for _, s := range family.Shards {
+		if s.State != ShardStatePending && s.ID != "" {
+			refs = append(refs, GroupRef{Index: s.Index, ID: s.ID})
+		}
+	}
+	return refs
+}
+
 func (sm *ShardManager) GroupIDAt(shardIdx int) string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -827,10 +845,11 @@ func (sm *ShardManager) updateMetricsLocked() {
 	familyName := Family(sm.ipv6)
 	unsynced := 0
 	for _, s := range family.Shards {
-		if s.ID == "" {
+		// A shard enforces nothing until it exists and has its block policy or rule.
+		if s.ID == "" || s.activationPending {
 			unsynced += s.IPs.Len()
 		}
-		name, _ := sm.namer.GroupName(NameData{Family: familyName, Index: s.Index, Site: sm.site})
+		name := s.Name // rendered once at allocation; this runs on every add
 		count := float64(s.IPs.Len())
 		metrics.FirewallGroupSize.WithLabelValues(familyName, name, sm.site).Set(count)
 		if sm.shardLimit > 0 {
@@ -868,7 +887,7 @@ func (sm *ShardManager) recordCreateFailure(shard *Shard, ipCount int, err error
 
 	metrics.ShardCreateFailures.WithLabelValues(shard.Family, sm.site).Inc()
 	sm.log.Error().Err(err).Str("shard", shard.Name).Int("unsynced_ips", ipCount).
-		Int("consecutive_failures", failures).Dur("retry_in", delay).
+		Int("consecutive_failures", failures).Stringer("retry_in", delay).
 		Msg("failed to create shard on the controller; its bans are not enforced until it exists")
 }
 
@@ -975,7 +994,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) error {
 	wasCreating := state == ShardStatePending
 	if wasCreating && groupID == "" {
 		if wait := sm.createBackoffRemaining(shard); wait > 0 {
-			sm.log.Debug().Str("shard", shard.Name).Dur("retry_in", wait).Msg("shard create backing off after failures")
+			sm.log.Debug().Str("shard", shard.Name).Stringer("retry_in", wait).Msg("shard create backing off after failures")
 			return nil
 		}
 		createdID, err := sm.doCreateUniFiGroup(ctx, shard.Name)
@@ -1053,7 +1072,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) error {
 		var rl *controller.ErrRateLimit
 		if errors.As(putErr, &rl) && sm.onRateLimit != nil {
 			sm.onRateLimit(rl.RetryAfter)
-			sm.log.Warn().Dur("retry_after", rl.RetryAfter).Str("shard", shard.Name).
+			sm.log.Warn().Stringer("retry_after", rl.RetryAfter).Str("shard", shard.Name).
 				Msg("rate limited by controller; backing off")
 			return putErr
 		}
@@ -1090,6 +1109,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) error {
 		sm.mu.Lock()
 		shard.State = ShardStateActive
 		shard.activationPending = true
+		sm.updateMetricsLocked()
 		sm.mu.Unlock()
 	}
 
@@ -1126,8 +1146,23 @@ func (sm *ShardManager) provisionShard(ctx context.Context, shard *Shard) error 
 	}
 	sm.mu.Lock()
 	shard.activationPending = false
+	sm.updateMetricsLocked()
 	sm.mu.Unlock()
 	return nil
+}
+
+// MarkUnprovisioned flags an active shard whose block policy or rule could not
+// be ensured. The next sync retries it, and until then its bans count as
+// unsynced rather than enforced.
+func (sm *ShardManager) MarkUnprovisioned(shardIdx int) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	shard := sm.findShardByIndexLocked(sm.families[sm.family], shardIdx)
+	if shard == nil || shard.State != ShardStateActive {
+		return
+	}
+	shard.activationPending = true
+	sm.updateMetricsLocked()
 }
 
 // lookupTMLByName returns the ID of the TML named name, "" if there is none,

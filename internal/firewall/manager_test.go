@@ -739,6 +739,40 @@ func TestReconcile_RestoresMissingZonePolicy(t *testing.T) {
 	}
 }
 
+// TestReconcile_RestoresPoliciesDespiteFlushFailure verifies that one shard
+// the controller refuses does not stop reconcile from restoring the block
+// policies of every other shard.
+func TestReconcile_RestoresPoliciesDespiteFlushFailure(t *testing.T) {
+	cfg := defaultManagerConfig()
+	cfg.FirewallMode = "zone"
+	cfg.ZoneCfg.ZonePairs = []config.ZonePair{{Src: "wan", Dst: "lan"}}
+	mgr, ctrl, store := newTestManager(t, cfg)
+	ctrl.SetTMLs(testSite, []controller.TrafficMatchingList{{
+		ID: "tml-3", Name: "crowdsec-block-v4-3", Type: "IPV4_ADDRESSES",
+		Items: []controller.TrafficMatchingListItem{{Type: "IP_ADDRESS", Value: "1.2.3.4"}},
+	}})
+	if err := store.BanRecord("1.2.3.4", time.Time{}, false); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := mgr.EnsureInfrastructure(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl.SetPolicies(testSite, nil)
+	if err := store.BanRecord("1.2.3.5", time.Time{}, false); err != nil {
+		t.Fatal(err)
+	}
+	ctrl.SetError("UpdateTrafficMatchingList", errTest("simulated flush failure"))
+
+	if _, err := mgr.Reconcile(ctx, []string{testSite}); err == nil {
+		t.Fatal("Reconcile must report the flush failure")
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(policies) != 1 || policies[0].Name != "crowdsec-policy-wan-lan-v4-3" {
+		t.Fatalf("policies after a failed flush = %+v, %v; want the v4-3 policy restored", policies, err)
+	}
+}
+
 func TestReconcile_RemovesUntrackedSparseGroup(t *testing.T) {
 	cfg := defaultManagerConfig()
 	cfg.FirewallMode = "zone"

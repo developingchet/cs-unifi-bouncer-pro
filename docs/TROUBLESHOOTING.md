@@ -529,7 +529,9 @@ A controller that is shutting down or starting answers every API call with HTTP 
 
 **Cause:** Releases up to v1.2.5 numbered a new shard by counting shards. Once a shard number was missing (for example `crowdsec-block-v4-1` deleted), the next shard reused a number that was already taken, the controller refused the duplicate name, and every ban that did not fit in the existing shards stayed unapplied. Policies were also numbered by position rather than by shard number, so groups past the gap could be left without a block policy.
 
-**Fix:** Upgrade. A new shard now takes the number after the highest one in use. Every shard gets its policy by its real number. A create that answers without an ID adopts an existing object of that name. The first reconcile after the upgrade creates the missing policies and the overflow shard. No manual cleanup is needed.
+**Fix:** Upgrade. A new shard now takes the number after the highest one in use. Every shard gets its policy by its real number. A create that is refused or answers without an ID adopts an existing object of that name. A shard whose policy or rule the controller refuses no longer stops the other shards from getting theirs; it is retried on every sync and its bans count in `crowdsec_unifi_unsynced_ips` until it is enforced. The first reconcile after the upgrade creates the missing policies and the overflow shard. No manual cleanup is needed.
+
+Durations in log lines carry their unit (`"elapsed":"2.467s"`). Earlier releases logged a bare number of milliseconds, so `"elapsed":2467.3` on `periodic reconcile complete` means about 2.5 seconds, not 41 minutes.
 
 ---
 

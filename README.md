@@ -381,7 +381,7 @@ Available at `:9090/metrics` (configurable via `METRICS_ADDR`):
 | Metric | Type | Description |
 |--------|------|-------------|
 | `crowdsec_unifi_active_bans` | Gauge | Bans the bouncer tracks, labelled by site and address family, including any not yet on the controller |
-| `crowdsec_unifi_unsynced_ips` | Gauge | Bans held in shards that do not exist on the controller yet, so they are not enforced. Alert when above 0 for more than a few minutes |
+| `crowdsec_unifi_unsynced_ips` | Gauge | Bans held in shards that are not enforced yet: the shard object or its block policy/rule is missing on the controller. Alert when above 0 for more than a few minutes |
 | `crowdsec_unifi_shard_create_failures_total` | Counter | Failed attempts to create a shard object. Creates back off exponentially (30s up to 30m); the log line carries the controller's reason |
 | `crowdsec_unifi_decisions_processed_total` | Counter | Decisions received from CrowdSec, by action and origin |
 | `crowdsec_unifi_decisions_filtered_total` | Counter | Decisions rejected at each filter stage |

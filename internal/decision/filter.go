@@ -149,7 +149,7 @@ func Filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger) FilterResu
 	}
 	if action == "ban" && cfg.MinBanDuration > 0 && dur > 0 && dur < cfg.MinBanDuration {
 		metrics.DecisionsFiltered.WithLabelValues(stageMinDur, "too_short").Inc()
-		log.Trace().Str("ip", sanitized).Dur("duration", dur).Dur("min", cfg.MinBanDuration).Msg("filtered: ban duration too short")
+		log.Trace().Str("ip", sanitized).Stringer("duration", dur).Stringer("min", cfg.MinBanDuration).Msg("filtered: ban duration too short")
 		return FilterResult{}
 	}
 

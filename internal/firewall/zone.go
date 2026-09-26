@@ -465,7 +465,7 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 				continue
 			}
 			family := Family(ipv6)
-			for _, ref := range sm.GroupRefs() {
+			for _, ref := range sm.OwnedRefs() {
 				name, err := zm.namer.PolicyName(NameData{
 					Family:  family,
 					Index:   ref.Index,
@@ -480,15 +480,17 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 		}
 	}
 
+	// One shard the controller refuses must not leave every later shard
+	// without a policy, so failures are collected and the rest carry on.
+	var failed []error
 	for _, pair := range zm.cfg.ZonePairs {
-		if err := zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, existingByID, false, v4Shards); err != nil {
-			return err
-		}
+		failed = append(failed, zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, existingByID, false, v4Shards)...)
 		if v6Shards != nil {
-			if err := zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, existingByID, true, v6Shards); err != nil {
-				return err
-			}
+			failed = append(failed, zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, existingByID, true, v6Shards)...)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// Remove any block policies that were managed by this bouncer but whose
@@ -500,25 +502,40 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	portIDs := zm.portTMLCache[site]
 	zm.mu.RUnlock()
 	zm.cleanupOrphanedPortTMLs(ctx, site, portIDs)
-	return nil
+	return provisionFailure(failed)
 }
 
-func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, pair config.ZonePair, zoneMap map[string]string, existingByID map[string]controller.ZonePolicy, ipv6 bool, sm *ShardManager) error {
+// ensurePoliciesForPair ensures the block policy of every active shard for one
+// zone pair. It returns one error per shard that failed; those shards are
+// marked so the next sync retries them.
+func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, pair config.ZonePair, zoneMap map[string]string, existingByID map[string]controller.ZonePolicy, ipv6 bool, sm *ShardManager) []error {
+	var failed []error
 	firstCreate := true
 	for _, ref := range sm.GroupRefs() {
-		desired, err := zm.desiredPolicy(site, pair, zoneMap, ipv6, ref.Index, ref.ID)
-		if err != nil {
-			return err
+		if ctx.Err() != nil {
+			return failed
 		}
-		created, err := zm.ensurePolicy(ctx, site, desired, existingByID, !firstCreate)
+		created, err := zm.ensureShardPolicy(ctx, site, pair, zoneMap, existingByID, ipv6, ref, !firstCreate)
 		if err != nil {
-			return err
+			sm.MarkUnprovisioned(ref.Index)
+			failed = append(failed, fmt.Errorf("%s shard %d (%s->%s): %w", Family(ipv6), ref.Index, pair.Src, pair.Dst, err))
+			continue
 		}
 		if created {
 			firstCreate = false
 		}
 	}
-	return nil
+	return failed
+}
+
+func (zm *ZoneManager) ensureShardPolicy(ctx context.Context, site string, pair config.ZonePair, zoneMap map[string]string,
+	existingByID map[string]controller.ZonePolicy, ipv6 bool, ref GroupRef, delay bool,
+) (bool, error) {
+	desired, err := zm.desiredPolicy(site, pair, zoneMap, ipv6, ref.Index, ref.ID)
+	if err != nil {
+		return false, err
+	}
+	return zm.ensurePolicy(ctx, site, desired, existingByID, delay)
 }
 
 // desiredPolicy renders the block policy the bouncer maintains for one shard

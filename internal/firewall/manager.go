@@ -375,7 +375,7 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 				m.log.Info().Str("site", site).Str("mode", "legacy").
 					Msg("[DRY-RUN] would ensure legacy firewall rules for all shards")
 			} else {
-				if err := m.legacyMgr.EnsureRules(ctx, site, v4Mgr, v6Mgr); err != nil {
+				if err := m.tolerateShardFailures(site, m.legacyMgr.EnsureRules(ctx, site, v4Mgr, v6Mgr)); err != nil {
 					return fmt.Errorf("ensure legacy rules for site %s: %w", site, err)
 				}
 			}
@@ -388,12 +388,25 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 				if err := m.zoneMgr.Bootstrap(ctx, []string{site}); err != nil {
 					return fmt.Errorf("zone bootstrap for site %s: %w", site, err)
 				}
-				if err := m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr); err != nil {
+				if err := m.tolerateShardFailures(site, m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr)); err != nil {
 					return fmt.Errorf("ensure zone policies for site %s: %w", site, err)
 				}
 			}
 		}
 	}
+	return nil
+}
+
+// tolerateShardFailures lets startup continue when only individual shards
+// lack their block policy or rule. Those shards are retried on every sync and
+// counted in unsynced_ips, which is better than refusing to start and
+// enforcing nothing.
+func (m *managerImpl) tolerateShardFailures(site string, err error) error {
+	if err == nil || !IsShardProvisionError(err) {
+		return err
+	}
+	m.log.Error().Err(err).Str("site", site).
+		Msg("some shards have no block policy or rule; their bans are not enforced yet and are retried on every sync")
 	return nil
 }
 
@@ -623,20 +636,23 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 					flushed = false
 				}
 			}
-			if !flushed {
-				return // preserve donor policies until their target has been flushed
-			}
-			if err := v4Mgr.drainDraining(ctx); err != nil {
-				errs = append(errs, fmt.Errorf("drain v4 shards: %w", err))
-			}
-			if v6Mgr != nil {
-				if err := v6Mgr.drainDraining(ctx); err != nil {
-					errs = append(errs, fmt.Errorf("drain v6 shards: %w", err))
+			// Donor shards keep their policies until every target has been
+			// flushed, so draining and pruning wait for a clean flush.
+			if flushed {
+				if err := v4Mgr.drainDraining(ctx); err != nil {
+					errs = append(errs, fmt.Errorf("drain v4 shards: %w", err))
 				}
+				if v6Mgr != nil {
+					if err := v6Mgr.drainDraining(ctx); err != nil {
+						errs = append(errs, fmt.Errorf("drain v6 shards: %w", err))
+					}
+				}
+				m.pruneEmptyTailShards(ctx, site, v4Mgr, v6Mgr)
 			}
-			m.pruneEmptyTailShards(ctx, site, v4Mgr, v6Mgr)
 			// Membership alone does not enforce bans. Repair policies/rules that were
-			// deleted externally or missed when an activation callback failed.
+			// deleted externally or missed when an activation callback failed. This
+			// runs even when one shard failed to flush: that shard has no ID yet
+			// and is skipped, and every other shard still gets its policy.
 			switch m.cachedMode(site) {
 			case "zone":
 				if err := m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr); err != nil {

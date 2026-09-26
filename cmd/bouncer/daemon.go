@@ -141,7 +141,7 @@ func awaitShutdown(ctx context.Context, cfg *config.Config, done <-chan error, w
 		}
 		return err
 	case <-shutdownCtx.Done():
-		log.Warn().Dur("grace_period", cfg.ShutdownGracePeriod).
+		log.Warn().Stringer("grace_period", cfg.ShutdownGracePeriod).
 			Msg("shutdown grace period exceeded; forcing exit")
 		// Deferred cleanup is skipped on purpose: the database or controller
 		// client may be what is stuck.

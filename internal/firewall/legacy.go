@@ -64,7 +64,7 @@ func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards,
 		if entry.sm == nil {
 			continue
 		}
-		for _, ref := range entry.sm.GroupRefs() {
+		for _, ref := range entry.sm.OwnedRefs() {
 			name, nameErr := lm.namer.RuleName(NameData{Family: Family(entry.ipv6), Index: ref.Index, Site: site})
 			if nameErr == nil {
 				expectedRuleNames[name] = true
@@ -72,13 +72,14 @@ func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards,
 		}
 	}
 
-	if err := lm.ensureRulesForFamily(ctx, site, false, existingByID, v4Shards); err != nil {
-		return err
-	}
+	// One shard the controller refuses must not leave every later shard
+	// without a rule, so failures are collected and the rest carry on.
+	failed := lm.ensureRulesForFamily(ctx, site, false, existingByID, v4Shards)
 	if v6Shards != nil {
-		if err := lm.ensureRulesForFamily(ctx, site, true, existingByID, v6Shards); err != nil {
-			return err
-		}
+		failed = append(failed, lm.ensureRulesForFamily(ctx, site, true, existingByID, v6Shards)...)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// API-level orphan sweep: delete owned pre-existing rules that are no longer
@@ -124,10 +125,13 @@ func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards,
 			return fmt.Errorf("remove orphaned rule %s from cache: %w", r.Name, err)
 		}
 	}
-	return nil
+	return provisionFailure(failed)
 }
 
-func (lm *LegacyManager) ensureRulesForFamily(ctx context.Context, site string, ipv6 bool, existingByID map[string]controller.FirewallRule, sm *ShardManager) error {
+// ensureRulesForFamily ensures the drop rule of every active shard in one
+// family. It returns one error per shard that failed; those shards are marked
+// so the next sync retries them.
+func (lm *LegacyManager) ensureRulesForFamily(ctx context.Context, site string, ipv6 bool, existingByID map[string]controller.FirewallRule, sm *ShardManager) []error {
 	family := Family(ipv6)
 	ruleset := lm.cfg.RulesetV4
 	indexStart := lm.cfg.RuleIndexStartV4
@@ -136,21 +140,27 @@ func (lm *LegacyManager) ensureRulesForFamily(ctx context.Context, site string, 
 		indexStart = lm.cfg.RuleIndexStartV6
 	}
 
+	var failed []error
 	firstCreate := true
 	for _, ref := range sm.GroupRefs() {
-		desired, err := lm.desiredRule(site, family, ruleset, indexStart, ref.Index, ref.ID)
-		if err != nil {
-			return err
+		if ctx.Err() != nil {
+			return failed
 		}
-		created, err := lm.ensureRule(ctx, site, desired, existingByID, !firstCreate)
+		desired, err := lm.desiredRule(site, family, ruleset, indexStart, ref.Index, ref.ID)
+		created := false
+		if err == nil {
+			created, err = lm.ensureRule(ctx, site, desired, existingByID, !firstCreate)
+		}
 		if err != nil {
-			return err
+			sm.MarkUnprovisioned(ref.Index)
+			failed = append(failed, fmt.Errorf("%s shard %d: %w", family, ref.Index, err))
+			continue
 		}
 		if created {
 			firstCreate = false
 		}
 	}
-	return nil
+	return failed
 }
 
 // desiredRule renders the rule the bouncer maintains for one shard.
@@ -193,7 +203,9 @@ func (lm *LegacyManager) ensureRule(ctx context.Context, site string, desired co
 			if candidate.Name != name {
 				continue
 			}
-			if candidate.Description != lm.cfg.Description {
+			// The classic API does not store descriptions, so an empty one is
+			// the bouncer's own rule; only a different description is foreign.
+			if candidate.Description != "" && candidate.Description != lm.cfg.Description {
 				return false, fmt.Errorf("rule %s exists with a different description", name)
 			}
 			id = candidate.ID

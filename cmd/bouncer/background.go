@@ -44,14 +44,14 @@ func runPeriodicReconcile(ctx context.Context, fwMgr firewall.Manager, sites []s
 		result, err := fwMgr.Reconcile(ctx, sites)
 		metrics.ReconcileDuration.WithLabelValues("periodic").Observe(time.Since(start).Seconds())
 		if err != nil {
+			// A partial reconcile still repaired what it could; report both.
 			log.Warn().Err(err).Msg("periodic reconcile error")
-			return
 		}
 		if result == nil {
 			return
 		}
 		log.Info().Int("added", result.Added).Int("removed", result.Removed).
-			Dur("elapsed", result.Elapsed).Msg("periodic reconcile complete")
+			Stringer("elapsed", result.Elapsed).Msg("periodic reconcile complete")
 		if result.Added+result.Removed >= reconcileDriftThreshold {
 			notifier.Fire("reconcile_drift", map[string]any{
 				"added":   result.Added,
@@ -71,7 +71,7 @@ func runStartupReconcile(ctx context.Context, fwMgr firewall.Manager, sites []st
 	metrics.ReconcileDuration.WithLabelValues("startup").Observe(time.Since(start).Seconds())
 	if result != nil {
 		log.Info().Int("added", result.Added).Int("removed", result.Removed).
-			Dur("elapsed", result.Elapsed).Msg("startup reconcile complete")
+			Stringer("elapsed", result.Elapsed).Msg("startup reconcile complete")
 	}
 }
 

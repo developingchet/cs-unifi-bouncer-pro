@@ -198,7 +198,7 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 	if err != nil {
 		if c.cfg.Debug {
 			c.log.Debug().Str("method", req.Method).Str("url", req.URL.String()).
-				Err(err).Dur("elapsed", elapsed).Msg("unifi api request failed")
+				Err(err).Stringer("elapsed", elapsed).Msg("unifi api request failed")
 		}
 		metrics.APICalls.WithLabelValues(endpoint, "error").Inc()
 		return nil, err
@@ -213,7 +213,7 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 
 	if c.cfg.Debug {
 		c.log.Debug().Str("method", req.Method).Str("url", req.URL.String()).
-			Int("status", resp.StatusCode).Dur("elapsed", elapsed).Msg("unifi api response")
+			Int("status", resp.StatusCode).Stringer("elapsed", elapsed).Msg("unifi api response")
 	}
 
 	switch resp.StatusCode {
