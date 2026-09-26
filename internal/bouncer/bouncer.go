@@ -45,6 +45,16 @@ type Bouncer struct {
 	lapiHTTP  *http.Client
 	recorder  MetricsRecorder
 	limiter   *rate.Limiter // nil when rate limiting is disabled
+	// onStartupSynced runs once, after the first decision batch is applied.
+	onStartupSynced func()
+}
+
+// OnStartupSynced registers fn to run once, after the first decision batch
+// from the LAPI has been applied. Until then the ban database may be missing
+// bans (a fresh or lost volume), so anything that removes IPs the database
+// does not know about must wait for it. Call before Run.
+func (b *Bouncer) OnStartupSynced(fn func()) {
+	b.onStartupSynced = fn
 }
 
 // New constructs a fully wired Bouncer.
@@ -186,6 +196,9 @@ func (b *Bouncer) processStream(ctx context.Context) error {
 			if !startupSynced {
 				startupSynced = true
 				b.log.Info().Msg("startup stream batch synced to UniFi")
+				if b.onStartupSynced != nil {
+					b.onStartupSynced()
+				}
 			}
 		}
 	}

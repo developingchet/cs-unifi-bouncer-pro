@@ -81,9 +81,6 @@ func runDaemon() error {
 	}
 	go watchSIGHUP(ctx, notifySIGHUP(), cfg, fwMgr, log)
 	cfManager := startCloudflareWhitelist(ctx, cfg, ctrl, cfPairs, log)
-	if cfg.FirewallReconcileOnStart {
-		runStartupReconcile(ctx, fwMgr, cfg.UnifiSites, log)
-	}
 
 	recorder, err := newMetricsRecorder(ctx, cfg, log)
 	if err != nil {
@@ -109,9 +106,19 @@ func runDaemon() error {
 			log.Warn().Err(err).Msg("janitor exited")
 		}
 	}()
-	if cfg.FirewallReconcileInterval > 0 {
-		go runPeriodicReconcile(ctx, fwMgr, cfg.UnifiSites, cfg.FirewallReconcileInterval, notifier, log)
-	}
+	// Reconcile removes controller IPs the ban database does not hold. A fresh
+	// or lost database holds nothing until the first LAPI batch arrives, so
+	// reconciling earlier would strip every enforced ban from the controller.
+	bnc.OnStartupSynced(func() {
+		go func() {
+			if cfg.FirewallReconcileOnStart {
+				runStartupReconcile(ctx, fwMgr, cfg.UnifiSites, log)
+			}
+			if cfg.FirewallReconcileInterval > 0 {
+				runPeriodicReconcile(ctx, fwMgr, cfg.UnifiSites, cfg.FirewallReconcileInterval, notifier, log)
+			}
+		}()
+	})
 	if cfManager != nil {
 		go runCloudflareRefresh(ctx, cfManager, cfPairs, cfg.CloudflareRefreshInterval, log)
 	}

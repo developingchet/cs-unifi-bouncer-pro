@@ -233,8 +233,8 @@ The bouncer will:
 1. Load and validate configuration
 2. Open the bbolt database at `/data/bouncer.db`
 3. Connect to the UniFi controller and authenticate
-4. Run a startup reconcile (if `FIREWALL_RECONCILE_ON_START=true`)
-5. Connect to the CrowdSec LAPI stream and begin processing decisions
+4. Connect to the CrowdSec LAPI stream and apply the current decisions
+5. Run a startup reconcile once that first batch is applied (if `FIREWALL_RECONCILE_ON_START=true`)
 
 ### Step 7: Verify Deployment
 

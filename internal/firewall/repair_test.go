@@ -22,6 +22,10 @@ func TestEnsureRuleForShard_RepairsDrift(t *testing.T) {
 		{name: "points at another group", drift: func(r *controller.FirewallRule) { r.SrcFirewallGroupIDs = []string{"other"} }, wantUpdate: true},
 		{name: "disabled", drift: func(r *controller.FirewallRule) { r.Enabled = false }, wantUpdate: true},
 		{name: "moved index", drift: func(r *controller.FirewallRule) { r.RuleIndex = 1 }, wantUpdate: true},
+		// The classic API does not store descriptions: rewriting every rule on
+		// every reconcile would never converge.
+		{name: "description not stored", drift: func(r *controller.FirewallRule) { r.Description = "" }},
+		{name: "description changed", drift: func(r *controller.FirewallRule) { r.Description = "edited" }, wantUpdate: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

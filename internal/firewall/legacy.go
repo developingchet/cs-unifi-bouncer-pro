@@ -283,7 +283,8 @@ func (lm *LegacyManager) repairRule(ctx context.Context, site string, current, d
 
 func legacyRuleNeedsUpdate(rule controller.FirewallRule, groupID string, index int, ruleset string, cfg LegacyConfig) bool {
 	return !rule.Enabled || rule.RuleIndex != index || rule.Action != cfg.BlockAction ||
-		rule.Ruleset != ruleset || rule.Description != cfg.Description ||
+		// The classic API does not store descriptions; an empty one is not drift.
+		rule.Ruleset != ruleset || (rule.Description != "" && rule.Description != cfg.Description) ||
 		rule.Logging != cfg.LogDrops || rule.Protocol != "all" ||
 		len(rule.SrcFirewallGroupIDs) != 1 || rule.SrcFirewallGroupIDs[0] != groupID
 }
