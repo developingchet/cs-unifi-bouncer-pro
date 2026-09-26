@@ -148,6 +148,20 @@ func (e *ErrRateLimit) Error() string {
 	return fmt.Sprintf("rate limited (retry after %s)", e.RetryAfter)
 }
 
+// ErrBadRequest is an HTTP 400 the controller returned for a request it
+// understood but refused, such as a firewall group member it does not accept.
+// The controller is healthy; retrying the same request fails the same way.
+type ErrBadRequest struct {
+	Body string
+	// Arg is the offending value the classic API names in meta.args (for
+	// api.err.FirewallGroupInvalidArgs, the rejected group member), or "".
+	Arg string
+}
+
+func (e *ErrBadRequest) Error() string {
+	return fmt.Sprintf("bad request: %s", e.Body)
+}
+
 // ErrConflict is returned when a create operation would cause a duplicate.
 type ErrConflict struct {
 	Msg string

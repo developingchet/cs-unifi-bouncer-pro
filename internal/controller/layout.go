@@ -62,6 +62,25 @@ func classicErrorMsg(body []byte) string {
 	return envelope.Meta.Msg
 }
 
+// classicErrorArg returns meta.args from a classic API error body when it is
+// a single string, or "". FirewallGroupInvalidArgs puts the rejected member
+// there, e.g. {"meta":{"rc":"error","args":"203.0.113.9/32",...}}.
+func classicErrorArg(body []byte) string {
+	var envelope struct {
+		Meta struct {
+			Args json.RawMessage `json:"args"`
+		} `json:"meta"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return ""
+	}
+	var arg string
+	if json.Unmarshal(envelope.Meta.Args, &arg) != nil {
+		return ""
+	}
+	return arg
+}
+
 // networkURL joins the base URL, the layout's Network API prefix, and path.
 func (c *unifiClient) networkURL(format string, args ...any) string {
 	return c.cfg.BaseURL + c.layout.networkPrefix + fmt.Sprintf(format, args...)

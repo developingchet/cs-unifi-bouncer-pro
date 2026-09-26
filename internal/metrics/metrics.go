@@ -99,7 +99,7 @@ var (
 	UnsyncedIPs = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "unsynced_ips",
-		Help:      "Bans in shards not enforced yet: the shard or its block policy/rule is missing on the controller.",
+		Help:      "Bans not enforced yet: the shard or its block policy/rule is missing on the controller, or the controller refused the entry.",
 	}, []string{"family", "site"})
 
 	// ShardCreateFailures counts failed attempts to create a shard object.

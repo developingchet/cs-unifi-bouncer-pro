@@ -3,6 +3,7 @@ package decision
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 )
 
@@ -13,11 +14,13 @@ func ParseAndSanitize(value string) (string, bool, error) {
 
 	// Try CIDR first
 	if strings.Contains(value, "/") {
-		ip, network, err := net.ParseCIDR(value)
+		_, network, err := net.ParseCIDR(value)
 		if err != nil {
 			return "", false, fmt.Errorf("invalid CIDR %q: %w", value, err)
 		}
-		_ = ip
+		if addr, ok := HostPrefixAddress(network.String()); ok {
+			return addr, false, nil
+		}
 		return network.String(), true, nil
 	}
 
@@ -32,6 +35,18 @@ func ParseAndSanitize(value string) (string, bool, error) {
 		return ip4.String(), false, nil
 	}
 	return ip.String(), false, nil
+}
+
+// HostPrefixAddress returns the bare address of a single-host prefix (an
+// IPv4 /32 or IPv6 /128) and true, or false for anything else. UniFi firewall
+// groups reject host prefixes (api.err.FirewallGroupInvalidArgs) and accept
+// the bare address, so bans are always stored in that form.
+func HostPrefixAddress(value string) (string, bool) {
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil || !prefix.IsSingleIP() {
+		return "", false
+	}
+	return prefix.Addr().Unmap().String(), true
 }
 
 // IsIPv6 returns true if the string is an IPv6 address or CIDR.

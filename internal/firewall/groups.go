@@ -74,6 +74,10 @@ type Shard struct {
 	// earliest time the next create may be attempted.
 	createFailures int
 	createRetryAt  time.Time
+
+	// rejected holds members the controller refused for this shard (see
+	// putAcceptedMembers). They are left out of every write until released.
+	rejected map[string]struct{}
 }
 
 // GroupRef keeps a UniFi group ID paired with its actual shard number.
@@ -456,6 +460,8 @@ func (sm *ShardManager) updateMetricsLocked() {
 		// A shard enforces nothing until it exists and has its block policy or rule.
 		if s.ID == "" || s.activationPending {
 			unsynced += s.IPs.Len()
+		} else {
+			unsynced += len(s.rejected)
 		}
 		name := s.Name // rendered once at allocation; this runs on every add
 		count := float64(s.IPs.Len())

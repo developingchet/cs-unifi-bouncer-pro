@@ -37,6 +37,21 @@ type MockController struct {
 
 	// Auto-increment ID counter for created resources
 	nextID int
+
+	// refusedMembers are group members UpdateFirewallGroup rejects the way
+	// the classic API does (HTTP 400 FirewallGroupInvalidArgs naming it).
+	refusedMembers map[string]bool
+}
+
+// RefuseGroupMember makes UpdateFirewallGroup fail with an ErrBadRequest
+// naming member whenever a write includes it.
+func (m *MockController) RefuseGroupMember(member string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.refusedMembers == nil {
+		m.refusedMembers = make(map[string]bool)
+	}
+	m.refusedMembers[member] = true
 }
 
 // NewMockController returns a zero-state MockController ready for use.
@@ -167,6 +182,14 @@ func (m *MockController) UpdateFirewallGroup(ctx context.Context, site string, g
 	defer m.mu.Unlock()
 	if err := m.track("UpdateFirewallGroup"); err != nil {
 		return err
+	}
+	for _, member := range g.GroupMembers {
+		if m.refusedMembers[member] {
+			return &controller.ErrBadRequest{
+				Body: fmt.Sprintf(`{"meta":{"rc":"error","args":%q,"msg":"api.err.FirewallGroupInvalidArgs"},"data":[]}`, member),
+				Arg:  member,
+			}
+		}
 	}
 	for i, existing := range m.groups[site] {
 		if existing.ID == g.ID {

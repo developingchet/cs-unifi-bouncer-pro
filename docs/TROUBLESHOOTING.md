@@ -605,6 +605,26 @@ The cleanup requires ownership evidence from the cache or a static name prefix a
 
 ---
 
+### A range ban for one host stopped all syncing (before this release)
+
+**Symptom:** After a decision such as `cscli decisions add -r 203.0.113.9/32`
+(or a blocklist line in that form), logs repeat
+`bad request: ... "args":"203.0.113.9/32","msg":"api.err.FirewallGroupInvalidArgs"`,
+the circuit breaker opens and no new bans reach UniFi.
+
+**Cause:** UniFi firewall groups refuse single-host prefixes (`/32`, `/128`)
+and accept only the bare address. Earlier versions stored the prefix, so every
+write of that shard failed, and the failures opened the breaker for all shards.
+
+**Fix:** Upgrade. Host prefixes are stored as the bare address, and bans saved
+in the old form are rekeyed at startup (logged once as "rekeyed bans stored as
+/32 or /128 host prefixes"). If the controller refuses any other entry and names
+it in the error, that entry alone is left out of its shard, logged as
+"controller refused a ban entry", and counted in
+`crowdsec_unifi_unsynced_ips`; the rest of the shard is still written.
+
+---
+
 ### Circuit breaker open — syncing stopped
 
 **Symptom:** `crowdsec_unifi_circuit_breaker_open` metric is 1. No bans
@@ -612,7 +632,8 @@ are being pushed to UniFi. Logs show "SyncDirty skipped: circuit breaker open".
 
 **Cause:** The bouncer has seen `CIRCUIT_BREAKER_THRESHOLD` (default: 5)
 consecutive sync failures — typically due to the UniFi controller being
-unreachable or returning 5xx errors.
+unreachable or returning 5xx errors. A controller that answers HTTP 400
+(it refused the content of one shard) does not count toward the breaker.
 
 **Resolution:**
 1. Check UniFi controller health and network connectivity from the bouncer container.

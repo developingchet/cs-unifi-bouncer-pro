@@ -209,7 +209,7 @@ func responseStatusError(resp *http.Response, req *http.Request) error {
 			// The classic API reports duplicate names as 400, not 409.
 			return &ErrConflict{Msg: msg}
 		}
-		return fmt.Errorf("bad request: %s", bodyStr)
+		return &ErrBadRequest{Body: bodyStr, Arg: classicErrorArg(body)}
 	case http.StatusUnauthorized:
 		_ = resp.Body.Close()
 		return &ErrUnauthorized{Msg: "HTTP 401"}

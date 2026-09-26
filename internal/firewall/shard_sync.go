@@ -104,8 +104,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) error {
 	}
 
 	sort.Strings(ips)
-	sentMembers := append([]string(nil), ips...)
-	sentCount, putErr := sm.putShardMembers(ctx, shard, ips)
+	sentMembers, sentCount, putErr := sm.putAcceptedMembers(ctx, shard, ips)
 	if putErr != nil {
 		return sm.handleSyncFailure(ctx, shard, putErr, sentCount, shardLabel, start)
 	}
@@ -210,6 +209,13 @@ func (sm *ShardManager) handleSyncFailure(ctx context.Context, shard *Shard, put
 
 	sm.log.Error().Err(putErr).Str("shard", shard.Name).Str("shard_id", shard.ID).Int("ip_count", ipCount).
 		Msg("shard sync failed, will retry next tick")
+	// A 400 means the controller answered and refused this shard's content.
+	// That is not a sign of an unhealthy controller, so it must not open the
+	// breaker and stall every other shard.
+	var bad *controller.ErrBadRequest
+	if errors.As(putErr, &bad) {
+		return putErr
+	}
 	if sm.onSyncError != nil {
 		sm.onSyncError()
 	}

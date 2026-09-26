@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
@@ -24,7 +25,20 @@ func openStore(cfg *config.Config, log zerolog.Logger) (storage.Store, error) {
 	if cfg.DryRun {
 		return storage.NewDryRunStore(cfg.DataDir)
 	}
-	return storage.NewBboltStore(cfg.DataDir, log, cfg.HistoryMaxEvents)
+	store, err := storage.NewBboltStore(cfg.DataDir, log, cfg.HistoryMaxEvents)
+	if err != nil {
+		return nil, err
+	}
+	rekeyed, err := banstate.CanonicalizeHostPrefixes(store)
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("canonicalize stored bans: %w", err)
+	}
+	if rekeyed > 0 {
+		log.Warn().Int("bans", rekeyed).
+			Msg("rekeyed bans stored as /32 or /128 host prefixes under the bare address; UniFi rejects host prefixes, so these bans were not enforced until now")
+	}
+	return store, nil
 }
 
 func controllerConfig(cfg *config.Config) controller.ClientConfig {

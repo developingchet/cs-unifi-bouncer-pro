@@ -132,16 +132,12 @@ func (m *Manager) fetchURL(ctx context.Context, url string) error {
 	return nil
 }
 
+// parseEntry canonicalises one feed line the same way CrowdSec decisions are,
+// so a host prefix like 203.0.113.9/32 is stored as the bare address.
 func parseEntry(s string) (ip string, ipv6 bool, ok bool) {
-	if _, network, err := net.ParseCIDR(s); err == nil {
-		return network.String(), network.IP.To4() == nil, true
-	}
-	parsed := net.ParseIP(s)
-	if parsed == nil {
+	canonical, _, err := decision.ParseAndSanitize(s)
+	if err != nil {
 		return "", false, false
 	}
-	if v4 := parsed.To4(); v4 != nil {
-		return v4.String(), false, true
-	}
-	return parsed.String(), true, true
+	return canonical, decision.IsIPv6(canonical), true
 }
