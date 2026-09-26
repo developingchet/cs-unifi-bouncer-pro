@@ -1,4 +1,4 @@
-package blocklist
+package feedhttp
 
 import (
 	"net/http"
@@ -38,8 +38,8 @@ func TestCheckFeedRedirect(t *testing.T) {
 			for len(via) < max(tt.hops, 1) {
 				via = append(via, req(tt.from))
 			}
-			if err := checkFeedRedirect(req(tt.to), via); (err != nil) != tt.wantErr {
-				t.Fatalf("checkFeedRedirect(%s -> %s) = %v, want error %v", tt.from, tt.to, err, tt.wantErr)
+			if err := CheckRedirect(req(tt.to), via); (err != nil) != tt.wantErr {
+				t.Fatalf("CheckRedirect(%s -> %s) = %v, want error %v", tt.from, tt.to, err, tt.wantErr)
 			}
 		})
 	}

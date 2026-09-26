@@ -13,6 +13,7 @@ import (
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/feedhttp"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
 	"github.com/rs/zerolog"
 )
@@ -38,7 +39,7 @@ func NewManager(urls []string, interval time.Duration, claims *banstate.Manager,
 	return &Manager{
 		urls: urls, interval: interval, claims: claims,
 		protected: protected, dryRun: dryRun, log: log,
-		client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: checkFeedRedirect},
+		client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: feedhttp.CheckRedirect},
 	}
 }
 

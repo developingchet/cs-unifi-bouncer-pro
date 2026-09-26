@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"strings"
 	"time"
+
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/feedhttp"
 )
 
 // CloudflareProvider fetches Cloudflare IP ranges from the public API.
@@ -22,7 +24,7 @@ func NewCloudflareProvider(ipv4URL, ipv6URL string) *CloudflareProvider {
 	return &CloudflareProvider{
 		IPv4URL:    ipv4URL,
 		IPv6URL:    ipv6URL,
-		HTTPClient: &http.Client{Timeout: 15 * time.Second},
+		HTTPClient: &http.Client{Timeout: 15 * time.Second, CheckRedirect: feedhttp.CheckRedirect},
 	}
 }
 

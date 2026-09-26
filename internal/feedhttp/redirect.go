@@ -1,4 +1,6 @@
-package blocklist
+// Package feedhttp holds the HTTP policy shared by the bouncer's feed
+// fetchers (blocklists and the Cloudflare IP list).
+package feedhttp
 
 import (
 	"errors"
@@ -9,12 +11,12 @@ import (
 
 const maxFeedRedirects = 3
 
-// checkFeedRedirect limits where a feed may redirect the fetcher. Feeds are
+// CheckRedirect limits where a feed may redirect the fetcher. Feeds are
 // commonly served through a redirect (release assets, CDNs), so redirects are
 // followed, but a compromised or hijacked feed host must not be able to point
 // the bouncer at internal services or downgrade HTTPS. A feed configured with
 // a private address directly is still allowed; only a redirect to one is not.
-func checkFeedRedirect(req *http.Request, via []*http.Request) error {
+func CheckRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxFeedRedirects {
 		return fmt.Errorf("stopped after %d redirects", maxFeedRedirects)
 	}
