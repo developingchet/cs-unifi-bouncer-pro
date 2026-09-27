@@ -33,7 +33,7 @@ long-lived signing key exists. The signature is bound to the exact release
 workflow identity.
 
 ```bash
-cosign verify developingchet/cs-unifi-bouncer-pro:v1.2.5 \
+cosign verify developingchet/cs-unifi-bouncer-pro:1.2.5 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 ```
@@ -176,12 +176,12 @@ Independent verification of each supply chain claim:
 
 ```bash
 # Verify image signature
-cosign verify developingchet/cs-unifi-bouncer-pro:v1.2.5 \
+cosign verify developingchet/cs-unifi-bouncer-pro:1.2.5 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 
 # Inspect SBOM attestation
-cosign verify-attestation developingchet/cs-unifi-bouncer-pro:v1.2.5 \
+cosign verify-attestation developingchet/cs-unifi-bouncer-pro:1.2.5 \
   --type cyclonedx \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
