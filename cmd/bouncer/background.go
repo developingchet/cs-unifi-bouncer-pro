@@ -186,21 +186,23 @@ func startCloudflareWhitelist(ctx context.Context, cfg *config.Config, ctrl cont
 
 // repairAndSyncWhitelist ensures the block policy or rule of every loaded
 // shard, then runs the Cloudflare whitelist: the first sync, then a refresh
-// every CLOUDFLARE_REFRESH_INTERVAL. A failed repair is retried by the
-// next reconcile.
+// every CLOUDFLARE_REFRESH_INTERVAL. Shards that could not be provisioned are
+// retried by the next sync; any other repair error is sent on failed and
+// stops the daemon, as it did when the repair ran before startup finished.
 func repairAndSyncWhitelist(ctx context.Context, cfg *config.Config, ctrl controller.Controller,
-	fwMgr firewall.Manager, cfPairs []whitelist.ZonePairConfig, log zerolog.Logger,
+	fwMgr firewall.Manager, cfPairs []whitelist.ZonePairConfig, failed chan<- error, log zerolog.Logger,
 ) {
 	start := time.Now()
 	log.Info().Msg("repairing firewall policies and rules")
-	if err := fwMgr.RepairInfrastructure(ctx, cfg.UnifiSites); err != nil {
-		log.Error().Err(err).Msg("firewall repair failed; the next reconcile retries it")
-	} else {
-		log.Info().Stringer("elapsed", time.Since(start)).Msg("firewall policies and rules repaired")
-	}
+	err := fwMgr.RepairInfrastructure(ctx, cfg.UnifiSites)
 	if ctx.Err() != nil {
 		return
 	}
+	if err != nil {
+		failed <- fmt.Errorf("repair firewall infrastructure: %w", err)
+		return
+	}
+	log.Info().Stringer("elapsed", time.Since(start)).Msg("firewall policies and rules repaired")
 	cfManager := startCloudflareWhitelist(ctx, cfg, ctrl, fwMgr.ZoneManager(), cfPairs, log)
 	if cfManager != nil {
 		runCloudflareRefresh(ctx, cfManager, cfPairs, cfg.CloudflareRefreshInterval, log)

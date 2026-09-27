@@ -134,9 +134,10 @@ func runDaemon() error {
 	// take minutes on a large ban list. They run alongside the decision stream
 	// and the health server, so new bans are applied and the health check
 	// answers meanwhile.
-	go repairAndSyncWhitelist(ctx, cfg, ctrl, fwMgr, cfPairs, log)
-
-	done := make(chan error, 1)
+	// A repair failure and the bouncer's own exit both end the daemon, so
+	// done has room for both.
+	done := make(chan error, 2)
+	go repairAndSyncWhitelist(ctx, cfg, ctrl, fwMgr, cfPairs, done, log)
 	go func() { done <- bnc.Run(ctx) }()
 	return awaitShutdown(ctx, cfg, done, log, webhookDone, recorderDone)
 }
