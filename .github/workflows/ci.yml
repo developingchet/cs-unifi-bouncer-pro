@@ -10,7 +10,6 @@ permissions:
   contents: read  # default for all jobs — no write access needed
 
 jobs:
-  # ── 1. Go tests ─────────────────────────────────────────────────────────────
   test:
     name: Go Tests
     runs-on: ubuntu-latest
@@ -27,7 +26,6 @@ jobs:
       - name: Run tests (race detector)
         run: go test -race ./... -count=1 -timeout=120s
 
-  # ── 2. Lint ──────────────────────────────────────────────────────────────────
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -42,11 +40,10 @@ jobs:
           cache: true
 
       - name: Run golangci-lint
-        run: |
-          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
-          golangci-lint run ./...
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
 
-  # ── 4. Seccomp profile static validation ────────────────────────────────────
   validate-seccomp:
     name: Validate Seccomp Profile
     runs-on: ubuntu-latest
@@ -61,12 +58,7 @@ jobs:
       - name: Validate syscall allowlist
         run: bash scripts/validate-seccomp.sh ./security/seccomp-unifi.json
 
-  # ── 5. Seccomp integration test ─────────────────────────────────────────────
-  # Builds the real image and runs it under the seccomp profile with all the
-  # same security options used in production. The bouncer will exit with a
-  # connection error (no real UniFi/LAPI) — that is expected. What must NOT
-  # appear is the runc "reopen exec fifo" error, which signals that seccomp
-  # blocked the container before the Go binary ran.
+  # A controller connection error is expected; a seccomp startup failure is not.
   test-seccomp:
     name: Seccomp Integration Test
     runs-on: ubuntu-latest
@@ -100,26 +92,34 @@ jobs:
             cs-unifi-bouncer-test:ci \
             version
 
-      - name: Test seccomp profile allows storage open (reconcile --dry-run)
+      - name: Test seccomp profile allows storage open
         run: |
-          mkdir -p /tmp/seccomp-test-data
-          chmod 777 /tmp/seccomp-test-data
-          docker run --rm \
+          DATA_DIR=$(mktemp -d)
+          chmod 777 "$DATA_DIR"
+          set +e
+          OUTPUT=$(docker run --rm \
             --security-opt "seccomp:./security/seccomp-unifi.json" \
             --security-opt no-new-privileges:true \
             --cap-drop ALL \
-            -v /tmp/seccomp-test-data:/data \
-            -e DRY_RUN=true \
+            -v "$DATA_DIR":/data \
+            -e DRY_RUN=false \
             -e CROWDSEC_LAPI_KEY=test \
             -e UNIFI_URL=https://192.0.2.1 \
             -e UNIFI_API_KEY=test \
-            cs-unifi-bouncer-test:ci reconcile || true
+            -e UNIFI_HTTP_TIMEOUT=5s \
+            cs-unifi-bouncer-test:ci reconcile 2>&1)
+          EXIT=$?
+          set -e
+          echo "$OUTPUT"
           # reconcile will fail to connect (expected) but must not fail with EPERM
           # A seccomp violation exits 159 (SIGSYS); connection failure exits 1.
-          # We assert the exit code is NOT 159:
-          EXIT=$?
-          if [ "$EXIT" -eq 159 ]; then
+          if [ "$EXIT" -eq 159 ] || echo "$OUTPUT" | grep -Eiq 'operation not permitted|seccomp'; then
             echo "FAIL: seccomp blocked a required syscall (exit 159 = SIGSYS)"
             exit 1
           fi
-          echo "OK: exit $EXIT (not a seccomp violation)"
+          if [ "$EXIT" -ne 1 ]; then
+            echo "FAIL: expected controller connection failure (exit 1), got $EXIT"
+            exit 1
+          fi
+          test -s "$DATA_DIR/bouncer.db"
+          echo "OK: storage opened and controller connection failed as expected"

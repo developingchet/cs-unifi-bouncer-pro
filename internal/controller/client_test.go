@@ -8,14 +8,76 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
 )
 
+func TestDryRunClientRefusesControllerWrites(t *testing.T) {
+	var writes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writes.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	ctrl, err := NewClient(context.Background(), ClientConfig{
+		BaseURL: server.URL, APIKey: "test", VerifyTLS: true,
+		Timeout: time.Second, DryRun: true,
+	}, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ctrl.Close()
+	_, err = ctrl.CreateFirewallGroup(context.Background(), "default", FirewallGroup{Name: "blocked"})
+	if err == nil || !strings.Contains(err.Error(), "dry run") {
+		t.Fatalf("write was not rejected: %v", err)
+	}
+	if writes.Load() != 0 {
+		t.Fatalf("dry run sent %d controller writes", writes.Load())
+	}
+}
+
+func TestControllerRedirectDoesNotForwardCredentials(t *testing.T) {
+	var redirected atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirected.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+
+	t.Run("API key", func(t *testing.T) {
+		ctrl, err := NewClient(context.Background(), ClientConfig{BaseURL: source.URL, APIKey: "secret", Timeout: time.Second}, zerolog.Nop())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ctrl.Close()
+		if err := ctrl.Ping(context.Background()); err == nil {
+			t.Fatal("redirected controller request should fail")
+		}
+	})
+	t.Run("login", func(t *testing.T) {
+		ctrl, err := NewClient(context.Background(), ClientConfig{BaseURL: source.URL, Username: "admin", Password: "secret", Timeout: time.Second}, zerolog.Nop())
+		if err == nil {
+			ctrl.Close()
+			t.Fatal("redirected login should fail")
+		}
+	})
+	if got := redirected.Load(); got != 0 {
+		t.Fatalf("redirect target received %d requests", got)
+	}
+}
+
 // newTestClient builds a *unifiClient directly, skipping EnsureAuth.
-// It is shared by client_test.go, version_test.go, and api_test.go.
+// It is shared by the controller package tests and uses the UniFi OS layout.
 func newTestClient(baseURL, apiKey string) *unifiClient {
 	log := zerolog.Nop()
 	cfg := ClientConfig{
@@ -30,12 +92,14 @@ func newTestClient(baseURL, apiKey string) *unifiClient {
 	httpClient := &http.Client{Transport: transport, Timeout: cfg.Timeout}
 	authCfg := AuthConfig{
 		BaseURL:       baseURL,
+		LoginPath:     layoutUniFiOS.loginPath,
 		APIKey:        apiKey,
 		ReauthTimeout: 5 * time.Second,
 	}
 	return &unifiClient{
 		cfg:          cfg,
 		http:         httpClient,
+		layout:       layoutUniFiOS,
 		session:      newSessionManager(authCfg, httpClient, log),
 		featureCache: make(map[string]map[string]bool),
 		zoneIDCache:  make(map[string]map[string]string),
@@ -363,10 +427,11 @@ func TestWithReauth_MaxOneRetry(t *testing.T) {
 	}
 }
 
-// TestPing_Success verifies that Ping returns nil when /api/self returns 200.
+// TestPing_Success verifies that an API-key client pings the integration API.
+// UniFi OS answers /api/self with 404 for API keys, which left /readyz at 503.
 func TestPing_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/api/self" {
+		if r.Method == http.MethodGet && r.URL.Path == "/proxy/network/integration/v1/sites" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -381,23 +446,52 @@ func TestPing_Success(t *testing.T) {
 	}
 }
 
-// TestPing_ReturnsError verifies that Ping surfaces errors when /api/self fails.
+// TestPing_ReturnsError verifies unhandled HTTP failures cannot be mistaken
+// for successful controller writes or a healthy controller.
 func TestPing_ReturnsError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Return 500 — not a typed API error, but not 200 either.
-		// apiDo passes 5xx through to the caller, so Ping should get a non-nil
-		// response with status 500. However, since apiDo only translates
-		// 401/404/429/409, a 500 is returned as a successful resp.
-		// Ping does not inspect the status beyond what apiDo filters,
-		// so to get an error we use 401 which becomes ErrUnauthorized,
-		// then re-auth also fails (returning 401), so withReauth returns an error.
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer srv.Close()
+	for _, status := range []int{http.StatusForbidden, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+			c := newTestClient(srv.URL, "api-key")
+			if err := c.Ping(context.Background()); err == nil {
+				t.Fatalf("Ping returned nil for HTTP %d", status)
+			}
+		})
+	}
+}
 
-	c := newTestClient(srv.URL, "api-key")
-	err := c.Ping(context.Background())
-	if err == nil {
-		t.Fatal("expected Ping to return an error, got nil")
+// TestWriteErrorsSurfaceStatusAndBody verifies that every rejected write is an
+// error carrying the controller's reason. Releases up to v1.2.5 treated
+// statuses other than 400/401/404/409/429 as success, so a refused create was
+// reported only as "API returned empty ID".
+func TestWriteErrorsSurfaceStatusAndBody(t *testing.T) {
+	const reason = `{"code":"api.firewall.limit","message":"too many entries"}`
+	for _, status := range []int{http.StatusForbidden, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/integration/v1/sites") {
+					_, _ = io.WriteString(w, `{"offset":0,"limit":25,"count":1,"totalCount":1,"data":[{"id":"site-uuid","internalReference":"default","name":"Default"}]}`)
+					return
+				}
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, reason)
+			}))
+			defer srv.Close()
+			c := newTestClient(srv.URL, "api-key")
+			_, err := c.CreateTrafficMatchingList(context.Background(), "default", TrafficMatchingList{Name: "crowdsec-block-v4-8", Type: "IPV4_ADDRESSES"})
+			if err == nil {
+				t.Fatalf("create returned nil for HTTP %d", status)
+			}
+			if !strings.Contains(err.Error(), "too many entries") {
+				t.Errorf("error %q does not carry the controller's reason", err)
+			}
+			err = c.UpdateTrafficMatchingList(context.Background(), "default", TrafficMatchingList{ID: "x", Name: "crowdsec-block-v4-8", Type: "IPV4_ADDRESSES"})
+			if err == nil {
+				t.Fatalf("update returned nil for HTTP %d", status)
+			}
+		})
 	}
 }

@@ -28,7 +28,8 @@ services:
       - UNIFI_API_KEY=${UNIFI_API_KEY}
       - CROWDSEC_LAPI_KEY=${CROWDSEC_LAPI_KEY}
       # Optional — uncomment and set as needed
-      # - CROWDSEC_LAPI_URL=${CROWDSEC_LAPI_URL:-http://crowdsec:8080}
+      # - CROWDSEC_LAPI_URL=${CROWDSEC_LAPI_URL:-https://crowdsec:8080}
+      # - CROWDSEC_LAPI_ALLOW_HTTP=true   # only for an http:// LAPI URL on a trusted network
       # - UNIFI_SITES=${UNIFI_SITES:-default}
       # - FIREWALL_MODE=${FIREWALL_MODE:-auto}
       # - LAPI_METRICS_PUSH_INTERVAL=${LAPI_METRICS_PUSH_INTERVAL:-30m}

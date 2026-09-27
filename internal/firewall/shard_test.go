@@ -27,9 +27,8 @@ func newShardTestNamer(t *testing.T) *Namer {
 	n, err := NewNamer(
 		"crowdsec-block-{{.Family}}-{{.Index}}",
 		"crowdsec-drop-{{.Family}}-{{.Index}}",
-		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}",
-		"test",
-	)
+		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}")
+
 	if err != nil {
 		t.Fatalf("NewNamer: %v", err)
 	}
@@ -40,7 +39,7 @@ func newShardTestManager(t *testing.T, mode string, capacity int) (*ShardManager
 	t.Helper()
 	ctrl := testutil.NewMockController()
 	store := newShardTestStore(t)
-	sm := NewShardManager(testSite, false, capacity, newShardTestNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, mode)
+	sm := NewShardManager(testSite, false, capacity, newShardTestNamer(t), ctrl, store, zerolog.Nop(), 0, false, mode)
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
@@ -59,7 +58,7 @@ func familyState(t *testing.T, sm *ShardManager) *ShardFamily {
 	t.Helper()
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	family := sm.families[sm.family]
+	family := sm.fam
 	if family == nil {
 		t.Fatal("expected family state")
 	}
@@ -87,10 +86,10 @@ func countIPAcrossShards(family *ShardFamily, ip string) int {
 func TestAddIP_Deduplication(t *testing.T) {
 	sm, _ := newShardTestManager(t, "legacy", 3)
 
-	if err := sm.AddIP(context.Background(), "1.2.3.4", "v4"); err != nil {
+	if err := sm.AddIP(context.Background(), "1.2.3.4"); err != nil {
 		t.Fatalf("AddIP first: %v", err)
 	}
-	if err := sm.AddIP(context.Background(), "1.2.3.4", "v4"); err != nil {
+	if err := sm.AddIP(context.Background(), "1.2.3.4"); err != nil {
 		t.Fatalf("AddIP second: %v", err)
 	}
 
@@ -111,7 +110,7 @@ func TestAddIP_BinPack(t *testing.T) {
 
 	for i := 1; i <= 5; i++ {
 		ip := fmt.Sprintf("10.0.0.%d", i)
-		if err := sm.AddIP(context.Background(), ip, "v4"); err != nil {
+		if err := sm.AddIP(context.Background(), ip); err != nil {
 			t.Fatalf("AddIP(%s): %v", ip, err)
 		}
 	}
@@ -137,7 +136,7 @@ func TestAddIP_ExactCapacity(t *testing.T) {
 
 	for i := 1; i <= 4; i++ {
 		ip := fmt.Sprintf("10.0.1.%d", i)
-		if err := sm.AddIP(context.Background(), ip, "v4"); err != nil {
+		if err := sm.AddIP(context.Background(), ip); err != nil {
 			t.Fatalf("AddIP(%s): %v", ip, err)
 		}
 	}
@@ -159,7 +158,7 @@ func TestAddIP_LargeOverflow(t *testing.T) {
 	// Seed baseline:
 	// shard0 = 9999, shard1 = 2000
 	sm.mu.Lock()
-	family := sm.familyStateLocked("v4")
+	family := sm.fam
 	shard0 := family.Shards[0]
 	sm.mu.Unlock()
 
@@ -173,12 +172,11 @@ func TestAddIP_LargeOverflow(t *testing.T) {
 	}
 	shard0.IPs.MarkClean()
 
-	shard1, err := sm.createShard(ctx, 1)
-	if err != nil {
-		t.Fatalf("createShard(1): %v", err)
-	}
+	shard1 := sm.allocShard(1)
+	shard1.ID = "group-1"
+	shard1.State = ShardStateActive
 	sm.mu.Lock()
-	family = sm.familyStateLocked("v4")
+	family = sm.fam
 	family.Shards = append(family.Shards, shard1)
 	sm.mu.Unlock()
 	for i := 0; i < 2000; i++ {
@@ -197,7 +195,7 @@ func TestAddIP_LargeOverflow(t *testing.T) {
 	// shard2 => 2001
 	for i := 0; i < 10002; i++ {
 		ip := fmt.Sprintf("203.0.%d.%d", i/256, i%256)
-		if err := sm.AddIP(ctx, ip, "v4"); err != nil {
+		if err := sm.AddIP(ctx, ip); err != nil {
 			t.Fatalf("AddIP(%s): %v", ip, err)
 		}
 	}
@@ -229,10 +227,10 @@ func TestRemoveIP_UpdatesOwner(t *testing.T) {
 	sm, _ := newShardTestManager(t, "legacy", 3)
 
 	ip := "10.10.10.10"
-	if err := sm.AddIP(context.Background(), ip, "v4"); err != nil {
+	if err := sm.AddIP(context.Background(), ip); err != nil {
 		t.Fatalf("AddIP: %v", err)
 	}
-	sm.RemoveIP(ip, "v4")
+	sm.RemoveIP(ip)
 
 	family := familyState(t, sm)
 	if _, ok := family.ipOwner[ip]; ok {
@@ -252,7 +250,7 @@ func TestRemoveIP_Idempotent(t *testing.T) {
 		}
 	}()
 
-	sm.RemoveIP("203.0.113.99", "v4")
+	sm.RemoveIP("203.0.113.99")
 
 	family := familyState(t, sm)
 	if got := len(family.ipOwner); got != 0 {
@@ -264,7 +262,7 @@ func TestNoDuplicatesAcrossShards(t *testing.T) {
 	sm, _ := newShardTestManager(t, "legacy", 1)
 
 	ip := "1.2.3.4"
-	if err := sm.AddIP(context.Background(), ip, "v4"); err != nil {
+	if err := sm.AddIP(context.Background(), ip); err != nil {
 		t.Fatalf("AddIP: %v", err)
 	}
 	if _, _, err := sm.Add(context.Background(), ip); err != nil {
@@ -283,10 +281,10 @@ func TestNoDuplicatesAcrossShards(t *testing.T) {
 func TestSyncLoop_OnlyDirtyShards(t *testing.T) {
 	sm, ctrl := newShardTestManager(t, "zone", 1)
 
-	if err := sm.AddIP(context.Background(), "10.0.0.1", "v4"); err != nil {
+	if err := sm.AddIP(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("AddIP shard0: %v", err)
 	}
-	if err := sm.AddIP(context.Background(), "10.0.0.2", "v4"); err != nil {
+	if err := sm.AddIP(context.Background(), "10.0.0.2"); err != nil {
 		t.Fatalf("AddIP shard1: %v", err)
 	}
 
@@ -309,7 +307,7 @@ func TestSyncLoop_OnlyDirtyShards(t *testing.T) {
 func TestSyncLoop_RetryOnError(t *testing.T) {
 	sm, ctrl := newShardTestManager(t, "zone", 3)
 
-	if err := sm.AddIP(context.Background(), "10.20.30.40", "v4"); err != nil {
+	if err := sm.AddIP(context.Background(), "10.20.30.40"); err != nil {
 		t.Fatalf("AddIP: %v", err)
 	}
 
@@ -351,7 +349,7 @@ func TestEnsureShards_LoadsExisting(t *testing.T) {
 		},
 	})
 
-	sm := NewShardManager(testSite, false, 10000, namer, ctrl, store, zerolog.Nop(), 0, nil, false, "zone")
+	sm := NewShardManager(testSite, false, 10000, namer, ctrl, store, zerolog.Nop(), 0, false, "zone")
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
@@ -371,6 +369,51 @@ func TestEnsureShards_LoadsExisting(t *testing.T) {
 	}
 	if family.Shards[0].IPs.IsDirty() {
 		t.Fatal("expected baseline shard to be clean")
+	}
+}
+
+// Lowering the capacity below a loaded shard's size moves the excess members
+// into new shards on the next start.
+func TestEnsureShards_SplitsShardOverCapacity(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newShardTestStore(t)
+	items := make([]controller.TrafficMatchingListItem, 0, 7)
+	for i := 1; i <= 7; i++ {
+		items = append(items, controller.TrafficMatchingListItem{Value: fmt.Sprintf("198.51.100.%d", i)})
+	}
+	ctrl.SetTMLs(testSite, []controller.TrafficMatchingList{
+		{ID: "tml-0", Name: "crowdsec-block-v4-0", Type: "IPV4_ADDRESSES", Items: items},
+	})
+
+	sm := NewShardManager(testSite, false, 3, newShardTestNamer(t), ctrl, store, zerolog.Nop(), 0, false, "zone")
+	if err := sm.EnsureShards(context.Background()); err != nil {
+		t.Fatalf("EnsureShards: %v", err)
+	}
+
+	family := familyState(t, sm)
+	if got := len(family.Shards); got != 3 {
+		t.Fatalf("shards = %d, want 3", got)
+	}
+	total := 0
+	for _, s := range family.Shards {
+		if s.IPs.Len() > 3 {
+			t.Fatalf("shard %s holds %d members, over the limit of 3", s.Name, s.IPs.Len())
+		}
+		total += s.IPs.Len()
+		for _, ip := range s.IPs.Members() {
+			if owner := family.ipOwner[ip]; owner != s.Index {
+				t.Fatalf("%s owned by shard %d, stored in shard %d", ip, owner, s.Index)
+			}
+		}
+	}
+	if total != 7 || len(family.ipOwner) != 7 {
+		t.Fatalf("members = %d, owners = %d, want 7", total, len(family.ipOwner))
+	}
+	if !family.Shards[0].IPs.IsDirty() {
+		t.Fatal("the shrunk shard must be written on the next flush")
+	}
+	if family.Shards[1].State != ShardStatePending || family.Shards[2].State != ShardStatePending {
+		t.Fatal("overflow shards must be created on the next flush")
 	}
 }
 
@@ -397,7 +440,7 @@ func TestAddIP_ConcurrentShardBoundary(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			ip := fmt.Sprintf("10.2.0.%d", i)
-			errs[i] = sm.AddIP(ctx, ip, "v4")
+			errs[i] = sm.AddIP(ctx, ip)
 		}()
 	}
 	wg.Wait()
@@ -439,7 +482,7 @@ func TestSyncAllFamilies_ConcurrentWithAddIP(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < iterations; i++ {
 			ip := fmt.Sprintf("10.0.%d.%d", i/256, i%256)
-			_ = sm.AddIP(ctx, ip, "v4")
+			_ = sm.AddIP(ctx, ip)
 		}
 	}()
 

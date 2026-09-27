@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 )
 
 // --- Exported helper types --------------------------------------------------
@@ -115,13 +113,6 @@ type fakePolicy struct {
 	Description           string   `json:"description,omitempty"`
 }
 
-type fakeOrdering struct {
-	OrderedFirewallPolicyIDs struct {
-		BeforeSystemDefined []string `json:"beforeSystemDefined"`
-		AfterSystemDefined  []string `json:"afterSystemDefined"`
-	} `json:"orderedFirewallPolicyIds"`
-}
-
 // --- FakeUnifiServer --------------------------------------------------------
 
 // FakeUnifiServer is a stateful HTTP server emulating the UniFi Network API.
@@ -147,7 +138,6 @@ type FakeUnifiServer struct {
 	zones    map[string][]fakeZone
 	policies map[string][]fakePolicy
 	tmls     map[string][]fakeTML
-	ordering map[string]fakeOrdering // "siteID:srcZone:dstZone" -> ordering
 
 	// Request capture
 	requests []FakeRequest
@@ -173,7 +163,6 @@ func newFakeServer(apiKey, username, password string) *FakeUnifiServer {
 		zones:       make(map[string][]fakeZone),
 		policies:    make(map[string][]fakePolicy),
 		tmls:        make(map[string][]fakeTML),
-		ordering:    make(map[string]fakeOrdering),
 		faults:      make(map[string]int),
 		rateLimits:  make(map[string]int),
 	}
@@ -290,7 +279,7 @@ func (s *FakeUnifiServer) ClearFaults() {
 }
 
 // Reset clears all data state (sites, zones, groups, rules, TMLs, policies,
-// ordering, requests, faults, rateLimits, nextID) while preserving auth
+// requests, faults, rateLimits, nextID) while preserving auth
 // credentials (validAPIKey, username, password, sessions, csrfToken).
 // Essential for test isolation within a single server instance.
 func (s *FakeUnifiServer) Reset() {
@@ -302,22 +291,10 @@ func (s *FakeUnifiServer) Reset() {
 	s.rules = make(map[string][]fakeRule)
 	s.policies = make(map[string][]fakePolicy)
 	s.tmls = make(map[string][]fakeTML)
-	s.ordering = make(map[string]fakeOrdering)
 	s.requests = nil
 	s.faults = make(map[string]int)
 	s.rateLimits = make(map[string]int)
 	s.nextID = 0
-}
-
-// SetOrdering pre-populates the policy ordering for a site/zone pair.
-// Equivalent to sending a SetPolicyOrdering request without going through HTTP.
-func (s *FakeUnifiServer) SetOrdering(siteID, srcZoneID, dstZoneID string, ordering controller.PolicyOrdering) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	fo := fakeOrdering{}
-	fo.OrderedFirewallPolicyIDs.BeforeSystemDefined = ordering.BeforeSystemDefined
-	fo.OrderedFirewallPolicyIDs.AfterSystemDefined = ordering.AfterSystemDefined
-	s.ordering[siteID+":"+srcZoneID+":"+dstZoneID] = fo
 }
 
 // LastCSRFToken returns the most recently issued CSRF token.
@@ -429,9 +406,12 @@ func (s *FakeUnifiServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	path := r.URL.Path
 	switch {
+	case path == "/" && r.Method == http.MethodGet:
+		w.WriteHeader(http.StatusOK) // a UniFi OS console serves its UI at the root
+		return
 	case path == "/api/auth/login" && r.Method == http.MethodPost:
 		s.handleLogin(w, r)
-	case path == "/api/self":
+	case path == "/proxy/network/api/self":
 		if !s.checkAuth(w, r) {
 			return
 		}
@@ -701,8 +681,6 @@ func (s *FakeUnifiServer) routeV1(w http.ResponseWriter, r *http.Request, body [
 		case "policies":
 			if len(parts) == 4 {
 				s.handlePolicies(w, r, body, siteID, "")
-			} else if len(parts) == 5 && parts[4] == "ordering" {
-				s.handleOrdering(w, r, body, siteID)
 			} else if len(parts) == 5 {
 				s.handlePolicies(w, r, body, siteID, parts[4])
 			} else {
@@ -858,39 +836,6 @@ func (s *FakeUnifiServer) handlePolicies(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{})
-
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *FakeUnifiServer) handleOrdering(w http.ResponseWriter, r *http.Request, body []byte, siteID string) {
-	srcZone := r.URL.Query().Get("sourceFirewallZoneId")
-	dstZone := r.URL.Query().Get("destinationFirewallZoneId")
-	key := siteID + ":" + srcZone + ":" + dstZone
-
-	switch r.Method {
-	case http.MethodGet:
-		s.mu.Lock()
-		ord := s.ordering[key]
-		s.mu.Unlock()
-		if ord.OrderedFirewallPolicyIDs.BeforeSystemDefined == nil {
-			ord.OrderedFirewallPolicyIDs.BeforeSystemDefined = []string{}
-		}
-		if ord.OrderedFirewallPolicyIDs.AfterSystemDefined == nil {
-			ord.OrderedFirewallPolicyIDs.AfterSystemDefined = []string{}
-		}
-		writeJSON(w, http.StatusOK, ord)
-
-	case http.MethodPut:
-		var ord fakeOrdering
-		if !unmarshalOrErr(w, body, &ord) {
-			return
-		}
-		s.mu.Lock()
-		s.ordering[key] = ord
-		s.mu.Unlock()
-		writeJSON(w, http.StatusOK, ord)
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

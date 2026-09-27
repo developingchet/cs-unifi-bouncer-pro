@@ -2,6 +2,7 @@ package whitelist
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
@@ -104,6 +105,69 @@ func TestNewManager(t *testing.T) {
 	}
 	if mgr.provider != provider {
 		t.Error("expected manager provider to be the mock provider")
+	}
+}
+
+func TestSyncSite_PortFilterFailureDoesNotCreateBroadAllow(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	ctrl.SetTMLs("test-site", []controller.TrafficMatchingList{
+		{ID: "v4", Name: TMLNameV4, Type: "IPV4_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Type: "SUBNET", Value: "1.1.1.0/24"}}},
+		{ID: "v6", Name: TMLNameV6, Type: "IPV6_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Type: "SUBNET", Value: "2001:db8::/32"}}},
+	})
+	ctrl.SetError("CreateTrafficMatchingList", errors.New("port TML rejected"))
+	mgr := NewManager(ctrl, []string{"test-site"}, nil, zerolog.Nop())
+	pairs := []ZonePairConfig{{SrcName: "External", DstName: "Dmz", SrcPorts: []int{443}}}
+	if err := mgr.syncSite(context.Background(), "test-site", []string{"1.1.1.0/24"}, []string{"2001:db8::/32"}, pairs); err == nil {
+		t.Fatal("expected port TML failure")
+	}
+	if got := ctrl.Calls("CreateZonePolicy"); got != 0 {
+		t.Fatalf("created %d broad ALLOW policies after filter failed", got)
+	}
+}
+
+func TestSyncSite_ResolvesZoneIDsPerSite(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	for _, site := range []string{"one", "two"} {
+		ctrl.SetZones(site, []controller.Zone{{ID: site + "-external", Name: "External"}, {ID: site + "-dmz", Name: "Dmz"}})
+	}
+	mgr := NewManager(ctrl, []string{"one", "two"}, nil, zerolog.Nop())
+	pairs := []ZonePairConfig{{SrcName: "External", DstName: "Dmz"}}
+	for _, site := range []string{"one", "two"} {
+		if err := mgr.syncSite(context.Background(), site, []string{"1.1.1.0/24"}, []string{"2001:db8::/32"}, pairs); err != nil {
+			t.Fatalf("site %s: %v", site, err)
+		}
+		policies, err := ctrl.ListZonePolicies(context.Background(), site)
+		if err != nil || len(policies) != 2 {
+			t.Fatalf("site %s policies = %+v, %v", site, policies, err)
+		}
+		for _, policy := range policies {
+			if policy.SrcZone != site+"-external" || policy.DstZone != site+"-dmz" {
+				t.Errorf("site %s policy has wrong zone IDs: %+v", site, policy)
+			}
+		}
+	}
+}
+
+func TestSyncSite_DifferentSourcesHaveDistinctPolicyNames(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	mgr := NewManager(ctrl, []string{"test-site"}, nil, zerolog.Nop())
+	pairs := []ZonePairConfig{
+		{SrcName: "External", DstName: "Dmz"},
+		{SrcName: "VPN", DstName: "Dmz"},
+	}
+	if err := mgr.syncSite(context.Background(), "test-site", []string{"1.1.1.0/24"}, []string{"2001:db8::/32"}, pairs); err != nil {
+		t.Fatal(err)
+	}
+	policies, err := ctrl.ListZonePolicies(context.Background(), "test-site")
+	if err != nil || len(policies) != 4 {
+		t.Fatalf("policies = %+v, %v", policies, err)
+	}
+	names := make(map[string]bool)
+	for _, policy := range policies {
+		if names[policy.Name] {
+			t.Errorf("duplicate Cloudflare ALLOW policy name %q", policy.Name)
+		}
+		names[policy.Name] = true
 	}
 }
 
@@ -296,6 +360,8 @@ func TestEnsureAllowPolicy_NoOpWhenCurrent(t *testing.T) {
 		Name:                   "test-allow-policy",
 		Enabled:                true,
 		Action:                 "ALLOW",
+		AllowReturnTraffic:     true,
+		Description:            whitelistDescription,
 		SrcZone:                "zone-external",
 		DstZone:                "zone-internal",
 		IPVersion:              "IPV4",
@@ -312,6 +378,26 @@ func TestEnsureAllowPolicy_NoOpWhenCurrent(t *testing.T) {
 	// Verify no UpdateZonePolicy was called
 	if got := ctrl.Calls("UpdateZonePolicy"); got != 0 {
 		t.Errorf("UpdateZonePolicy calls: got %d, want 0 (no update)", got)
+	}
+}
+
+func TestEnsureAllowPolicyRepairsDisabledPolicy(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	mgr := NewManager(ctrl, []string{"test-site"}, nil, zerolog.Nop())
+	pair := ZonePairConfig{SrcZoneID: "source", DstZoneID: "destination"}
+	existing := controller.ZonePolicy{
+		ID: "policy-1", Name: "test-allow-policy", Enabled: false,
+		Action: "ALLOW", AllowReturnTraffic: true, Description: whitelistDescription,
+		SrcZone: "source", DstZone: "destination", IPVersion: "IPV4",
+		TrafficMatchingListIDs: []string{"tml-1"},
+	}
+	ctrl.SetPolicies("test-site", []controller.ZonePolicy{existing})
+	if _, err := mgr.ensureAllowPolicy(context.Background(), "test-site", pair, "tml-1", "", "", "", "IPV4", existing.Name, []controller.ZonePolicy{existing}); err != nil {
+		t.Fatal(err)
+	}
+	policies, err := ctrl.ListZonePolicies(context.Background(), "test-site")
+	if err != nil || len(policies) != 1 || !policies[0].Enabled {
+		t.Fatalf("disabled allow policy was not repaired: %+v, %v", policies, err)
 	}
 }
 
@@ -466,6 +552,8 @@ func TestEnsureAllowPolicy_WithPorts_NoOpWhenCurrent(t *testing.T) {
 		Name:                   "test-allow-policy",
 		Enabled:                true,
 		Action:                 "ALLOW",
+		AllowReturnTraffic:     true,
+		Description:            whitelistDescription,
 		SrcZone:                "zone-external",
 		DstZone:                "zone-internal",
 		IPVersion:              "IPV4",
@@ -638,13 +726,13 @@ func TestSyncSite_ReturnMirror_KeptForManagedPolicy(t *testing.T) {
 	}
 	activeReturn := controller.ZonePolicy{
 		ID: "active-return-id", Name: "crowdsec-whitelist-cloudflare-External-Dmz-v4 (Return)",
-		Action: "ALLOW", Enabled: true, Predefined: true,
+		Action: "ALLOW", Enabled: true,
 		SrcZone: "zone-dmz", DstZone: "zone-external", IPVersion: "IPV4",
 	}
 	// Orphaned Return mirror for a policy that is no longer in config.
 	orphanReturn := controller.ZonePolicy{
 		ID: "orphan-return-id", Name: "crowdsec-whitelist-cloudflare-External-Old-v4 (Return)",
-		Action: "ALLOW", Enabled: true, Predefined: true,
+		Action: "ALLOW", Enabled: true,
 		SrcZone: "zone-old", DstZone: "zone-external", IPVersion: "IPV4",
 	}
 	ctrl.SetPolicies("test-site", []controller.ZonePolicy{active, activeReturn, orphanReturn})
@@ -941,73 +1029,40 @@ func TestDrain_DeletesAllWhitelistObjects(t *testing.T) {
 	}
 }
 
-// TestReorderWhitelistFirst_FiltersNullIDs verifies that empty-string IDs
-// (decoded from JSON null entries returned by the UniFi ordering GET for
-// newly auto-created (Return) mirror policies) are stripped before the PUT,
-// preventing the "beforeSystemDefined[N] must not be null" 400 error.
-func TestReorderWhitelistFirst_FiltersNullIDs(t *testing.T) {
-	ctrl := testutil.NewMockController()
-	log := zerolog.Nop()
-	provider := NewCloudflareProvider("", "")
-	mgr := NewManager(ctrl, []string{"test-site"}, provider, log)
-	ctx := context.Background()
-
-	pair := ZonePairConfig{
-		SrcName:   "External",
-		DstName:   "Dmz",
-		SrcZoneID: "zone-external",
-		DstZoneID: "zone-dmz",
+func TestCheckWhitelistOrder(t *testing.T) {
+	idx := func(i int) *int { return &i }
+	tests := []struct {
+		name       string
+		allowIndex *int
+		blockIndex *int
+		blockIPVer string
+		allowID    string
+		wantErr    bool
+	}{
+		{name: "block precedes allow", allowIndex: idx(200), blockIndex: idx(100), blockIPVer: "IPV4", wantErr: true},
+		{name: "allow precedes block", allowIndex: idx(200), blockIndex: idx(300), blockIPVer: "IPV4"},
+		{name: "block for both families precedes allow", allowIndex: idx(200), blockIndex: idx(100), blockIPVer: "BOTH", wantErr: true},
+		{name: "block for the other family ignored", allowIndex: idx(200), blockIndex: idx(100), blockIPVer: "IPV6"},
+		{name: "order not reported: warn, not fail", blockIPVer: "IPV4"},
+		{name: "allow policy missing", allowIndex: idx(200), blockIndex: idx(300), blockIPVer: "IPV4", allowID: "gone", wantErr: true},
 	}
-
-	// Simulate what UniFi returns from GET ordering right after two ALLOW
-	// policies are created: the (Return) mirror for the v6 policy hasn't been
-	// assigned a UUID yet, so the API returns null there — decoded as "" in Go.
-	ctrl.SetOrdering("test-site", "zone-external", "zone-dmz", controller.PolicyOrdering{
-		BeforeSystemDefined: []string{"v4-policy-id", "v4-return-mirror-id", "v6-policy-id", ""},
-		AfterSystemDefined:  nil,
-	})
-
-	// reorderWhitelistFirst is called with the two freshly created policy IDs.
-	mgr.reorderWhitelistFirst(ctx, "test-site", pair, []string{"v4-policy-id", "v6-policy-id"})
-
-	// The PUT must have been called (ordering changed).
-	if got := ctrl.Calls("SetPolicyOrdering"); got != 1 {
-		t.Fatalf("SetPolicyOrdering calls: got %d, want 1", got)
-	}
-
-	sent := ctrl.GetLastOrdering("test-site", "zone-external", "zone-dmz")
-
-	// No empty strings allowed in beforeSystemDefined.
-	for i, id := range sent.BeforeSystemDefined {
-		if id == "" {
-			t.Errorf("beforeSystemDefined[%d] is empty (null) — must be filtered out before PUT", i)
-		}
-	}
-
-	// Our whitelist policies must be first.
-	if len(sent.BeforeSystemDefined) < 2 {
-		t.Fatalf("beforeSystemDefined has %d entries, want >= 2", len(sent.BeforeSystemDefined))
-	}
-	if sent.BeforeSystemDefined[0] != "v4-policy-id" {
-		t.Errorf("beforeSystemDefined[0] = %q, want v4-policy-id", sent.BeforeSystemDefined[0])
-	}
-	if sent.BeforeSystemDefined[1] != "v6-policy-id" {
-		t.Errorf("beforeSystemDefined[1] = %q, want v6-policy-id", sent.BeforeSystemDefined[1])
-	}
-
-	// The legitimate Return mirror must still be present.
-	found := false
-	for _, id := range sent.BeforeSystemDefined {
-		if id == "v4-return-mirror-id" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("v4-return-mirror-id was incorrectly dropped from ordering")
-	}
-
-	// afterSystemDefined must be a non-nil empty slice, never null.
-	if sent.AfterSystemDefined == nil {
-		t.Error("afterSystemDefined is nil — must be []string{} to avoid sending null in PUT body")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := testutil.NewMockController()
+			mgr := NewManager(ctrl, []string{"test-site"}, nil, zerolog.Nop())
+			pair := ZonePairConfig{SrcZoneID: "zone-external", DstZoneID: "zone-dmz"}
+			ctrl.SetPolicies("test-site", []controller.ZonePolicy{
+				{ID: "allow", Name: "cloudflare-allow", Enabled: true, Action: "ALLOW", IPVersion: "IPV4", SrcZone: pair.SrcZoneID, DstZone: pair.DstZoneID, Index: tt.allowIndex},
+				{ID: "block", Name: "crowdsec-block", Enabled: true, Action: "BLOCK", IPVersion: tt.blockIPVer, SrcZone: pair.SrcZoneID, DstZone: pair.DstZoneID, Index: tt.blockIndex},
+			})
+			allowID := "allow"
+			if tt.allowID != "" {
+				allowID = tt.allowID
+			}
+			err := mgr.checkWhitelistOrder(context.Background(), "test-site", pair, []string{allowID})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("checkWhitelistOrder err = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }

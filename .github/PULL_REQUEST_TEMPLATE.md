@@ -22,7 +22,6 @@
 
 - [ ] Commit messages are clear and scoped
 - [ ] No secrets, tokens, or credentials in code or commit messages
-- [ ] No `Co-authored-by` AI attribution lines in commit messages
 - [ ] CHANGELOG or release notes updated if applicable
 
 ## Related issues

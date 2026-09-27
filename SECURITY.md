@@ -47,7 +47,7 @@ The Docker image is hardened by default:
 
 ### Network Security
 
-- Connections to the UniFi controller always use TLS (`UNIFI_URL` must be an `https://` address); TLS 1.2 minimum is enforced by the Go TLS stack
+- UniFi controller connections use HTTPS by default. Plaintext HTTP requires `UNIFI_REQUIRE_HTTPS=false`; TLS 1.2 minimum applies to HTTPS connections.
 - Self-signed certificate support via `UNIFI_CA_CERT` (avoid disabling verification in production)
 - HTTP timeouts configured via `UNIFI_HTTP_TIMEOUT` (default 120 s) and `SESSION_REAUTH_TIMEOUT`
 
@@ -55,11 +55,11 @@ The Docker image is hardened by default:
 
 `CROWDSEC_LAPI_URL` accepts both `http://` and `https://` schemes.
 
-- **`https://` is strongly recommended** for any deployment where the bouncer and CrowdSec LAPI are not colocated on the same host. With `https://`, the LAPI key is protected in transit and TLS 1.2 minimum is enforced by the Go TLS stack.
+- **`https://` is the default**. With `https://`, the LAPI key is protected in transit and TLS 1.2 minimum is enforced. Set `CROWDSEC_LAPI_CA_CERT` for a private CA.
 - **`http://` is only safe** when the connection is confined to a loopback address (`127.0.0.1`, `::1`) or a Unix socket — i.e. the LAPI process is on the same host and the connection never crosses a network interface. On a shared container bridge network, `http://` sends the LAPI key in plaintext and exposes it to any process that can observe the network traffic.
-- The bouncer emits a **startup warning** when `CROWDSEC_LAPI_URL` uses `http://` with a non-loopback host.
+- A non-loopback `http://` URL requires `CROWDSEC_LAPI_ALLOW_HTTP=true` and emits a startup warning.
 
-The default value (`http://crowdsec:8080`) is intentionally permissive for local Docker Compose setups where CrowdSec and the bouncer share a private, single-host bridge network. For any other deployment topology — remote LAPI, Kubernetes multi-node, or bare-metal — set `CROWDSEC_LAPI_URL=https://…` and ensure a valid certificate is in place.
+The `.env.example` file opts into HTTP for a same-host Docker network. Remote LAPI and multi-node deployments should use HTTPS with certificate verification.
 
 ## Connectivity Timeout Root Cause (resolved)
 
@@ -204,7 +204,7 @@ To verify a release image:
 ```bash
 # Verify Cosign signature
 cosign verify developingchet/cs-unifi-bouncer-pro:latest \
-  --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml" \
+  --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 
 # Download and verify SBOM

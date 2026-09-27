@@ -10,10 +10,12 @@ import (
 
 	"github.com/crowdsecurity/crowdsec/pkg/models"
 	csbouncer "github.com/crowdsecurity/go-cs-bouncer"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/lapihttp"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/rs/zerolog"
@@ -34,13 +36,29 @@ type Bouncer struct {
 	filterCfg decision.FilterConfig
 	log       zerolog.Logger
 	streamBnc *csbouncer.StreamBouncer
-	recorder  MetricsRecorder
-	limiter   *rate.Limiter // nil when rate limiting is disabled
+	lapiHTTP  *http.Client
+	// lapiResyncHTTP has a longer timeout for the full decision list.
+	lapiResyncHTTP *http.Client
+	// resyncRejected holds the sources of decisions the filter rejected on
+	// the last resync. Only the resync goroutine touches it.
+	resyncRejected map[string]struct{}
+	recorder       MetricsRecorder
+	limiter        *rate.Limiter // nil when rate limiting is disabled
+	// onStartupSynced runs once, after the first decision batch is applied.
+	onStartupSynced func()
+}
+
+// OnStartupSynced registers fn to run once, after the first decision batch
+// from the LAPI has been applied. Until then the ban database may be missing
+// bans (a fresh or lost volume), so anything that removes IPs the database
+// does not know about must wait for it. Call before Run.
+func (b *Bouncer) OnStartupSynced(fn func()) {
+	b.onStartupSynced = fn
 }
 
 // New constructs a fully wired Bouncer.
 func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
-	fwMgr firewall.Manager, recorder MetricsRecorder, log zerolog.Logger) (*Bouncer, error) {
+	fwMgr firewall.Manager, claims *banstate.Manager, recorder MetricsRecorder, log zerolog.Logger) (*Bouncer, error) {
 
 	whitelist, err := decision.ParseWhitelist(cfg.BlockWhitelist)
 	if err != nil {
@@ -54,7 +72,15 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 	filterCfg.MinBanDuration = cfg.BlockMinDuration
 	filterCfg.ScenarioDurationMap = cfg.BlockScenarioDurationMap
 
-	handler := makeJobHandler(ctrl, store, fwMgr, cfg, recorder, log)
+	handler := makeJobHandler(store, claims, cfg, recorder, log)
+	lapiClient, err := lapihttp.NewClient(cfg.CrowdSecLAPIVerifyTLS, cfg.CrowdSecLAPICACert, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("configure LAPI HTTP client: %w", err)
+	}
+	resyncClient, err := lapihttp.NewClient(cfg.CrowdSecLAPIVerifyTLS, cfg.CrowdSecLAPICACert, resyncHTTPTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("configure LAPI resync client: %w", err)
+	}
 
 	// StreamBouncer.TickerInterval is a string like "30s"
 	tickerStr := cfg.CrowdSecPollInterval.String()
@@ -62,9 +88,10 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 	streamBnc := &csbouncer.StreamBouncer{
 		APIKey:              cfg.CrowdSecLAPIKey,
 		APIUrl:              cfg.CrowdSecLAPIURL,
+		CAPath:              cfg.CrowdSecLAPICACert,
 		TickerInterval:      tickerStr,
 		InsecureSkipVerify:  &skipVerify,
-		UserAgent:           "crowdsec-unifi-bouncer/v" + BinaryVersion,
+		UserAgent:           lapihttp.UserAgent(BinaryVersion),
 		RetryInitialConnect: true,
 	}
 
@@ -77,7 +104,10 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 		filterCfg: filterCfg,
 		log:       log,
 		streamBnc: streamBnc,
+		lapiHTTP:  lapiClient,
 		recorder:  recorder,
+
+		lapiResyncHTTP: resyncClient,
 	}
 	if cfg.DecisionRateLimit > 0 {
 		b.limiter = rate.NewLimiter(rate.Limit(cfg.DecisionRateLimit), cfg.DecisionBurstSize)
@@ -103,6 +133,15 @@ func (b *Bouncer) Run(ctx context.Context) error {
 	if b.cfg.SyncInterval > 0 {
 		g.Go(func() error {
 			b.runPeriodicSync(gctx)
+			return nil
+		})
+	}
+
+	// Periodic full decision re-read: recovers bans the stream skipped.
+	// Dry-run records no claims, so every decision would look missing.
+	if b.cfg.CrowdSecResyncInterval > 0 && !b.cfg.DryRun {
+		g.Go(func() error {
+			b.runPeriodicResync(gctx)
 			return nil
 		})
 	}
@@ -146,107 +185,137 @@ func (b *Bouncer) runPeriodicSync(ctx context.Context) {
 // After every decision block it calls SyncDirty to flush in-memory dirty shards to
 // the UniFi API. The first flush is logged at Info as the startup sync boundary.
 func (b *Bouncer) processStream(ctx context.Context) error {
-	go b.streamBnc.Run(ctx)
+	runErr := make(chan error, 1)
+	go func() { runErr <- b.streamBnc.Run(ctx) }()
+	return b.consumeStream(ctx, b.streamBnc.Stream, runErr)
+}
 
+// consumeStream applies decision blocks until ctx ends or the stream fails.
+func (b *Bouncer) consumeStream(ctx context.Context, stream <-chan *models.DecisionsStreamResponse, runErr <-chan error) error {
 	startupSynced := false
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case decisions, ok := <-b.streamBnc.Stream:
-			if !ok {
-				return fmt.Errorf("CrowdSec stream closed")
+		case err := <-runErr:
+			if errors.Is(err, context.Canceled) {
+				return nil
 			}
-			b.handleDecisionBlock(ctx, decisions)
+			return streamError(err)
+		case decisions, ok := <-stream:
+			if !ok {
+				// Run closes the stream immediately before returning its error.
+				return streamError(<-runErr)
+			}
+			b.handleDecisionBlock(ctx, decisions, "stream")
 			if err := b.fwMgr.SyncDirty(ctx, b.cfg.UnifiSites); err != nil {
 				b.log.Warn().Err(err).Msg("SyncDirty after decision block failed")
 			}
 			if !startupSynced {
 				startupSynced = true
 				b.log.Info().Msg("startup stream batch synced to UniFi")
+				if b.onStartupSynced != nil {
+					b.onStartupSynced()
+				}
 			}
 		}
 	}
 }
 
-func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.DecisionsStreamResponse) {
-	source := "stream"
+func streamError(err error) error {
+	if err == nil {
+		return fmt.Errorf("CrowdSec stream closed")
+	}
+	return fmt.Errorf("CrowdSec stream closed: %w", err)
+}
 
+// handleDecisionBlock applies one batch of decisions. source labels the
+// decisions_processed metric: "stream" for the LAPI stream, "resync" for the
+// periodic full pull.
+func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.DecisionsStreamResponse, source string) {
+	if decisions == nil {
+		b.log.Warn().Msg("ignoring empty CrowdSec decision block")
+		return
+	}
 	for _, d := range decisions.New {
-		result := decision.Filter(d, b.filterCfg, b.log)
-		if !result.Passed {
-			continue
-		}
-		metrics.DecisionsProcessed.WithLabelValues("ban", source).Inc()
-
-		// Apply rate limiter if configured.
-		if b.limiter != nil {
-			if err := b.limiter.Wait(ctx); err != nil {
-				return // ctx cancelled
-			}
-		}
-
-		origin := ""
-		if d.Origin != nil {
-			origin = *d.Origin
-		}
-		remType := ""
-		if d.Type != nil {
-			remType = *d.Type
-		}
-		scenario := ""
-		if d.Scenario != nil {
-			scenario = *d.Scenario
-		}
-
-		metrics.DecisionsInFlight.Inc()
-		err := b.handler(ctx, SyncJob{
-			Action:          "ban",
-			IP:              result.Value,
-			IPv6:            result.IPv6,
-			ExpiresAt:       expiresAt(result.Duration),
-			Origin:          origin,
-			RemediationType: remType,
-			Scenario:        scenario,
-			ReceivedAt:      time.Now(),
-		})
-		metrics.DecisionsInFlight.Dec()
-		if err != nil {
-			b.log.Error().Err(err).Str("ip", result.Value).Msg("failed to apply ban")
+		if !b.applyDecision(ctx, d, "ban", source) {
+			return
 		}
 	}
-
 	for _, d := range decisions.Deleted {
-		result := decision.Filter(d, b.filterCfg, b.log)
-		if !result.Passed {
-			continue
-		}
-		metrics.DecisionsProcessed.WithLabelValues("unban", source).Inc()
-
-		// Apply rate limiter if configured.
-		if b.limiter != nil {
-			if err := b.limiter.Wait(ctx); err != nil {
-				return // ctx cancelled
-			}
-		}
-
-		scenario := ""
-		if d.Scenario != nil {
-			scenario = *d.Scenario
-		}
-
-		metrics.DecisionsInFlight.Inc()
-		err := b.handler(ctx, SyncJob{
-			Action:   "delete",
-			IP:       result.Value,
-			IPv6:     result.IPv6,
-			Scenario: scenario,
-		})
-		metrics.DecisionsInFlight.Dec()
-		if err != nil {
-			b.log.Error().Err(err).Str("ip", result.Value).Msg("failed to apply unban")
+		if !b.applyDecision(ctx, d, "delete", source) {
+			return
 		}
 	}
+}
+
+// applyDecision filters d and hands it to the job handler. It returns false
+// only when ctx was cancelled while waiting on the rate limiter.
+func (b *Bouncer) applyDecision(ctx context.Context, d *models.Decision, action, source string) bool {
+	filter := decision.Filter
+	if action == "delete" {
+		filter = decision.FilterDeleted
+	}
+	result := filter(d, b.filterCfg, b.log)
+	if !result.Passed {
+		return true
+	}
+	decisionID := decisionSource(d)
+	if decisionID == "" {
+		b.log.Warn().Str("ip", result.Value).Str("action", action).Msg("skipping CrowdSec decision without ID or UUID")
+		return true
+	}
+	metricAction := "ban"
+	if action == "delete" {
+		metricAction = "unban"
+	}
+	metrics.DecisionsProcessed.WithLabelValues(metricAction, source).Inc()
+
+	if b.limiter != nil {
+		if err := b.limiter.Wait(ctx); err != nil {
+			return false
+		}
+	}
+
+	job := SyncJob{
+		Action:   action,
+		Source:   decisionID,
+		IP:       result.Value,
+		IPv6:     result.IPv6,
+		Scenario: deref(d.Scenario),
+	}
+	if action == "ban" {
+		job.ExpiresAt = expiresAt(result.Duration)
+		job.DurationOverride = result.DurationOverride
+		job.Origin = deref(d.Origin)
+		job.RemediationType = deref(d.Type)
+		job.ReceivedAt = time.Now()
+	}
+
+	metrics.DecisionsInFlight.Inc()
+	err := b.handler(ctx, job)
+	metrics.DecisionsInFlight.Dec()
+	if err != nil {
+		b.log.Error().Err(err).Str("ip", result.Value).Str("action", action).Msg("failed to apply decision")
+	}
+	return true
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+func decisionSource(d *models.Decision) string {
+	if d.ID != 0 {
+		return fmt.Sprintf("crowdsec:id:%d", d.ID)
+	}
+	if d.UUID != "" {
+		return "crowdsec:uuid:" + d.UUID
+	}
+	return ""
 }
 
 // serveMetrics runs the Prometheus HTTP server.
@@ -254,8 +323,10 @@ func (b *Bouncer) serveMetrics(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metricsHandler())
 	srv := &http.Server{
-		Addr:    b.cfg.MetricsAddr,
-		Handler: mux,
+		Addr:              b.cfg.MetricsAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {
@@ -277,32 +348,7 @@ func (b *Bouncer) serveHealth(ctx context.Context) error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		if err := b.ctrl.Ping(r.Context()); err != nil {
-			b.log.Warn().Err(err).Msg("readyz: controller ping failed")
-			http.Error(w, "not ready", http.StatusServiceUnavailable)
-			return
-		}
-		if b.cfg.HealthCheckLAPI {
-			lapiURL := strings.TrimRight(b.cfg.CrowdSecLAPIURL, "/") + "/v1/ping"
-			lapiReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, lapiURL, nil)
-			if err == nil {
-				lapiReq.Header.Set("X-Api-Key", b.cfg.CrowdSecLAPIKey)
-				lapiClient := &http.Client{Timeout: 5 * time.Second}
-				lapiResp, lapiErr := lapiClient.Do(lapiReq)
-				if lapiErr != nil || lapiResp.StatusCode >= 500 {
-					if lapiResp != nil {
-						lapiResp.Body.Close()
-					}
-					http.Error(w, "lapi: unreachable", http.StatusServiceUnavailable)
-					return
-				}
-				lapiResp.Body.Close()
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ready"))
-	})
+	mux.HandleFunc("/readyz", b.ready)
 
 	srv := &http.Server{
 		Addr:              b.cfg.HealthAddr,
@@ -322,6 +368,35 @@ func (b *Bouncer) serveHealth(ctx context.Context) error {
 		return fmt.Errorf("health server: %w", err)
 	}
 	return nil
+}
+
+func (b *Bouncer) ready(w http.ResponseWriter, r *http.Request) {
+	if err := b.ctrl.Ping(r.Context()); err != nil {
+		b.log.Warn().Err(err).Msg("readyz: controller ping failed")
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return
+	}
+	if b.cfg.HealthCheckLAPI {
+		lapiURL := strings.TrimRight(b.cfg.CrowdSecLAPIURL, "/") + "/v1/decisions?limit=1"
+		lapiReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, lapiURL, nil)
+		if err != nil {
+			http.Error(w, "lapi: invalid URL", http.StatusServiceUnavailable)
+			return
+		}
+		lapiReq.Header.Set("X-Api-Key", b.cfg.CrowdSecLAPIKey)
+		lapiResp, err := b.lapiHTTP.Do(lapiReq)
+		if err != nil {
+			http.Error(w, "lapi: unreachable", http.StatusServiceUnavailable)
+			return
+		}
+		defer lapiResp.Body.Close()
+		if lapiResp.StatusCode != http.StatusOK {
+			http.Error(w, "lapi: unexpected status", http.StatusServiceUnavailable)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ready"))
 }
 
 func expiresAt(dur time.Duration) time.Time {

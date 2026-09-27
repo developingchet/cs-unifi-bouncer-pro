@@ -39,7 +39,7 @@ type apiRule struct {
 
 // --- Integration v1 wire types ----------------------------------------------
 
-// apiSiteV1 is returned by GET /proxy/network/integration/v1/sites.
+// apiSiteV1 is returned by GET {network}/integration/v1/sites.
 type apiSiteV1 struct {
 	ID                string `json:"id"`
 	InternalReference string `json:"internalReference"`
@@ -58,30 +58,31 @@ type apiV1Page struct {
 // apiFirewallZoneV1 is the zone wire type for the integration v1 API.
 // The id field is a UUID (not a MongoDB ObjectID).
 type apiFirewallZoneV1 struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Metadata struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	NetworkIDs []string `json:"networkIds"`
+	Metadata   struct {
 		Origin string `json:"origin"`
 	} `json:"metadata"`
 }
 
 // apiTMLItemV1 is one entry in an integration v1 TML.
 type apiTMLItemV1 struct {
-	Type  string      `json:"type"`   // "IP_ADDRESS", "SUBNET", "PORT_NUMBER"
-	Value interface{} `json:"value"`  // string for IPs/subnets, int for ports
+	Type  string      `json:"type"`  // "IP_ADDRESS", "SUBNET", "PORT_NUMBER"
+	Value interface{} `json:"value"` // string for IPs/subnets, int for ports
 }
 
 // apiTMLV1 is the integration v1 Traffic Matching List wire type.
 type apiTMLV1 struct {
 	ID    string         `json:"id,omitempty"`
-	Type  string         `json:"type"`  // "IPV4_ADDRESSES", "IPV6_ADDRESSES", "PORTS"
+	Type  string         `json:"type"` // "IPV4_ADDRESSES", "IPV6_ADDRESSES", "PORTS"
 	Name  string         `json:"name"`
 	Items []apiTMLItemV1 `json:"items"`
 }
 
 // apiTMLV1Update is the wire type for TML PUT requests (excludes id field per UniFi API).
 type apiTMLV1Update struct {
-	Type  string         `json:"type"`  // "IPV4_ADDRESSES", "IPV6_ADDRESSES", "PORTS"
+	Type  string         `json:"type"` // "IPV4_ADDRESSES", "IPV6_ADDRESSES", "PORTS"
 	Name  string         `json:"name"`
 	Items []apiTMLItemV1 `json:"items"`
 }
@@ -93,7 +94,7 @@ type apiV1PolicyAction struct {
 }
 
 type apiV1IPAddressFilter struct {
-	Type                  string `json:"type"`                            // "TRAFFIC_MATCHING_LIST"
+	Type                  string `json:"type"` // "TRAFFIC_MATCHING_LIST"
 	MatchOpposite         bool   `json:"matchOpposite"`
 	TrafficMatchingListID string `json:"trafficMatchingListId,omitempty"`
 }
@@ -102,7 +103,7 @@ type apiV1IPAddressFilter struct {
 // It is always nested inside trafficFilter — the UniFi POST endpoint rejects
 // portFilter at the top level of source or destination.
 type apiV1PortFilter struct {
-	Type                  string `json:"type"`                            // "TRAFFIC_MATCHING_LIST"
+	Type                  string `json:"type"` // "TRAFFIC_MATCHING_LIST"
 	MatchOpposite         bool   `json:"matchOpposite"`
 	TrafficMatchingListID string `json:"trafficMatchingListId,omitempty"`
 }
@@ -132,7 +133,7 @@ type apiV1Policy struct {
 	Enabled               bool              `json:"enabled"`
 	Name                  string            `json:"name"`
 	Description           string            `json:"description,omitempty"`
-	Index                 int               `json:"index,omitempty"`
+	Index                 *int              `json:"index,omitempty"`
 	Action                apiV1PolicyAction `json:"action"`
 	Source                apiV1PolicySrc    `json:"source"`
 	Destination           apiV1PolicyDst    `json:"destination"`
@@ -172,16 +173,6 @@ type apiV1PolicyUpdate struct {
 	LoggingEnabled        bool                 `json:"loggingEnabled"`
 }
 
-// apiOrderingBody is the request/response body for the policy ordering endpoints.
-type apiOrderingBody struct {
-	OrderedFirewallPolicyIDs apiOrderedPolicyIDs `json:"orderedFirewallPolicyIds"`
-}
-
-type apiOrderedPolicyIDs struct {
-	BeforeSystemDefined []string `json:"beforeSystemDefined"`
-	AfterSystemDefined  []string `json:"afterSystemDefined"`
-}
-
 // --- Generic HTTP helpers ---------------------------------------------------
 
 func doGET(ctx context.Context, c *unifiClient, url, endpoint string) ([]json.RawMessage, error) {
@@ -199,6 +190,9 @@ func doGET(ctx context.Context, c *unifiClient, url, endpoint string) ([]json.Ra
 		var body apiResponse
 		if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodyBytes)).Decode(&body); err != nil {
 			return fmt.Errorf("decode response: %w", err)
+		}
+		if err := checkLegacyResponse(body.Meta.RC, body.Meta.Msg); err != nil {
+			return err
 		}
 		result = body.Data
 		return nil
@@ -226,12 +220,25 @@ func doPOST(ctx context.Context, c *unifiClient, url, endpoint string, payload i
 		if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodyBytes)).Decode(&body); err != nil {
 			return fmt.Errorf("decode response: %w", err)
 		}
+		if err := checkLegacyResponse(body.Meta.RC, body.Meta.Msg); err != nil {
+			return err
+		}
 		if len(body.Data) > 0 {
 			result = body.Data[0]
 		}
 		return nil
 	})
 	return result, err
+}
+
+func checkLegacyResponse(code, message string) error {
+	if code == "" || code == "ok" {
+		return nil
+	}
+	if message == "" {
+		message = code
+	}
+	return fmt.Errorf("UniFi API error: %s", message)
 }
 
 func doPOSTv2(ctx context.Context, c *unifiClient, url, endpoint string, payload interface{}) (json.RawMessage, error) {
@@ -297,7 +304,7 @@ func doDELETE(ctx context.Context, c *unifiClient, url, endpoint string) error {
 // --- Firewall Groups (legacy REST) ------------------------------------------
 
 func listFirewallGroups(ctx context.Context, c *unifiClient, site string) ([]FirewallGroup, error) {
-	data, err := doGET(ctx, c, groupEndpoint(c.cfg.BaseURL, site), "list-groups")
+	data, err := doGET(ctx, c, c.groupEndpoint(site), "list-groups")
 	if err != nil {
 		return nil, err
 	}
@@ -318,7 +325,7 @@ func createFirewallGroup(ctx context.Context, c *unifiClient, site string, g Fir
 		GroupType:    g.GroupType,
 		GroupMembers: g.GroupMembers,
 	}
-	raw, err := doPOST(ctx, c, groupEndpoint(c.cfg.BaseURL, site), "create-group", payload)
+	raw, err := doPOST(ctx, c, c.groupEndpoint(site), "create-group", payload)
 	if err != nil {
 		return FirewallGroup{}, err
 	}
@@ -331,19 +338,19 @@ func createFirewallGroup(ctx context.Context, c *unifiClient, site string, g Fir
 
 func updateFirewallGroup(ctx context.Context, c *unifiClient, site string, g FirewallGroup) error {
 	payload := apiGroup(g)
-	u := groupEndpoint(c.cfg.BaseURL, site) + "/" + g.ID
+	u := c.groupEndpoint(site) + "/" + g.ID
 	return doPUT(ctx, c, u, "update-group", payload)
 }
 
 func deleteFirewallGroup(ctx context.Context, c *unifiClient, site, id string) error {
-	u := groupEndpoint(c.cfg.BaseURL, site) + "/" + id
+	u := c.groupEndpoint(site) + "/" + id
 	return ignoreNotFound(doDELETE(ctx, c, u, "delete-group"))
 }
 
 // --- Firewall Rules (legacy REST) -------------------------------------------
 
 func listFirewallRules(ctx context.Context, c *unifiClient, site string) ([]FirewallRule, error) {
-	data, err := doGET(ctx, c, ruleEndpoint(c.cfg.BaseURL, site), "list-rules")
+	data, err := doGET(ctx, c, c.ruleEndpoint(site), "list-rules")
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +377,7 @@ func createFirewallRule(ctx context.Context, c *unifiClient, site string, r Fire
 		Protocol:            r.Protocol,
 		SrcFirewallGroupIDs: r.SrcFirewallGroupIDs,
 	}
-	raw, err := doPOST(ctx, c, ruleEndpoint(c.cfg.BaseURL, site), "create-rule", payload)
+	raw, err := doPOST(ctx, c, c.ruleEndpoint(site), "create-rule", payload)
 	if err != nil {
 		return FirewallRule{}, err
 	}
@@ -389,12 +396,12 @@ func createFirewallRule(ctx context.Context, c *unifiClient, site string, r Fire
 
 func updateFirewallRule(ctx context.Context, c *unifiClient, site string, r FirewallRule) error {
 	payload := apiRule(r)
-	u := ruleEndpoint(c.cfg.BaseURL, site) + "/" + r.ID
+	u := c.ruleEndpoint(site) + "/" + r.ID
 	return doPUT(ctx, c, u, "update-rule", payload)
 }
 
 func deleteFirewallRule(ctx context.Context, c *unifiClient, site, id string) error {
-	u := ruleEndpoint(c.cfg.BaseURL, site) + "/" + id
+	u := c.ruleEndpoint(site) + "/" + id
 	return ignoreNotFound(doDELETE(ctx, c, u, "delete-rule"))
 }
 
@@ -436,6 +443,9 @@ func listAllV1Pages(ctx context.Context, c *unifiClient, endpointURL, metricEndp
 		if len(page.Data) == 0 || (page.TotalCount > 0 && offset+page.Count >= page.TotalCount) {
 			break
 		}
+		if page.Count <= 0 {
+			return nil, fmt.Errorf("%s pagination returned %d items with count %d at offset %d", metricEndpoint, len(page.Data), page.Count, offset)
+		}
 		offset += page.Count
 	}
 	return all, nil
@@ -451,7 +461,7 @@ func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, er
 	}
 	c.cacheMu.RUnlock()
 
-	endpointURL := c.cfg.BaseURL + "/proxy/network/integration/v1/sites"
+	endpointURL := c.networkURL("/integration/v1/sites")
 	data, err := listAllV1Pages(ctx, c, endpointURL, "list-sites")
 	if err != nil {
 		return "", fmt.Errorf("fetch integration v1 sites: %w", err)
@@ -475,9 +485,14 @@ func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, er
 	return "", fmt.Errorf("site %q not found in integration v1 sites list", siteName)
 }
 
-// discoverSites fetches all integration v1 site internalReferences.
+// discoverSites returns the short site names (internalReference) visible to
+// the configured credentials. Session logins cannot read integration v1, so
+// they use the classic site list, whose name field holds the same value.
 func discoverSites(ctx context.Context, c *unifiClient) ([]string, error) {
-	endpointURL := c.cfg.BaseURL + "/proxy/network/integration/v1/sites"
+	if c.cfg.APIKey == "" {
+		return discoverSitesWithSession(ctx, c)
+	}
+	endpointURL := c.networkURL("/integration/v1/sites")
 	data, err := listAllV1Pages(ctx, c, endpointURL, "list-sites")
 	if err != nil {
 		return nil, fmt.Errorf("fetch integration v1 sites: %w", err)
@@ -495,13 +510,32 @@ func discoverSites(ctx context.Context, c *unifiClient) ([]string, error) {
 	return sites, nil
 }
 
+func discoverSitesWithSession(ctx context.Context, c *unifiClient) ([]string, error) {
+	data, err := doGET(ctx, c, c.networkURL("/api/self/sites"), "list-sites")
+	if err != nil {
+		return nil, fmt.Errorf("fetch sites: %w", err)
+	}
+	var sites []string
+	for _, raw := range data {
+		var s struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &s); err != nil {
+			continue
+		}
+		if s.Name != "" {
+			sites = append(sites, s.Name)
+		}
+	}
+	return sites, nil
+}
+
 // --- Firewall Zones (integration v1) ----------------------------------------
 
 // listFirewallZones fetches all zones from the integration v1 API.
 // siteID must be the site UUID (from getSiteID), not the site name.
 func listFirewallZones(ctx context.Context, c *unifiClient, siteID string) ([]Zone, error) {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/zones",
-		c.cfg.BaseURL, siteID)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/zones", siteID)
 	data, err := listAllV1Pages(ctx, c, endpointURL, "list-zones")
 	if err != nil {
 		return nil, err
@@ -512,7 +546,7 @@ func listFirewallZones(ctx context.Context, c *unifiClient, siteID string) ([]Zo
 		if err := json.Unmarshal(raw, &z); err != nil {
 			continue
 		}
-		zones = append(zones, Zone{ID: z.ID, Name: z.Name, Origin: z.Metadata.Origin})
+		zones = append(zones, Zone{ID: z.ID, Name: z.Name, NetworkIDs: z.NetworkIDs, Origin: z.Metadata.Origin})
 	}
 	return zones, nil
 }
@@ -520,8 +554,7 @@ func listFirewallZones(ctx context.Context, c *unifiClient, siteID string) ([]Zo
 // --- Traffic Matching Lists (integration v1) ---------------------------------
 
 func listTMLs(ctx context.Context, c *unifiClient, siteID string) ([]TrafficMatchingList, error) {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/traffic-matching-lists",
-		c.cfg.BaseURL, siteID)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/traffic-matching-lists", siteID)
 	data, err := listAllV1Pages(ctx, c, endpointURL, "list-tmls")
 	if err != nil {
 		return nil, err
@@ -538,8 +571,7 @@ func listTMLs(ctx context.Context, c *unifiClient, siteID string) ([]TrafficMatc
 }
 
 func createTML(ctx context.Context, c *unifiClient, siteID string, list TrafficMatchingList) (TrafficMatchingList, error) {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/traffic-matching-lists",
-		c.cfg.BaseURL, siteID)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/traffic-matching-lists", siteID)
 	raw, err := doPOSTv2(ctx, c, endpointURL, "create-tml", tmlToWire(list))
 	if err != nil {
 		return TrafficMatchingList{}, err
@@ -552,14 +584,12 @@ func createTML(ctx context.Context, c *unifiClient, siteID string, list TrafficM
 }
 
 func updateTML(ctx context.Context, c *unifiClient, siteID string, list TrafficMatchingList) error {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/traffic-matching-lists/%s",
-		c.cfg.BaseURL, siteID, list.ID)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/traffic-matching-lists/%s", siteID, list.ID)
 	return doPUT(ctx, c, endpointURL, "update-tml", tmlToWireUpdate(list))
 }
 
 func deleteTML(ctx context.Context, c *unifiClient, siteID, id string) error {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/traffic-matching-lists/%s",
-		c.cfg.BaseURL, siteID, id)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/traffic-matching-lists/%s", siteID, id)
 	return ignoreNotFound(doDELETE(ctx, c, endpointURL, "delete-tml"))
 }
 
@@ -580,36 +610,32 @@ func tmlItemToWire(item TrafficMatchingListItem) apiTMLItemV1 {
 	return apiTMLItemV1{Type: t, Value: item.Value}
 }
 
-func tmlToWire(list TrafficMatchingList) apiTMLV1 {
+// resolveTMLType returns the wire Type for a TML, inferring it from
+// GroupType when the caller hasn't set Type explicitly.
+func resolveTMLType(list TrafficMatchingList) string {
+	if list.Type != "" {
+		return list.Type
+	}
+	if list.GroupType == "ipv6-address-group" {
+		return "IPV6_ADDRESSES"
+	}
+	return "IPV4_ADDRESSES"
+}
+
+func tmlItemsToWire(list TrafficMatchingList) []apiTMLItemV1 {
 	items := make([]apiTMLItemV1, 0, len(list.Items))
 	for _, item := range list.Items {
 		items = append(items, tmlItemToWire(item))
 	}
-	tmlType := list.Type
-	if tmlType == "" {
-		if list.GroupType == "ipv6-address-group" {
-			tmlType = "IPV6_ADDRESSES"
-		} else {
-			tmlType = "IPV4_ADDRESSES"
-		}
-	}
-	return apiTMLV1{ID: list.ID, Type: tmlType, Name: list.Name, Items: items}
+	return items
+}
+
+func tmlToWire(list TrafficMatchingList) apiTMLV1 {
+	return apiTMLV1{ID: list.ID, Type: resolveTMLType(list), Name: list.Name, Items: tmlItemsToWire(list)}
 }
 
 func tmlToWireUpdate(list TrafficMatchingList) apiTMLV1Update {
-	items := make([]apiTMLItemV1, 0, len(list.Items))
-	for _, item := range list.Items {
-		items = append(items, tmlItemToWire(item))
-	}
-	tmlType := list.Type
-	if tmlType == "" {
-		if list.GroupType == "ipv6-address-group" {
-			tmlType = "IPV6_ADDRESSES"
-		} else {
-			tmlType = "IPV4_ADDRESSES"
-		}
-	}
-	return apiTMLV1Update{Type: tmlType, Name: list.Name, Items: items}
+	return apiTMLV1Update{Type: resolveTMLType(list), Name: list.Name, Items: tmlItemsToWire(list)}
 }
 
 func tmlFromWire(t apiTMLV1) TrafficMatchingList {
@@ -624,8 +650,7 @@ func tmlFromWire(t apiTMLV1) TrafficMatchingList {
 // --- Zone Policies (integration v1) -----------------------------------------
 
 func listZonePoliciesV1(ctx context.Context, c *unifiClient, siteID string) ([]ZonePolicy, error) {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies",
-		c.cfg.BaseURL, siteID)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/policies", siteID)
 	data, err := listAllV1Pages(ctx, c, endpointURL, "list-policies")
 	if err != nil {
 		return nil, err
@@ -642,8 +667,7 @@ func listZonePoliciesV1(ctx context.Context, c *unifiClient, siteID string) ([]Z
 }
 
 func createZonePolicyV1(ctx context.Context, c *unifiClient, siteID string, policy ZonePolicy) (ZonePolicy, error) {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies",
-		c.cfg.BaseURL, siteID)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/policies", siteID)
 	raw, err := doPOSTv2(ctx, c, endpointURL, "create-policy", modelToV1Policy(policy))
 	if err != nil {
 		return ZonePolicy{}, err
@@ -656,60 +680,13 @@ func createZonePolicyV1(ctx context.Context, c *unifiClient, siteID string, poli
 }
 
 func updateZonePolicyV1(ctx context.Context, c *unifiClient, siteID string, policy ZonePolicy) error {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies/%s",
-		c.cfg.BaseURL, siteID, policy.ID)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/policies/%s", siteID, policy.ID)
 	return doPUT(ctx, c, endpointURL, "update-policy", modelToV1PolicyUpdate(policy))
 }
 
 func deleteZonePolicyV1(ctx context.Context, c *unifiClient, siteID, id string) error {
-	endpointURL := fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies/%s",
-		c.cfg.BaseURL, siteID, id)
+	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/policies/%s", siteID, id)
 	return ignoreNotFound(doDELETE(ctx, c, endpointURL, "delete-policy"))
-}
-
-func getPolicyOrderingV1(ctx context.Context, c *unifiClient, siteID, srcZoneID, dstZoneID string) (PolicyOrdering, error) {
-	u, err := url.Parse(fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies/ordering",
-		c.cfg.BaseURL, siteID))
-	if err != nil {
-		return PolicyOrdering{}, err
-	}
-	q := u.Query()
-	q.Set("sourceFirewallZoneId", srcZoneID)
-	q.Set("destinationFirewallZoneId", dstZoneID)
-	u.RawQuery = q.Encode()
-
-	var body apiOrderingBody
-	err = c.withReauth(ctx, func() error {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-		if err != nil {
-			return err
-		}
-		resp, err := c.apiDo(ctx, req, "get-policy-ordering")
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		return json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodyBytes)).Decode(&body)
-	})
-	if err != nil {
-		return PolicyOrdering{}, err
-	}
-	return PolicyOrdering(body.OrderedFirewallPolicyIDs), nil
-}
-
-func setPolicyOrderingV1(ctx context.Context, c *unifiClient, siteID, srcZoneID, dstZoneID string, ordering PolicyOrdering) error {
-	u, err := url.Parse(fmt.Sprintf("%s/proxy/network/integration/v1/sites/%s/firewall/policies/ordering",
-		c.cfg.BaseURL, siteID))
-	if err != nil {
-		return err
-	}
-	q := u.Query()
-	q.Set("sourceFirewallZoneId", srcZoneID)
-	q.Set("destinationFirewallZoneId", dstZoneID)
-	u.RawQuery = q.Encode()
-
-	body := apiOrderingBody{OrderedFirewallPolicyIDs: apiOrderedPolicyIDs(ordering)}
-	return doPUT(ctx, c, u.String(), "set-policy-ordering", body)
 }
 
 func v1PolicyToModel(p apiV1Policy) ZonePolicy {
@@ -736,6 +713,7 @@ func v1PolicyToModel(p apiV1Policy) ZonePolicy {
 	return ZonePolicy{
 		ID:                     p.ID,
 		Name:                   p.Name,
+		Index:                  p.Index,
 		Description:            p.Description,
 		Enabled:                p.Enabled,
 		Action:                 p.Action.Type,
@@ -763,17 +741,39 @@ func buildPortFilter(tmlID string) *apiV1PortFilter {
 	}
 }
 
+// normalizeIPVersion maps the model's IPVersion ("BOTH", "" or an explicit
+// wire value) to the integration v1 wire value.
+func normalizeIPVersion(ipVersion string) string {
+	switch ipVersion {
+	case "BOTH":
+		return "IPV4_AND_IPV6"
+	case "":
+		return "IPV4"
+	default:
+		return ipVersion
+	}
+}
+
+// buildIPAddressFilter builds a TRAFFIC_MATCHING_LIST IP address filter for
+// the given TML id, or nil if no TML id is set.
+func buildIPAddressFilter(tmlID string) *apiV1IPAddressFilter {
+	if tmlID == "" {
+		return nil
+	}
+	return &apiV1IPAddressFilter{
+		Type:                  "TRAFFIC_MATCHING_LIST",
+		MatchOpposite:         false,
+		TrafficMatchingListID: tmlID,
+	}
+}
+
 func modelToV1Policy(p ZonePolicy) apiV1Policy {
 	src := apiV1PolicySrc{ZoneID: p.SrcZone}
 	var srcTF *apiV1TrafficFilter
 	if len(p.TrafficMatchingListIDs) > 0 && p.TrafficMatchingListIDs[0] != "" {
 		srcTF = &apiV1TrafficFilter{
-			Type: "IP_ADDRESS",
-			IPAddressFilter: &apiV1IPAddressFilter{
-				Type:                  "TRAFFIC_MATCHING_LIST",
-				MatchOpposite:         false,
-				TrafficMatchingListID: p.TrafficMatchingListIDs[0],
-			},
+			Type:            "IP_ADDRESS",
+			IPAddressFilter: buildIPAddressFilter(p.TrafficMatchingListIDs[0]),
 		}
 	}
 	if p.SrcPortTMLID != "" {
@@ -788,12 +788,8 @@ func modelToV1Policy(p ZonePolicy) apiV1Policy {
 	var dstTF *apiV1TrafficFilter
 	if p.DstIPTMLID != "" {
 		dstTF = &apiV1TrafficFilter{
-			Type: "IP_ADDRESS",
-			IPAddressFilter: &apiV1IPAddressFilter{
-				Type:                  "TRAFFIC_MATCHING_LIST",
-				MatchOpposite:         false,
-				TrafficMatchingListID: p.DstIPTMLID,
-			},
+			Type:            "IP_ADDRESS",
+			IPAddressFilter: buildIPAddressFilter(p.DstIPTMLID),
 		}
 	}
 	if p.DstPortTMLID != "" {
@@ -803,13 +799,6 @@ func modelToV1Policy(p ZonePolicy) apiV1Policy {
 		dstTF.PortFilter = buildPortFilter(p.DstPortTMLID)
 	}
 	dst.TrafficFilter = dstTF
-	ipVersion := p.IPVersion
-	switch ipVersion {
-	case "BOTH":
-		ipVersion = "IPV4_AND_IPV6"
-	case "":
-		ipVersion = "IPV4"
-	}
 	return apiV1Policy{
 		ID:                    p.ID,
 		Enabled:               p.Enabled,
@@ -818,7 +807,7 @@ func modelToV1Policy(p ZonePolicy) apiV1Policy {
 		Action:                apiV1PolicyAction{Type: p.Action, AllowReturnTraffic: p.AllowReturnTraffic},
 		Source:                src,
 		Destination:           dst,
-		IPProtocolScope:       apiV1IPScope{IPVersion: ipVersion},
+		IPProtocolScope:       apiV1IPScope{IPVersion: normalizeIPVersion(p.IPVersion)},
 		ConnectionStateFilter: p.ConnectionStateFilter,
 		LoggingEnabled:        p.LoggingEnabled,
 	}
@@ -832,22 +821,11 @@ func modelToV1PolicyUpdate(p ZonePolicy) apiV1PolicyUpdate {
 	src := apiV1PolicyUpdateSrc{ZoneID: p.SrcZone}
 	if len(p.TrafficMatchingListIDs) > 0 && p.TrafficMatchingListIDs[0] != "" {
 		src.TrafficFilter = &apiV1TrafficFilter{
-			Type: "IP_ADDRESS",
-			IPAddressFilter: &apiV1IPAddressFilter{
-				Type:                  "TRAFFIC_MATCHING_LIST",
-				MatchOpposite:         false,
-				TrafficMatchingListID: p.TrafficMatchingListIDs[0],
-			},
+			Type:            "IP_ADDRESS",
+			IPAddressFilter: buildIPAddressFilter(p.TrafficMatchingListIDs[0]),
 		}
 	}
 	dst := apiV1PolicyUpdateDst{ZoneID: p.DstZone}
-	ipVersion := p.IPVersion
-	switch ipVersion {
-	case "BOTH":
-		ipVersion = "IPV4_AND_IPV6"
-	case "":
-		ipVersion = "IPV4"
-	}
 	return apiV1PolicyUpdate{
 		Enabled:               p.Enabled,
 		Name:                  p.Name,
@@ -855,9 +833,8 @@ func modelToV1PolicyUpdate(p ZonePolicy) apiV1PolicyUpdate {
 		Action:                apiV1PolicyAction{Type: p.Action, AllowReturnTraffic: p.AllowReturnTraffic},
 		Source:                src,
 		Destination:           dst,
-		IPProtocolScope:       apiV1IPScope{IPVersion: ipVersion},
+		IPProtocolScope:       apiV1IPScope{IPVersion: normalizeIPVersion(p.IPVersion)},
 		ConnectionStateFilter: p.ConnectionStateFilter,
 		LoggingEnabled:        p.LoggingEnabled,
 	}
 }
-

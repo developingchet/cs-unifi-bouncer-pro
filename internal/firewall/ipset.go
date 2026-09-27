@@ -90,7 +90,7 @@ func (s *IPSet) Replace(ips []string) {
 	s.dirty = true
 }
 
-// IsDirty returns whether the set has changed since the last CommitClean.
+// IsDirty returns whether the set has changed since it was last marked clean.
 func (s *IPSet) IsDirty() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -98,7 +98,7 @@ func (s *IPSet) IsDirty() bool {
 }
 
 // PeekDirty returns the current members if dirty, or nil if clean.
-// Does NOT clear the dirty flag — use CommitClean after a successful write.
+// Does NOT clear the dirty flag — use CommitFlushed after a successful write.
 func (s *IPSet) PeekDirty() ([]string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -112,18 +112,20 @@ func (s *IPSet) PeekDirty() ([]string, bool) {
 	return out, true
 }
 
-// CommitClean clears the dirty flag. Call only after a successful API write.
-func (s *IPSet) CommitClean() {
+// MarkClean clears the dirty flag for state that already matches the controller.
+func (s *IPSet) MarkClean() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dirty = false
 }
 
-// MarkClean clears the dirty flag without a successful write (baseline init).
-func (s *IPSet) MarkClean() {
+// MarkStale forces the next sync to write the full member set, for when the
+// controller's copy was changed out of band and no longer matches the last write.
+func (s *IPSet) MarkStale() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.dirty = false
+	s.dirty = true
+	s.lastFlushed = nil
 }
 
 // HasChangedFromFlushed returns true if the current member set differs from the
@@ -131,28 +133,41 @@ func (s *IPSet) MarkClean() {
 func (s *IPSet) HasChangedFromFlushed() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.lastFlushed == nil {
-		return true
-	}
-	if len(s.members) != len(s.lastFlushed) {
-		return true
-	}
-	for ip := range s.members {
-		if _, ok := s.lastFlushed[ip]; !ok {
-			return true
-		}
-	}
-	return false
+	return s.lastFlushed == nil || !sameMembers(s.members, s.lastFlushed)
 }
 
-// CommitFlushed snapshots the current member set as the last-flushed state.
-// Call after a successful API write to enable diff-based skip optimisation.
-func (s *IPSet) CommitFlushed() {
+// SkipUnchanged atomically clears dirty only when the current members match the
+// last successful API write. A concurrent Add or Remove must remain dirty.
+func (s *IPSet) SkipUnchanged() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastFlushed = make(map[string]struct{}, len(s.members))
-	for ip := range s.members {
-		s.lastFlushed[ip] = struct{}{}
+	if s.lastFlushed == nil || !sameMembers(s.members, s.lastFlushed) {
+		return false
 	}
 	s.dirty = false
+	return true
+}
+
+// CommitFlushed records exactly the members sent in a successful API write.
+// Changes made while that write was in flight remain dirty for the next flush.
+func (s *IPSet) CommitFlushed(sent []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastFlushed = make(map[string]struct{}, len(sent))
+	for _, ip := range sent {
+		s.lastFlushed[ip] = struct{}{}
+	}
+	s.dirty = !sameMembers(s.members, s.lastFlushed)
+}
+
+func sameMembers(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for ip := range a {
+		if _, ok := b[ip]; !ok {
+			return false
+		}
+	}
+	return true
 }

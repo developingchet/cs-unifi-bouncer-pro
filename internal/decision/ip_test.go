@@ -70,6 +70,14 @@ func TestIsPrivate(t *testing.T) {
 	}
 }
 
+func TestIsPrivate_RejectsCIDRContainingPrivateRanges(t *testing.T) {
+	for _, cidr := range []string{"8.0.0.0/4", "64.0.0.0/2", "8000::/1"} {
+		if !IsPrivate(cidr) {
+			t.Errorf("%s overlaps a protected private range", cidr)
+		}
+	}
+}
+
 func TestIsWhitelisted(t *testing.T) {
 	wl, err := ParseWhitelist([]string{"10.0.0.0/8", "203.0.113.0/24"})
 	if err != nil {
@@ -84,6 +92,16 @@ func TestIsWhitelisted(t *testing.T) {
 	}
 	if IsWhitelisted("1.2.3.4", wl) {
 		t.Error("1.2.3.4 should not be whitelisted")
+	}
+}
+
+func TestIsWhitelisted_RejectsCIDRContainingWhitelist(t *testing.T) {
+	wl, err := ParseWhitelist([]string{"203.0.113.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !IsWhitelisted("192.0.0.0/3", wl) {
+		t.Fatal("broad ban includes a whitelisted range")
 	}
 }
 

@@ -11,13 +11,13 @@ body:
       required: true
 
   - type: dropdown
-    id: bouncer-type
+    id: firewall-mode
     attributes:
-      label: Bouncer type affected
+      label: Firewall mode
       options:
-        - UniFi bouncer
-        - Traefik bouncer
-        - Both
+        - auto
+        - zone
+        - legacy
     validations:
       required: true
 

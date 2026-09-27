@@ -41,6 +41,7 @@
    ```bash
    kubectl apply -f docs/kubernetes/networkpolicy.yaml
    ```
+   Egress is allowed to DNS, the controller on 443 (UniFi OS) or 8443 (self-hosted Network Application), and the LAPI on 8080. If your controller or LAPI listens elsewhere, edit the ports first: a blocked controller shows as `connection refused` in the logs and `/readyz` returns 503.
 
 6. **Verify** the pod is running:
    ```bash
@@ -48,11 +49,11 @@
    kubectl -n crowdsec logs -l app=cs-unifi-bouncer-pro -f
    ```
 
-## Hot-Reload
+## Configuration Reload
 
-Zone pair configuration can be reloaded without a full pod restart by sending SIGHUP:
+Restart the pod after changing its Secret or environment variables:
 ```bash
-kubectl -n crowdsec exec -it deploy/cs-unifi-bouncer-pro -- kill -HUP 1
+kubectl -n crowdsec rollout restart deployment/cs-unifi-bouncer-pro
 ```
 
 ## Prometheus Scraping

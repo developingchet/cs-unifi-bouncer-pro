@@ -148,6 +148,45 @@ func TestReauthTimeout(t *testing.T) {
 	}
 }
 
+func TestCSRFTokenLifecycle(t *testing.T) {
+	loginToken := "login-token"
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Csrf-Token", loginToken)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	sm := newSessionManager(AuthConfig{BaseURL: srv.URL, Username: "admin", Password: "pw"}, srv.Client(), zerolog.Nop())
+	csrfHeader := func() string {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL, nil)
+		sm.SetAuthHeader(req)
+		return req.Header.Get("X-Csrf-Token")
+	}
+
+	if err := sm.EnsureAuth(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := csrfHeader(); got != "login-token" {
+		t.Fatalf("after login: X-Csrf-Token = %q, want login-token", got)
+	}
+
+	rotated := &http.Response{Header: http.Header{}}
+	rotated.Header.Set("X-Updated-Csrf-Token", "rotated-token")
+	sm.UpdateFromResponse(rotated)
+	if got := csrfHeader(); got != "rotated-token" {
+		t.Fatalf("after rotation: X-Csrf-Token = %q, want rotated-token", got)
+	}
+
+	// A new session must not reuse the previous session's token.
+	loginToken = ""
+	if err := sm.EnsureAuth(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := csrfHeader(); got != "" {
+		t.Fatalf("after re-login without token: X-Csrf-Token = %q, want empty", got)
+	}
+}
+
 func TestSetAuthHeaderAPIKey(t *testing.T) {
 	log := zerolog.Nop()
 	cfg := AuthConfig{

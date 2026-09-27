@@ -5,14 +5,19 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
-	"text/template"
 	"time"
 
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/webhook"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/v2"
 )
+
+// minResyncInterval keeps the full decision re-read from hammering the LAPI:
+// with a large community blocklist one pull is tens of megabytes.
+const minResyncInterval = 5 * time.Minute
 
 // Config holds all application configuration.
 type Config struct {
@@ -27,8 +32,8 @@ type Config struct {
 	UnifiAPIDebug    bool          `koanf:"unifi_api_debug"`
 
 	// UniFi Sites
-	UnifiSites       []string `koanf:"unifi_sites"`
-	UnifiSitesAuto   bool     `koanf:"unifi_sites_auto"`
+	UnifiSites        []string `koanf:"unifi_sites"`
+	UnifiSitesAuto    bool     `koanf:"unifi_sites_auto"`
 	UnifiSitesExclude []string `koanf:"-"` // parsed from UNIFI_SITES_EXCLUDE CSV
 
 	// UniFi Security
@@ -43,17 +48,17 @@ type Config struct {
 	FirewallGroupCapacityV4   int           `koanf:"firewall_group_capacity_v4"`
 	FirewallGroupCapacityV6   int           `koanf:"firewall_group_capacity_v6"`
 	FirewallAPIShardDelay     time.Duration `koanf:"firewall_api_shard_delay"`
-	FirewallFlushConcurrency  int           `koanf:"firewall_flush_concurrency"`
 	FirewallLogDrops          bool          `koanf:"firewall_log_drops"`
+	FirewallConnectionStates  string        `koanf:"firewall_connection_states"`
 	FirewallReconcileOnStart  bool          `koanf:"firewall_reconcile_on_start"`
 	FirewallReconcileInterval time.Duration `koanf:"firewall_reconcile_interval"`
 
 	// Shard Management (integration v1)
-	SyncInterval        time.Duration `koanf:"sync_interval"`
-	ShardLimit          int           `koanf:"shard_limit"`
+	SyncInterval time.Duration `koanf:"sync_interval"`
+	ShardLimit   int           `koanf:"shard_limit"`
 	// ShardMergeThreshold is read from env var SHARD_MERGE_THRESHOLD.
 	// 0 = auto (50% of ShardLimit). -1 = disable shard rebalancing.
-	ShardMergeThreshold int           `koanf:"shard_merge_threshold"`
+	ShardMergeThreshold int `koanf:"shard_merge_threshold"`
 
 	// Object Naming Templates
 	GroupNameTemplate  string `koanf:"group_name_template"`
@@ -71,22 +76,27 @@ type Config struct {
 	ZonePairs []string `koanf:"zone_pairs"`
 
 	// Circuit Breaker
-	CircuitBreakerThreshold    int           `koanf:"circuit_breaker_threshold"`
+	CircuitBreakerThreshold     int           `koanf:"circuit_breaker_threshold"`
 	CircuitBreakerResetInterval time.Duration `koanf:"circuit_breaker_reset_interval"`
 
 	// Cloudflare Whitelist
-	CloudflareWhitelistEnabled  bool          `koanf:"cloudflare_whitelist_enabled"`
-	CloudflareRefreshInterval   time.Duration `koanf:"cloudflare_refresh_interval"`
-	CloudflareIPv4URL           string        `koanf:"cloudflare_ipv4_url"`
-	CloudflareIPv6URL           string        `koanf:"cloudflare_ipv6_url"`
-	CloudflareZonePairs         []string      `koanf:"cloudflare_zone_pairs"`
+	CloudflareWhitelistEnabled bool          `koanf:"cloudflare_whitelist_enabled"`
+	CloudflareRefreshInterval  time.Duration `koanf:"cloudflare_refresh_interval"`
+	CloudflareIPv4URL          string        `koanf:"cloudflare_ipv4_url"`
+	CloudflareIPv6URL          string        `koanf:"cloudflare_ipv6_url"`
+	CloudflareZonePairs        []string      `koanf:"cloudflare_zone_pairs"`
 
 	// CrowdSec Decision Filtering
-	CrowdSecLAPIURL         string        `koanf:"crowdsec_lapi_url"`
-	CrowdSecLAPIKey         string        `koanf:"crowdsec_lapi_key"`
-	CrowdSecLAPIVerifyTLS   bool          `koanf:"crowdsec_lapi_verify_tls"`
-	CrowdSecOrigins         []string      `koanf:"crowdsec_origins"`
-	CrowdSecPollInterval    time.Duration `koanf:"crowdsec_poll_interval"`
+	CrowdSecLAPIURL       string        `koanf:"crowdsec_lapi_url"`
+	CrowdSecLAPIKey       string        `koanf:"crowdsec_lapi_key"`
+	CrowdSecLAPIVerifyTLS bool          `koanf:"crowdsec_lapi_verify_tls"`
+	CrowdSecLAPICACert    string        `koanf:"crowdsec_lapi_ca_cert"`
+	CrowdSecLAPIAllowHTTP bool          `koanf:"crowdsec_lapi_allow_http"`
+	CrowdSecOrigins       []string      `koanf:"crowdsec_origins"`
+	CrowdSecPollInterval  time.Duration `koanf:"crowdsec_poll_interval"`
+	// CrowdSecResyncInterval is how often every active decision is re-read
+	// from the LAPI to recover bans the stream skipped; 0 disables it.
+	CrowdSecResyncInterval  time.Duration `koanf:"crowdsec_resync_interval"`
 	LAPIMetricsPushInterval time.Duration `koanf:"lapi_metrics_push_interval"`
 	BlockScenarioExclude    []string      `koanf:"block_scenario_exclude"`
 	BlockWhitelist          []string      `koanf:"block_whitelist"`
@@ -124,15 +134,10 @@ type Config struct {
 	// Blocklist import
 	BlocklistURLs            []string      `koanf:"-"` // parsed from BLOCKLIST_URLS CSV
 	BlocklistRefreshInterval time.Duration `koanf:"blocklist_refresh_interval"`
-	BlocklistNamePrefix      string        `koanf:"blocklist_name_prefix"`
 
 	// Webhook notifications
 	WebhookURL    string   `koanf:"webhook_url"`
 	WebhookEvents []string `koanf:"-"` // parsed from WEBHOOK_EVENTS CSV
-
-	// Zone routing by scenario
-	// Parsed from ZONE_PAIRS_SCENARIO_MAP
-	ZonePairsScenarioMap map[string][]ZonePair `koanf:"-"`
 
 	// DeprecationWarnings holds warnings about deprecated env vars that were
 	// used. Callers should log these after building the logger.
@@ -155,6 +160,9 @@ func parseZoneSide(side string) (zoneName string, ports []int, err error) {
 	if idx == -1 {
 		if side == "" {
 			return "", nil, fmt.Errorf("zone name must not be empty")
+		}
+		if strings.Contains(side, ",") {
+			return "", nil, fmt.Errorf("unexpected comma in zone name %q; separate pairs with semicolons when using port or destination IP lists", side)
 		}
 		return side, nil, nil
 	}
@@ -189,10 +197,10 @@ func parseZoneSide(side string) (zoneName string, ports []int, err error) {
 func parseZonePairList(pairs []string) ([]ZonePair, error) {
 	result := make([]ZonePair, 0, len(pairs))
 	for _, p := range pairs {
-		parts := strings.SplitN(p, "->", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid zone pair %q: expected format src->dst", p)
+		if strings.Count(p, "->") != 1 {
+			return nil, fmt.Errorf("invalid zone pair %q: expected one src->dst pair; separate pairs with semicolons when using comma-separated ports or destination IPs", p)
 		}
+		parts := strings.SplitN(p, "->", 2)
 		src, srcPorts, err := parseZoneSide(strings.TrimSpace(parts[0]))
 		if err != nil {
 			return nil, fmt.Errorf("invalid zone pair %q src: %w", p, err)
@@ -207,7 +215,7 @@ func parseZonePairList(pairs []string) ([]ZonePair, error) {
 			for _, ip := range strings.Split(ipPart, ",") {
 				ip = strings.TrimSpace(ip)
 				if ip == "" {
-					continue
+					return nil, fmt.Errorf("invalid zone pair %q: empty destination IP after @", p)
 				}
 				if strings.Contains(ip, "/") {
 					if _, _, cidrErr := net.ParseCIDR(ip); cidrErr != nil {
@@ -241,6 +249,31 @@ func (c *Config) ParseCloudflareZonePairs() ([]ZonePair, error) {
 	return parseZonePairList(c.CloudflareZonePairs)
 }
 
+// ParseFirewallConnectionStates returns the zone block policy state filter.
+// ALL preserves UniFi's unrestricted-state behavior for installations that
+// intentionally want to block established and related traffic as well.
+func (c *Config) ParseFirewallConnectionStates() ([]string, error) {
+	raw := strings.TrimSpace(c.FirewallConnectionStates)
+	if strings.EqualFold(raw, "ALL") {
+		return nil, nil
+	}
+	if raw == "" {
+		return nil, fmt.Errorf("FIREWALL_CONNECTION_STATES must be ALL or a comma-separated list of NEW,INVALID,ESTABLISHED")
+	}
+	allowed := map[string]bool{"NEW": true, "INVALID": true, "ESTABLISHED": true}
+	seen := make(map[string]bool)
+	var states []string
+	for _, part := range strings.Split(raw, ",") {
+		state := strings.ToUpper(strings.TrimSpace(part))
+		if !allowed[state] || seen[state] {
+			return nil, fmt.Errorf("FIREWALL_CONNECTION_STATES contains invalid or duplicate state %q", part)
+		}
+		seen[state] = true
+		states = append(states, state)
+	}
+	return states, nil
+}
+
 // sanitise removes a single layer of matching surrounding quotes from all string
 // fields and string slice elements. This normalises values from Docker --env-file
 // which does not strip shell quoting.
@@ -251,9 +284,11 @@ func (c *Config) sanitise() {
 	c.UnifiAPIKey = stripEnvQuotes(c.UnifiAPIKey)
 	c.UnifiCACert = stripEnvQuotes(c.UnifiCACert)
 	c.CrowdSecLAPIURL = stripEnvQuotes(c.CrowdSecLAPIURL)
+	c.CrowdSecLAPICACert = stripEnvQuotes(c.CrowdSecLAPICACert)
 	c.CrowdSecLAPIKey = stripEnvQuotes(c.CrowdSecLAPIKey)
 	c.FirewallMode = stripEnvQuotes(c.FirewallMode)
 	c.FirewallBlockAction = stripEnvQuotes(c.FirewallBlockAction)
+	c.FirewallConnectionStates = stripEnvQuotes(c.FirewallConnectionStates)
 	c.LegacyRulesetV4 = stripEnvQuotes(c.LegacyRulesetV4)
 	c.LegacyRulesetV6 = stripEnvQuotes(c.LegacyRulesetV6)
 	c.GroupNameTemplate = stripEnvQuotes(c.GroupNameTemplate)
@@ -292,60 +327,73 @@ func (c *Config) sanitise() {
 // defaults sets sensible default values.
 func defaults() map[string]interface{} {
 	return map[string]interface{}{
-		"unifi_verify_tls":            false,
-		"unifi_http_timeout":          "120s",
-		"unifi_sites":                 "default",
-		"firewall_mode":               "auto",
-		"firewall_block_action":       "drop",
-		"firewall_enable_ipv6":        true,
-		"enable_ipv6":                 false,
-		"firewall_group_capacity":     10000,
-		"firewall_api_shard_delay":    "250ms",
-		"firewall_flush_concurrency":  1,
-		"firewall_reconcile_on_start": true,
-		"firewall_reconcile_interval": "0s",
-		"sync_interval":               "30s",
-		"shard_limit":                 10000,
-		"shard_merge_threshold":       0,
-		"group_name_template":         "crowdsec-block-{{.Family}}-{{.Index}}",
-		"rule_name_template":          "crowdsec-drop-{{.Family}}-{{.Index}}",
-		"policy_name_template":        "crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}",
-		"object_description":          "Managed by cs-unifi-bouncer-pro. Do not edit manually.",
-		"legacy_rule_index_start_v4":  22000,
-		"legacy_rule_index_start_v6":  27000,
-		"legacy_ruleset_v4":           "WAN_IN",
-		"legacy_ruleset_v6":           "WANv6_IN",
-		"zone_pairs":                    "External->Dmz",
-		"circuit_breaker_threshold":     5,
+		"unifi_verify_tls":               true,
+		"unifi_http_timeout":             "120s",
+		"unifi_sites":                    "default",
+		"firewall_mode":                  "auto",
+		"firewall_block_action":          "drop",
+		"firewall_enable_ipv6":           true,
+		"enable_ipv6":                    false,
+		"firewall_group_capacity":        10000,
+		"firewall_api_shard_delay":       "250ms",
+		"firewall_connection_states":     "NEW,INVALID",
+		"firewall_reconcile_on_start":    true,
+		"firewall_reconcile_interval":    "10m",
+		"sync_interval":                  "30s",
+		"shard_limit":                    10000,
+		"shard_merge_threshold":          0,
+		"group_name_template":            "crowdsec-block-{{.Family}}-{{.Index}}",
+		"rule_name_template":             "crowdsec-drop-{{.Family}}-{{.Index}}",
+		"policy_name_template":           "crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}",
+		"object_description":             "Managed by cs-unifi-bouncer-pro. Do not edit manually.",
+		"legacy_rule_index_start_v4":     22000,
+		"legacy_rule_index_start_v6":     27000,
+		"legacy_ruleset_v4":              "WAN_IN",
+		"legacy_ruleset_v6":              "WANv6_IN",
+		"zone_pairs":                     "External->Dmz",
+		"circuit_breaker_threshold":      5,
 		"circuit_breaker_reset_interval": "60s",
-		"cloudflare_whitelist_enabled": false,
-		"cloudflare_refresh_interval":  "168h",
-		"cloudflare_ipv4_url":          "https://www.cloudflare.com/ips-v4",
-		"cloudflare_ipv6_url":          "https://www.cloudflare.com/ips-v6",
-		"crowdsec_lapi_url":           "http://crowdsec:8080",
-		"crowdsec_lapi_verify_tls":    true,
-		"crowdsec_poll_interval":      "30s",
-		"lapi_metrics_push_interval":  "30m",
-		"session_reauth_min_gap":      "5s",
-		"session_reauth_timeout":      "10s",
-		"data_dir":                    "/data",
-		"ban_ttl":                     "168h",
-		"log_level":                   "info",
-		"log_format":                  "json",
-		"metrics_enabled":             true,
-		"metrics_addr":                ":9090",
-		"health_addr":                 ":8081",
-		"janitor_interval":            "1h",
-		"shutdown_grace_period":       "30s",
-		"health_check_lapi":           false,
-		"history_max_events":          10000,
-		"blocklist_refresh_interval":  "24h",
-		"blocklist_name_prefix":       "ext-blocklist",
-		"decision_rate_limit":         0,
-		"decision_burst_size":         1000,
-		"unifi_require_https":         false,
-		"unifi_sites_auto":            false,
+		"cloudflare_whitelist_enabled":   false,
+		"cloudflare_refresh_interval":    "168h",
+		"cloudflare_ipv4_url":            "https://www.cloudflare.com/ips-v4",
+		"cloudflare_ipv6_url":            "https://www.cloudflare.com/ips-v6",
+		"crowdsec_lapi_url":              "https://crowdsec:8080",
+		"crowdsec_lapi_verify_tls":       true,
+		"crowdsec_lapi_allow_http":       false,
+		"crowdsec_poll_interval":         "30s",
+		"crowdsec_resync_interval":       "1h",
+		"lapi_metrics_push_interval":     "30m",
+		"session_reauth_min_gap":         "5s",
+		"session_reauth_timeout":         "10s",
+		"data_dir":                       "/data",
+		"ban_ttl":                        "168h",
+		"log_level":                      "info",
+		"log_format":                     "json",
+		"metrics_enabled":                true,
+		"metrics_addr":                   ":9090",
+		"health_addr":                    defaultHealthAddr,
+		"janitor_interval":               "1h",
+		"shutdown_grace_period":          "30s",
+		"health_check_lapi":              true,
+		"history_max_events":             10000,
+		"blocklist_refresh_interval":     "24h",
+		"decision_rate_limit":            0,
+		"decision_burst_size":            1000,
+		"unifi_require_https":            true,
+		"unifi_sites_auto":               false,
 	}
+}
+
+const defaultHealthAddr = ":8081"
+
+// HealthAddrFromEnv returns HEALTH_ADDR without loading the rest of the
+// configuration, so the healthcheck subcommand also works where the other
+// settings are not in its environment (a systemd EnvironmentFile).
+func HealthAddrFromEnv() string {
+	if addr := stripEnvQuotes(strings.TrimSpace(os.Getenv("HEALTH_ADDR"))); addr != "" {
+		return addr
+	}
+	return defaultHealthAddr
 }
 
 // stripEnvQuotes removes a single layer of matching surrounding single or double
@@ -365,6 +413,9 @@ func stripEnvQuotes(s string) string {
 
 // Load reads configuration from environment variables, applying _FILE secret injection.
 func Load() (*Config, error) {
+	if _, misspelled := os.LookupEnv("CLOUDFLARE_ZWHITELIST_ENABLED"); misspelled {
+		return nil, fmt.Errorf("unknown CLOUDFLARE_ZWHITELIST_ENABLED; use CLOUDFLARE_WHITELIST_ENABLED")
+	}
 	// Use "." as delimiter so that env vars with "_" in their names are
 	// treated as flat keys, not nested paths. E.g. UNIFI_URL → "unifi_url"
 	// maps to struct tag koanf:"unifi_url" without any nesting.
@@ -378,9 +429,7 @@ func Load() (*Config, error) {
 
 	// Load from environment — use "." as delimiter so env vars aren't split
 	// by "_". Our env var names don't contain ".", so they stay flat.
-	if err := k.Load(env.Provider("", ".", func(s string) string {
-		return strings.ToLower(s)
-	}), nil); err != nil {
+	if err := k.Load(env.Provider("", ".", strings.ToLower), nil); err != nil {
 		return nil, fmt.Errorf("load env: %w", err)
 	}
 
@@ -405,11 +454,15 @@ func Load() (*Config, error) {
 	cfg.BlocklistURLs = splitCSV(k.String("blocklist_urls"))
 	cfg.WebhookEvents = splitCSV(k.String("webhook_events"))
 
-	// Parse BLOCK_SCENARIO_DURATION_MAP
-	cfg.BlockScenarioDurationMap = parseScenarioDurationMap(k.String("block_scenario_duration_map"))
+	durationMap, err := parseScenarioDurationMap(k.String("block_scenario_duration_map"))
+	if err != nil {
+		return nil, fmt.Errorf("BLOCK_SCENARIO_DURATION_MAP: %w", err)
+	}
+	cfg.BlockScenarioDurationMap = durationMap
 
-	// Parse ZONE_PAIRS_SCENARIO_MAP
-	cfg.ZonePairsScenarioMap = parseZonePairsScenarioMap(k.String("zone_pairs_scenario_map"))
+	if raw := strings.TrimSpace(k.String("zone_pairs_scenario_map")); raw != "" {
+		return nil, fmt.Errorf("ZONE_PAIRS_SCENARIO_MAP is not supported: per-scenario firewall policies are not provisioned")
+	}
 
 	// Strip Docker env-file quoting from all string values
 	cfg.sanitise()
@@ -423,6 +476,10 @@ func Load() (*Config, error) {
 		cfg.DeprecationWarnings = append(cfg.DeprecationWarnings,
 			"FIREWALL_BATCH_WINDOW is deprecated; use SYNC_INTERVAL instead")
 	}
+	if os.Getenv("FIREWALL_FLUSH_CONCURRENCY") != "" {
+		cfg.DeprecationWarnings = append(cfg.DeprecationWarnings,
+			"FIREWALL_FLUSH_CONCURRENCY has no effect: shards are written one at a time; remove it")
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -432,17 +489,51 @@ func Load() (*Config, error) {
 
 // Validate checks required fields and semantic constraints.
 func (c *Config) Validate() error {
+	if err := c.validateController(); err != nil {
+		return err
+	}
+	if err := c.validateFirewall(); err != nil {
+		return err
+	}
+	if err := c.validateOperational(); err != nil {
+		return err
+	}
+	if err := c.validateTiming(); err != nil {
+		return err
+	}
+	if err := c.validateFeeds(); err != nil {
+		return err
+	}
+	return c.validateCloudflare()
+}
+
+// validateController checks the UniFi controller URL/TLS settings and the
+// required UniFi and CrowdSec credentials.
+func (c *Config) validateController() error {
 	if c.UnifiURL == "" {
 		return fmt.Errorf("UNIFI_URL is required")
 	}
 
-	// UNIFI_URL scheme validation
-	if u, err := url.Parse(c.UnifiURL); err == nil && u.Scheme == "http" {
+	// Only HTTP(S) controller URLs are usable. An explicit opt-out is required
+	// before credentials may be sent over plaintext HTTP.
+	u, err := url.Parse(c.UnifiURL)
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		return fmt.Errorf("UNIFI_URL must be an absolute http:// or https:// URL")
+	}
+	// Credentials belong in UNIFI_USERNAME/UNIFI_PASSWORD: a URL is printed
+	// by diagnose and by UNIFI_API_DEBUG request logs.
+	if u.User != nil {
+		return fmt.Errorf("UNIFI_URL must not contain a username or password; use UNIFI_USERNAME and UNIFI_PASSWORD")
+	}
+	if u.Scheme == "http" {
 		if c.UnifiRequireHTTPS {
 			return fmt.Errorf("UNIFI_URL uses http:// — set UNIFI_REQUIRE_HTTPS=false to allow (not recommended)")
 		}
 		c.DeprecationWarnings = append(c.DeprecationWarnings,
 			"UNIFI_URL uses http:// — credentials will be transmitted in plaintext; use https://")
+	} else if !c.UnifiVerifyTLS {
+		c.DeprecationWarnings = append(c.DeprecationWarnings,
+			"UNIFI_VERIFY_TLS=false disables controller certificate validation; a network attacker could intercept credentials. Set UNIFI_VERIFY_TLS=true and configure UNIFI_CA_CERT for self-signed controllers")
 	}
 	if c.CrowdSecLAPIKey == "" {
 		return fmt.Errorf("CROWDSEC_LAPI_KEY is required")
@@ -450,25 +541,37 @@ func (c *Config) Validate() error {
 	if c.UnifiAPIKey == "" && (c.UnifiUsername == "" || c.UnifiPassword == "") {
 		return fmt.Errorf("either UNIFI_API_KEY or both UNIFI_USERNAME and UNIFI_PASSWORD are required")
 	}
+	return nil
+}
 
+// validateFirewall checks the firewall mode, block action, connection state
+// filter, object name templates, and zone pairs.
+func (c *Config) validateFirewall() error {
 	validModes := map[string]bool{"auto": true, "legacy": true, "zone": true}
 	if !validModes[c.FirewallMode] {
 		return fmt.Errorf("FIREWALL_MODE must be auto, legacy, or zone; got %q", c.FirewallMode)
+	}
+	// Zone policies and traffic matching lists live on the integration API,
+	// which accepts API keys only.
+	if c.FirewallMode == "zone" && c.UnifiAPIKey == "" {
+		return fmt.Errorf("FIREWALL_MODE=zone requires UNIFI_API_KEY; a username and password can only manage legacy firewall rules")
 	}
 
 	validActions := map[string]bool{"drop": true, "reject": true}
 	if !validActions[c.FirewallBlockAction] {
 		return fmt.Errorf("FIREWALL_BLOCK_ACTION must be drop or reject; got %q", c.FirewallBlockAction)
 	}
+	if _, err := c.ParseFirewallConnectionStates(); err != nil {
+		return err
+	}
 
-	// Validate Go templates
 	for _, pair := range []struct{ name, tmpl string }{
 		{"GROUP_NAME_TEMPLATE", c.GroupNameTemplate},
 		{"RULE_NAME_TEMPLATE", c.RuleNameTemplate},
 		{"POLICY_NAME_TEMPLATE", c.PolicyNameTemplate},
 	} {
-		if _, err := template.New("").Parse(pair.tmpl); err != nil {
-			return fmt.Errorf("%s is invalid Go template: %w", pair.name, err)
+		if err := validateNameTemplate(pair.name, pair.tmpl); err != nil {
+			return err
 		}
 	}
 
@@ -478,7 +581,12 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("ZONE_PAIRS: %w", err)
 		}
 	}
+	return nil
+}
 
+// validateOperational checks logging, the block whitelist, the CrowdSec LAPI
+// URL, the configured UniFi sites, and firewall group capacity.
+func (c *Config) validateOperational() error {
 	validLogLevels := map[string]bool{
 		"trace": true, "debug": true, "info": true,
 		"warn": true, "error": true, "fatal": true, "panic": true,
@@ -510,11 +618,38 @@ func (c *Config) Validate() error {
 	if !strings.HasPrefix(c.CrowdSecLAPIURL, "http://") && !strings.HasPrefix(c.CrowdSecLAPIURL, "https://") {
 		return fmt.Errorf("CROWDSEC_LAPI_URL must start with http:// or https://; got %q", c.CrowdSecLAPIURL)
 	}
-
-	if c.FirewallGroupCapacity != 0 && c.FirewallGroupCapacity < 1 {
-		return fmt.Errorf("FIREWALL_GROUP_CAPACITY must be >= 1; got %d", c.FirewallGroupCapacity)
+	lapiURL, err := url.Parse(c.CrowdSecLAPIURL)
+	if err != nil || lapiURL.Host == "" || lapiURL.User != nil {
+		return fmt.Errorf("CROWDSEC_LAPI_URL must be an absolute URL without userinfo")
+	}
+	if lapiURL.Scheme == "http" && !isLoopbackHost(lapiURL.Hostname()) && !c.CrowdSecLAPIAllowHTTP {
+		return fmt.Errorf("CROWDSEC_LAPI_URL uses plaintext HTTP outside loopback; set CROWDSEC_LAPI_ALLOW_HTTP=true only on a trusted local network")
+	}
+	if c.MetricsEnabled && c.MetricsAddr == c.HealthAddr {
+		return fmt.Errorf("METRICS_ADDR and HEALTH_ADDR must differ; both are %q", c.MetricsAddr)
+	}
+	if len(c.UnifiSites) == 0 && !c.UnifiSitesAuto {
+		return fmt.Errorf("UNIFI_SITES must list at least one site, or set UNIFI_SITES_AUTO=true")
 	}
 
+	for _, capacity := range []struct {
+		name  string
+		value int
+	}{
+		{"FIREWALL_GROUP_CAPACITY", c.FirewallGroupCapacity},
+		{"FIREWALL_GROUP_CAPACITY_V4", c.FirewallGroupCapacityV4},
+		{"FIREWALL_GROUP_CAPACITY_V6", c.FirewallGroupCapacityV6},
+	} {
+		if capacity.value < 0 || capacity.value > 10000 {
+			return fmt.Errorf("%s must be between 1 and 10000, or 0 to use the default (got %d)", capacity.name, capacity.value)
+		}
+	}
+	return nil
+}
+
+// validateTiming checks the ban/sync/reconcile durations and decision rate
+// limiting settings.
+func (c *Config) validateTiming() error {
 	if c.BanTTL <= 0 {
 		return fmt.Errorf("BAN_TTL must be > 0; got %s", c.BanTTL)
 	}
@@ -532,20 +667,99 @@ func (c *Config) Validate() error {
 	if c.ShardMergeThreshold < -1 {
 		return fmt.Errorf("SHARD_MERGE_THRESHOLD must be >= -1 (got %d); use -1 to disable rebalancing", c.ShardMergeThreshold)
 	}
-
-	// Validate Cloudflare whitelist config
-	if c.CloudflareWhitelistEnabled {
-		if c.CloudflareRefreshInterval <= 0 {
-			return fmt.Errorf("CLOUDFLARE_REFRESH_INTERVAL must be > 0")
-		}
-		if len(c.CloudflareZonePairs) == 0 {
-			return fmt.Errorf("CLOUDFLARE_WHITELIST_ENABLED is set but CLOUDFLARE_ZONE_PAIRS is empty")
-		}
-		if _, err := c.ParseCloudflareZonePairs(); err != nil {
-			return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: %w", err)
+	if c.CrowdSecPollInterval <= 0 {
+		return fmt.Errorf("CROWDSEC_POLL_INTERVAL must be > 0; got %s", c.CrowdSecPollInterval)
+	}
+	if c.CrowdSecResyncInterval != 0 && c.CrowdSecResyncInterval < minResyncInterval {
+		return fmt.Errorf("CROWDSEC_RESYNC_INTERVAL must be 0 (disabled) or at least %s; got %s",
+			minResyncInterval, c.CrowdSecResyncInterval)
+	}
+	if c.ShutdownGracePeriod <= 0 {
+		return fmt.Errorf("SHUTDOWN_GRACE_PERIOD must be > 0; got %s", c.ShutdownGracePeriod)
+	}
+	// A zero client timeout means no timeout, so a stalled controller would
+	// hang every sync.
+	if c.UnifiHTTPTimeout <= 0 {
+		return fmt.Errorf("UNIFI_HTTP_TIMEOUT must be > 0; got %s", c.UnifiHTTPTimeout)
+	}
+	if c.SessionReauthTimeout <= 0 {
+		return fmt.Errorf("SESSION_REAUTH_TIMEOUT must be > 0; got %s", c.SessionReauthTimeout)
+	}
+	if c.CircuitBreakerThreshold < 1 {
+		return fmt.Errorf("CIRCUIT_BREAKER_THRESHOLD must be >= 1; got %d", c.CircuitBreakerThreshold)
+	}
+	if c.CircuitBreakerResetInterval <= 0 {
+		return fmt.Errorf("CIRCUIT_BREAKER_RESET_INTERVAL must be > 0; got %s", c.CircuitBreakerResetInterval)
+	}
+	for _, d := range []struct {
+		name  string
+		value time.Duration
+	}{
+		{"FIREWALL_API_SHARD_DELAY", c.FirewallAPIShardDelay},
+		{"FIREWALL_RECONCILE_INTERVAL", c.FirewallReconcileInterval},
+		{"SESSION_REAUTH_MIN_GAP", c.SessionReauthMinGap},
+	} {
+		if d.value < 0 {
+			return fmt.Errorf("%s must not be negative; got %s", d.name, d.value)
 		}
 	}
+	if c.DecisionRateLimit < 0 {
+		return fmt.Errorf("DECISION_RATE_LIMIT must be >= 0; got %d", c.DecisionRateLimit)
+	}
+	// A zero burst makes every rate-limited wait fail immediately.
+	if c.DecisionRateLimit > 0 && c.DecisionBurstSize < 1 {
+		return fmt.Errorf("DECISION_BURST_SIZE must be >= 1 when DECISION_RATE_LIMIT is set; got %d", c.DecisionBurstSize)
+	}
+	return nil
+}
 
+// validateFeeds checks the blocklist import and webhook notification settings.
+func (c *Config) validateFeeds() error {
+	if len(c.BlocklistURLs) > 0 && c.BlocklistRefreshInterval <= 0 {
+		return fmt.Errorf("BLOCKLIST_REFRESH_INTERVAL must be > 0 when BLOCKLIST_URLS is set")
+	}
+	// Entries are named by position, never echoed: these URLs often carry tokens.
+	for i, raw := range c.BlocklistURLs {
+		if !isHTTPURL(raw) {
+			return fmt.Errorf("BLOCKLIST_URLS entry %d must be an absolute http:// or https:// URL", i+1)
+		}
+	}
+	if c.WebhookURL != "" && !isHTTPURL(c.WebhookURL) {
+		return fmt.Errorf("WEBHOOK_URL must be an absolute http:// or https:// URL")
+	}
+	for _, event := range c.WebhookEvents {
+		if !slices.Contains(webhook.Events, event) {
+			return fmt.Errorf("WEBHOOK_EVENTS: unknown event %q; valid events are %s", event, strings.Join(webhook.Events, ", "))
+		}
+	}
+	return nil
+}
+
+// validateCloudflare checks the Cloudflare whitelist config when enabled.
+func (c *Config) validateCloudflare() error {
+	if !c.CloudflareWhitelistEnabled {
+		return nil
+	}
+	// The whitelist is a set of zone policies managed through the
+	// integration API, which accepts API keys only.
+	if c.FirewallMode == "legacy" {
+		return fmt.Errorf("CLOUDFLARE_WHITELIST_ENABLED requires the zone-based firewall; it cannot be used with FIREWALL_MODE=legacy")
+	}
+	if c.UnifiAPIKey == "" {
+		return fmt.Errorf("CLOUDFLARE_WHITELIST_ENABLED requires UNIFI_API_KEY")
+	}
+	if c.CloudflareRefreshInterval <= 0 {
+		return fmt.Errorf("CLOUDFLARE_REFRESH_INTERVAL must be > 0")
+	}
+	if len(c.CloudflareZonePairs) == 0 {
+		return fmt.Errorf("CLOUDFLARE_WHITELIST_ENABLED is set but CLOUDFLARE_ZONE_PAIRS is empty")
+	}
+	if _, err := c.ParseCloudflareZonePairs(); err != nil {
+		return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: %w", err)
+	}
+	if !isHTTPURL(c.CloudflareIPv4URL) || !isHTTPURL(c.CloudflareIPv6URL) {
+		return fmt.Errorf("CLOUDFLARE_IPV4_URL and CLOUDFLARE_IPV6_URL must be absolute http:// or https:// URLs")
+	}
 	return nil
 }
 
@@ -578,6 +792,12 @@ func (c *Config) InsecureLAPIURLWarning() string {
 			"intercept the LAPI key; set CROWDSEC_LAPI_VERIFY_TLS=true or mount a CA certificate"
 	}
 	return ""
+}
+
+// isHTTPURL reports whether raw is an absolute http:// or https:// URL.
+func isHTTPURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https")
 }
 
 // isLoopbackHost reports whether host is the loopback address or "localhost".
@@ -615,7 +835,7 @@ func injectFileSecrets(k *koanf.Koanf) error {
 		filePath = stripEnvQuotes(filePath)
 		content, err := os.ReadFile(filePath)
 		if err != nil {
-			return fmt.Errorf("reading secret file for %s (%s): %w", key, filePath, err)
+			return fmt.Errorf("%s_FILE: cannot read %s: %w", strings.ToUpper(key), filePath, err)
 		}
 		val := strings.TrimSpace(string(content))
 		if err := k.Set(key, val); err != nil {
@@ -665,10 +885,8 @@ func splitZonePairList(s string) []string {
 		parts := strings.Split(s, ";")
 		result := make([]string, 0, len(parts))
 		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p != "" {
-				result = append(result, p)
-			}
+			// Keep empty entries so a stray separator is reported, not ignored.
+			result = append(result, strings.TrimSpace(p))
 		}
 		return result
 	}
@@ -698,75 +916,32 @@ func splitZonePairList(s string) []string {
 	return []string{s}
 }
 
-// parseScenarioDurationMap parses a comma-separated "scenario=duration" list.
-// Example: "ssh-bf=168h,http-probing=24h"
-// Returns nil map on empty input; invalid entries are silently skipped.
-func parseScenarioDurationMap(s string) map[string]time.Duration {
+// parseScenarioDurationMap parses comma- or semicolon-separated scenario durations.
+// Example: "ssh-bf=168h;http-probing=24h". Returns nil on empty input.
+func parseScenarioDurationMap(s string) (map[string]time.Duration, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return nil
+		return nil, nil
 	}
 	result := make(map[string]time.Duration)
-	for _, part := range strings.Split(s, ",") {
+	for _, part := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ';' }) {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
-		idx := strings.Index(part, "=")
-		if idx < 1 {
-			continue
-		}
-		key := strings.TrimSpace(part[:idx])
-		valStr := strings.TrimSpace(part[idx+1:])
-		if key == "" || valStr == "" {
-			continue
+		key, valStr, found := strings.Cut(part, "=")
+		key = strings.TrimSpace(key)
+		valStr = strings.TrimSpace(valStr)
+		if !found || key == "" || valStr == "" {
+			return nil, fmt.Errorf("entry %q must be scenario=duration", part)
 		}
 		d, err := time.ParseDuration(valStr)
-		if err != nil {
-			continue
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("entry %q must use a positive duration such as 24h", part)
 		}
 		result[key] = d
 	}
-	if len(result) == 0 {
-		return nil
-	}
-	return result
-}
-
-// parseZonePairsScenarioMap parses a semicolon-separated "scenario_key=pair1,pair2" list.
-// Example: "ssh-bf=External:22->Internal:22;http-probing=External->Internal:80,443"
-// Returns nil map on empty input.
-func parseZonePairsScenarioMap(s string) map[string][]ZonePair {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return nil
-	}
-	result := make(map[string][]ZonePair)
-	for _, entry := range strings.Split(s, ";") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		idx := strings.Index(entry, "=")
-		if idx < 1 {
-			continue
-		}
-		key := strings.TrimSpace(entry[:idx])
-		pairsStr := strings.TrimSpace(entry[idx+1:])
-		if key == "" || pairsStr == "" {
-			continue
-		}
-		pairList := splitZonePairList(pairsStr)
-		pairs, err := parseZonePairList(pairList)
-		if err != nil {
-			continue
-		}
-		result[key] = pairs
-	}
-	if len(result) == 0 {
-		return nil
-	}
-	return result
+	return result, nil
 }
 
 // rawProvider implements koanf.Provider for a map[string]interface{}.

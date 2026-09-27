@@ -278,34 +278,6 @@ func TestFakeServer_PolicyPutBodyExcludesID(t *testing.T) {
 	}
 }
 
-// TestFakeServer_PolicyOrdering verifies GetPolicyOrdering/SetPolicyOrdering roundtrip.
-func TestFakeServer_PolicyOrdering(t *testing.T) {
-	s := testutil.NewFakeUnifiServer()
-	defer s.Close()
-	s.AddSite("default", "site-uuid-1", "Default")
-	c := newFakeClient(t, s)
-	ctx := context.Background()
-
-	want := controller.PolicyOrdering{
-		BeforeSystemDefined: []string{"pol-1", "pol-2"},
-		AfterSystemDefined:  []string{"pol-3"},
-	}
-	if err := c.SetPolicyOrdering(ctx, "default", "zone-src", "zone-dst", want); err != nil {
-		t.Fatalf("SetPolicyOrdering: %v", err)
-	}
-
-	got, err := c.GetPolicyOrdering(ctx, "default", "zone-src", "zone-dst")
-	if err != nil {
-		t.Fatalf("GetPolicyOrdering: %v", err)
-	}
-	if len(got.BeforeSystemDefined) != 2 || got.BeforeSystemDefined[0] != "pol-1" {
-		t.Errorf("BeforeSystemDefined mismatch: %v", got.BeforeSystemDefined)
-	}
-	if len(got.AfterSystemDefined) != 1 || got.AfterSystemDefined[0] != "pol-3" {
-		t.Errorf("AfterSystemDefined mismatch: %v", got.AfterSystemDefined)
-	}
-}
-
 // TestFakeServer_DiscoverSites verifies DiscoverSites returns pre-populated sites.
 func TestFakeServer_DiscoverSites(t *testing.T) {
 	s := testutil.NewFakeUnifiServer()
@@ -408,10 +380,10 @@ func TestFakeServer_ReauthOn401(t *testing.T) {
 	defer s.Close()
 	c := newFakeClient(t, s)
 
-	// Inject a 401 on the next GET /api/self
-	s.InjectFault(http.MethodGet, "/api/self", http.StatusUnauthorized)
+	// Inject a 401 on the next GET /proxy/network/api/self
+	s.InjectFault(http.MethodGet, "/proxy/network/api/self", http.StatusUnauthorized)
 
-	// Ping calls GET /api/self; the first attempt gets 401, client re-auths,
+	// Ping calls GET /proxy/network/api/self; the first attempt gets 401, client re-auths,
 	// second attempt succeeds (fault consumed).
 	if err := c.Ping(context.Background()); err != nil {
 		t.Fatalf("Ping after re-auth: %v", err)
@@ -424,7 +396,7 @@ func TestFakeServer_RateLimit(t *testing.T) {
 	defer s.Close()
 	c := newFakeClient(t, s)
 
-	s.InjectFault(http.MethodGet, "/api/self", http.StatusTooManyRequests)
+	s.InjectFault(http.MethodGet, "/proxy/network/integration/v1/sites", http.StatusTooManyRequests)
 
 	err := c.Ping(context.Background())
 	if err == nil {
@@ -499,7 +471,7 @@ func TestFakeServer_Reset(t *testing.T) {
 	s.AddZone("site-uuid-1", "zone-1", "External")
 	s.AddTML("site-uuid-1", "tml-1", "IPV4_ADDRESSES", "list-1", nil)
 	s.AddGroup("default", "grp-1", "g1", "address-group", nil)
-	s.InjectFault(http.MethodGet, "/api/self", http.StatusInternalServerError)
+	s.InjectFault(http.MethodGet, "/proxy/network/api/self", http.StatusInternalServerError)
 
 	c := newFakeClient(t, s)
 	// Touch the server so requests are captured.
@@ -542,7 +514,7 @@ func TestFakeServer_RateLimitInject(t *testing.T) {
 	defer s.Close()
 	c := newFakeClient(t, s)
 
-	s.InjectRateLimit(http.MethodGet, "/api/self", 30)
+	s.InjectRateLimit(http.MethodGet, "/proxy/network/integration/v1/sites", 30)
 
 	err := c.Ping(context.Background())
 	if err == nil {
@@ -555,35 +527,6 @@ func TestFakeServer_RateLimitInject(t *testing.T) {
 	want := 30 * time.Second
 	if rl.RetryAfter != want {
 		t.Errorf("RetryAfter = %v, want %v", rl.RetryAfter, want)
-	}
-}
-
-// TestFakeServer_OrderingSetup verifies SetOrdering pre-populates ordering
-// that GetPolicyOrdering returns correctly.
-func TestFakeServer_OrderingSetup(t *testing.T) {
-	s := testutil.NewFakeUnifiServer()
-	defer s.Close()
-	s.AddSite("default", "site-uuid-1", "Default")
-	c := newFakeClient(t, s)
-	ctx := context.Background()
-
-	want := controller.PolicyOrdering{
-		BeforeSystemDefined: []string{"pol-a", "pol-b"},
-		AfterSystemDefined:  []string{"pol-c"},
-	}
-	s.SetOrdering("site-uuid-1", "zone-src", "zone-dst", want)
-
-	got, err := c.GetPolicyOrdering(ctx, "default", "zone-src", "zone-dst")
-	if err != nil {
-		t.Fatalf("GetPolicyOrdering: %v", err)
-	}
-	if len(got.BeforeSystemDefined) != 2 ||
-		got.BeforeSystemDefined[0] != "pol-a" ||
-		got.BeforeSystemDefined[1] != "pol-b" {
-		t.Errorf("BeforeSystemDefined = %v, want %v", got.BeforeSystemDefined, want.BeforeSystemDefined)
-	}
-	if len(got.AfterSystemDefined) != 1 || got.AfterSystemDefined[0] != "pol-c" {
-		t.Errorf("AfterSystemDefined = %v, want %v", got.AfterSystemDefined, want.AfterSystemDefined)
 	}
 }
 
@@ -612,9 +555,8 @@ func TestFakeServer_CSRFTokenRotation(t *testing.T) {
 	}
 }
 
-// TestFakeServer_PolicyWithTrafficFilter verifies that a ZonePolicy created
-// with a TrafficMatchingListID survives a full Create→List round-trip
-// (validates Phase B fakePolicy TrafficFilter preservation).
+// TestFakeServer_PolicyWithTrafficFilter checks that the list endpoint returns
+// the traffic filter saved during policy creation.
 func TestFakeServer_PolicyWithTrafficFilter(t *testing.T) {
 	s := testutil.NewFakeUnifiServer()
 	defer s.Close()

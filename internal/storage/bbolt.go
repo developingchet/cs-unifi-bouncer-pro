@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"os"
@@ -36,7 +37,7 @@ func NewBboltStore(dataDir string, log zerolog.Logger, maxEvents int) (Store, er
 	path := filepath.Join(dataDir, "bouncer.db")
 	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 5 * time.Second})
 	if err != nil {
-		return nil, fmt.Errorf("open bbolt at %s: %w", path, err)
+		return nil, fmt.Errorf("open bbolt at %s (stop the running bouncer before offline commands): %w", path, err)
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
 		for _, name := range []string{bucketBans, bucketGroups, bucketPolicies, bucketEvents} {
@@ -56,8 +57,8 @@ func NewBboltStore(dataDir string, log zerolog.Logger, maxEvents int) (Store, er
 }
 
 // NewBboltStoreReadOnly opens an existing bbolt database in read-only mode.
-// It does not create the file or buckets. Suitable for the status subcommand
-// while the daemon may be running concurrently.
+// It does not create the file or buckets. The running daemon must release its
+// exclusive database lock before an offline status command can open it.
 func NewBboltStoreReadOnly(dataDir string) (Store, error) {
 	path := filepath.Join(dataDir, "bouncer.db")
 	db, err := bolt.Open(path, 0o600, &bolt.Options{
@@ -65,7 +66,7 @@ func NewBboltStoreReadOnly(dataDir string) (Store, error) {
 		Timeout:  3 * time.Second,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("open bbolt (read-only) at %s: %w", path, err)
+		return nil, fmt.Errorf("open bbolt (read-only) at %s (stop the running bouncer before offline status): %w", path, err)
 	}
 	return &bboltStore{db: db, log: zerolog.Nop()}, nil
 }
@@ -87,13 +88,58 @@ func (s *bboltStore) BanRecord(ip string, expiresAt time.Time, ipv6 bool) error 
 		RecordedAt: time.Now().UTC(),
 		ExpiresAt:  expiresAt.UTC(),
 		IPv6:       ipv6,
+		Claims:     map[string]time.Time{"legacy": expiresAt.UTC()},
 	}
+	return s.BanPut(ip, entry)
+}
+
+func (s *bboltStore) BanGet(ip string) (*BanEntry, error) {
+	var entry *BanEntry
+	err := s.db.View(func(tx *bolt.Tx) error {
+		value := tx.Bucket([]byte(bucketBans)).Get([]byte(ip))
+		if value == nil {
+			return nil
+		}
+		var decoded BanEntry
+		if err := msgpack.Unmarshal(value, &decoded); err != nil {
+			return fmt.Errorf("decode ban for %s: %w", ip, err)
+		}
+		entry = &decoded
+		return nil
+	})
+	return entry, err
+}
+
+func (s *bboltStore) BanPut(ip string, entry BanEntry) error {
 	data, err := msgpack.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("marshal BanEntry: %w", err)
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket([]byte(bucketBans)).Put([]byte(ip), data)
+	})
+}
+
+func (s *bboltStore) BanPutMany(entries map[string]BanEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	encoded := make(map[string][]byte, len(entries))
+	for ip, entry := range entries {
+		data, err := msgpack.Marshal(entry)
+		if err != nil {
+			return fmt.Errorf("marshal BanEntry for %s: %w", ip, err)
+		}
+		encoded[ip] = data
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(bucketBans))
+		for ip, data := range encoded {
+			if err := bucket.Put([]byte(ip), data); err != nil {
+				return fmt.Errorf("put ban %s: %w", ip, err)
+			}
+		}
+		return nil
 	})
 }
 
@@ -116,40 +162,6 @@ func (s *bboltStore) BanList() (map[string]BanEntry, error) {
 		})
 	})
 	return result, err
-}
-
-// ---- Janitor ---------------------------------------------------------------
-
-func (s *bboltStore) PruneExpiredBans() (int, error) {
-	now := time.Now().UTC()
-	var pruned int
-	err := s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(bucketBans))
-		var toDelete [][]byte
-		if err := b.ForEach(func(k, v []byte) error {
-			var entry BanEntry
-			if err := msgpack.Unmarshal(v, &entry); err != nil {
-				s.log.Warn().Str("key", string(k)).Err(err).Msg("janitor: skipping corrupt ban entry")
-				return nil
-			}
-			if !entry.ExpiresAt.IsZero() && entry.ExpiresAt.Before(now) {
-				key := make([]byte, len(k))
-				copy(key, k)
-				toDelete = append(toDelete, key)
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-		for _, k := range toDelete {
-			if err := b.Delete(k); err != nil {
-				return err
-			}
-			pruned++
-		}
-		return nil
-	})
-	return pruned, err
 }
 
 // ---- Group cache -----------------------------------------------------------
@@ -175,6 +187,7 @@ func (s *bboltStore) GetGroup(name string) (*GroupRecord, error) {
 }
 
 func (s *bboltStore) SetGroup(name string, rec GroupRecord) error {
+	rec.UpdatedAt = time.Now().UTC()
 	data, err := msgpack.Marshal(rec)
 	if err != nil {
 		return err
@@ -284,23 +297,16 @@ func (s *bboltStore) RecordEvent(e EventEntry) error {
 		if err := b.Put(encodeSeq(seq), data); err != nil {
 			return err
 		}
-		// Count current keys via cursor (Stats().KeyN is stale mid-transaction).
-		n := 0
-		cc := b.Cursor()
-		for k, _ := cc.First(); k != nil; k, _ = cc.Next() {
-			n++
-		}
-		// Prune oldest entries to keep within the ring-buffer cap.
-		if n > s.maxEvents {
-			toDelete := n - s.maxEvents
-			cc2 := b.Cursor()
-			k, _ := cc2.First()
-			for i := 0; i < toDelete && k != nil; i++ {
-				nextK, _ := cc2.Next()
-				if err := b.Delete(k); err != nil {
+		// Sequence keys are ordered, so only entries older than the cap need
+		// inspection. A normal append removes at most one entry. cursor.Delete
+		// keeps the cursor in step; bucket deletes during a walk skip keys.
+		if seq > uint64(s.maxEvents) {
+			cutoff := encodeSeq(seq - uint64(s.maxEvents))
+			cursor := b.Cursor()
+			for key, _ := cursor.First(); key != nil && bytes.Compare(key, cutoff) <= 0; key, _ = cursor.First() {
+				if err := cursor.Delete(); err != nil {
 					return err
 				}
-				k = nextK
 			}
 		}
 		return nil

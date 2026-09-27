@@ -23,7 +23,7 @@ func newTestLegacyManager(ctrl controller.Controller, store storage.Store, namer
 
 func ensuredV4Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
-	sm := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
+	sm := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "legacy")
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
@@ -43,7 +43,7 @@ func ensuredV4Shard(t *testing.T, ctrl controller.Controller, store storage.Stor
 
 func ensuredV6Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
-	sm := NewShardManager(testSite, true, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, nil, false, "legacy")
+	sm := NewShardManager(testSite, true, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "legacy")
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
@@ -104,6 +104,74 @@ func TestLegacyManager_EnsureRules_Idempotent(t *testing.T) {
 	if got := ctrl.Calls("CreateFirewallRule"); got != firstCalls {
 		t.Errorf("second EnsureRules: CreateFirewallRule calls went from %d to %d; want no new calls",
 			firstCalls, ctrl.Calls("CreateFirewallRule"))
+	}
+}
+
+func TestLegacyManager_RepairsSparseShardRuleReference(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	ctrl.SetGroups(testSite, []controller.FirewallGroup{
+		{ID: "group-0", Name: "crowdsec-block-v4-0", GroupMembers: []string{"1.1.1.1"}},
+		{ID: "group-3", Name: "crowdsec-block-v4-3", GroupMembers: []string{"2.2.2.2"}},
+	})
+	ctrl.SetRules(testSite, []controller.FirewallRule{{
+		ID: "rule-3", Name: "crowdsec-drop-v4-3", Enabled: true,
+		RuleIndex: 22003, Action: "drop", Ruleset: "WAN_IN", Description: "test",
+		Protocol: "all", SrcFirewallGroupIDs: []string{"group-0"},
+	}})
+	if err := store.SetPolicy("crowdsec-drop-v4-3", storage.PolicyRecord{UnifiID: "rule-3", Site: testSite, Mode: "legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	v4 := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "legacy")
+	if err := v4.EnsureShards(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lm := newTestLegacyManager(ctrl, store, testNamer(t))
+	if err := lm.EnsureRules(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := ctrl.ListFirewallRules(ctx, testSite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range rules {
+		if rule.Name == "crowdsec-drop-v4-3" {
+			if len(rule.SrcFirewallGroupIDs) != 1 || rule.SrcFirewallGroupIDs[0] != "group-3" {
+				t.Fatalf("sparse shard rule still points at wrong group: %+v", rule)
+			}
+			return
+		}
+	}
+	t.Fatal("missing rule for sparse shard 3")
+}
+
+func TestLegacyManager_AdoptsAndRepairsRuleWithoutCache(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	ctrl.SetGroups(testSite, []controller.FirewallGroup{{
+		ID: "group-3", Name: "crowdsec-block-v4-3", GroupMembers: []string{"2.2.2.2"},
+	}})
+	ctrl.SetRules(testSite, []controller.FirewallRule{{
+		ID: "rule-3", Name: "crowdsec-drop-v4-3", Description: "test",
+		Enabled: true, RuleIndex: 22003, Action: "drop", Ruleset: "WAN_IN",
+		Protocol: "all", SrcFirewallGroupIDs: []string{"old-group"},
+	}})
+	v4 := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "legacy")
+	if err := v4.EnsureShards(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lm := newTestLegacyManager(ctrl, store, testNamer(t))
+	if err := lm.EnsureRules(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := ctrl.ListFirewallRules(ctx, testSite)
+	if err != nil || len(rules) != 1 || len(rules[0].SrcFirewallGroupIDs) != 1 || rules[0].SrcFirewallGroupIDs[0] != "group-3" {
+		t.Fatalf("rule was not repaired: %+v, %v", rules, err)
+	}
+	if ctrl.Calls("CreateFirewallRule") != 0 {
+		t.Fatal("existing rule was recreated")
 	}
 }
 
@@ -332,6 +400,45 @@ func TestLegacyManager_EnsureRules_OrphanedAPIRule_Deleted(t *testing.T) {
 	}
 }
 
+// TestLegacyManager_EnsureRules_OrphanWithoutDescription covers the classic
+// API, which does not store descriptions: an orphan the bouncer cached by ID
+// is swept, but an undescribed rule it has no record of is never deleted, even
+// when its name looks managed.
+func TestLegacyManager_EnsureRules_OrphanWithoutDescription(t *testing.T) {
+	tests := []struct {
+		name       string
+		cached     bool
+		wantDelete bool
+	}{
+		{name: "cached by ID: swept", cached: true, wantDelete: true},
+		{name: "no record: kept", cached: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := testutil.NewMockController()
+			store := newBboltStore(t)
+			v4 := ensuredV4Shard(t, ctrl, store)
+			lm := newTestLegacyManager(ctrl, store, testNamer(t))
+			orphan := controller.FirewallRule{
+				ID: "orphan-rule-id", Name: "crowdsec-drop-v4-9",
+				Ruleset: "WAN_IN", Action: "drop", SrcFirewallGroupIDs: []string{"gone-group"},
+			}
+			ctrl.SetRules(testSite, []controller.FirewallRule{orphan})
+			if tt.cached {
+				if err := setCachedPolicy(store, testSite, orphan.Name, storage.PolicyRecord{UnifiID: orphan.ID, Site: testSite, Mode: "legacy"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := lm.EnsureRules(context.Background(), testSite, v4, nil); err != nil {
+				t.Fatalf("EnsureRules: %v", err)
+			}
+			if got := ctrl.Calls("DeleteFirewallRule") == 1; got != tt.wantDelete {
+				t.Errorf("orphan deleted = %v, want %v", got, tt.wantDelete)
+			}
+		})
+	}
+}
+
 // TestLegacyManager_EnsureRules_UnmanagedAPIRule_Preserved verifies that a
 // pre-existing rule with a different description is left alone by the orphan sweep.
 func TestLegacyManager_EnsureRules_UnmanagedAPIRule_Preserved(t *testing.T) {
@@ -350,7 +457,15 @@ func TestLegacyManager_EnsureRules_UnmanagedAPIRule_Preserved(t *testing.T) {
 		Ruleset:     "WAN_IN",
 		Action:      "drop",
 	}
-	ctrl.SetRules(testSite, []controller.FirewallRule{userRule})
+	otherRule := controller.FirewallRule{
+		ID:                  "unrelated-rule-id",
+		Name:                "unrelated-rule",
+		Description:         "test",
+		Ruleset:             "WAN_IN",
+		Action:              "drop",
+		SrcFirewallGroupIDs: []string{"some-group-id"},
+	}
+	ctrl.SetRules(testSite, []controller.FirewallRule{userRule, otherRule})
 
 	if err := lm.EnsureRules(context.Background(), testSite, v4, nil); err != nil {
 		t.Fatalf("EnsureRules: %v", err)

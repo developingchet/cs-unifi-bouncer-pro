@@ -15,7 +15,7 @@ func setupShards(t *testing.T, sm *ShardManager, shards []*Shard) {
 	t.Helper()
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	family := sm.familyStateLocked(sm.family)
+	family := sm.fam
 	family.Shards = shards
 	// Rebuild ipOwner from the provided shards.
 	clear(family.ipOwner)
@@ -98,7 +98,7 @@ func TestRebalance_TwoHalfFullMerge(t *testing.T) {
 
 	// Verify ipOwner map was updated: all IPs now belong to shard0.
 	sm.mu.RLock()
-	family := sm.families[sm.family]
+	family := sm.fam
 	for ip, owner := range family.ipOwner {
 		if owner != 0 {
 			t.Errorf("ipOwner[%q] = %d; want 0 (all IPs should belong to shard0)", ip, owner)

@@ -1,4 +1,4 @@
-package lapi_metrics
+package lapimetrics
 
 import (
 	"context"
@@ -17,7 +17,7 @@ import (
 // newTestReporter constructs a Reporter for testing, pointing at the given httptest server.
 func newTestReporter(t *testing.T, srv *httptest.Server, interval time.Duration) *Reporter {
 	t.Helper()
-	return NewReporter(srv.URL, "test-key", "1.2.3", interval, zerolog.Nop())
+	return NewReporter(srv.URL, "test-key", "1.2.3", interval, srv.Client(), zerolog.Nop())
 }
 
 // payloadCapture holds a decoded remediation_components entry.
@@ -126,7 +126,7 @@ func TestNewReporter_IntervalClamping(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := NewReporter("http://localhost", "key", "1.0.0", tt.input, zerolog.Nop())
+			r := NewReporter("http://localhost", "key", "1.0.0", tt.input, http.DefaultClient, zerolog.Nop())
 			if r.interval != tt.expected {
 				t.Errorf("got interval %v, want %v", r.interval, tt.expected)
 			}
@@ -406,20 +406,34 @@ func TestPush_APIKeyHeader(t *testing.T) {
 	}
 }
 
-// TestPush_Non2xxLogsWarn verifies non-2xx responses don't return an error, just warn.
-func TestPush_Non2xxLogsWarn(t *testing.T) {
+// TestPush_Non2xxRetriesCounters verifies rejected metrics remain queued.
+func TestPush_Non2xxRetriesCounters(t *testing.T) {
+	var requests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+		requests++
+		if requests == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
 	}))
 	defer srv.Close()
 
 	r := newTestReporter(t, srv, 10*time.Minute)
 	r.RecordBan("CAPI", "ban")
 
-	// Should not return an error
-	err := r.push(context.Background())
-	if err != nil {
-		t.Errorf("push with 500 returned error: %v, want nil", err)
+	if err := r.push(context.Background()); err == nil {
+		t.Fatal("push with 500 must return an error")
+	}
+	if r.blocked[originKey{"CAPI", "ban"}] != 1 || r.processed != 1 {
+		t.Fatalf("rejected metrics were lost: blocked=%v processed=%d", r.blocked, r.processed)
+	}
+	if err := r.push(context.Background()); err != nil {
+		t.Fatalf("retry push failed: %v", err)
+	}
+	if r.blocked[originKey{"CAPI", "ban"}] != 0 || r.processed != 0 {
+		t.Fatalf("delivered metrics were not cleared: blocked=%v processed=%d", r.blocked, r.processed)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
 	}
 }
 

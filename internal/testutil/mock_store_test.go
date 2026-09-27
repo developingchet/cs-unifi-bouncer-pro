@@ -86,44 +86,6 @@ func TestMockStore_BanOperations(t *testing.T) {
 	})
 }
 
-// TestMockStore_PruneExpiredBans verifies janitor behaviour for ban entries.
-func TestMockStore_PruneExpiredBans(t *testing.T) {
-	t.Run("removes expired, keeps live and permanent", func(t *testing.T) {
-		s := testutil.NewMockStore()
-		past := time.Now().Add(-time.Hour)
-		future := time.Now().Add(time.Hour)
-		_ = s.BanRecord("expired", past, false)
-		_ = s.BanRecord("live", future, false)
-		_ = s.BanRecord("permanent", time.Time{}, false) // zero = never expires
-
-		pruned, err := s.PruneExpiredBans()
-		if err != nil {
-			t.Fatalf("PruneExpiredBans: %v", err)
-		}
-		if pruned != 1 {
-			t.Fatalf("expected 1 pruned, got %d", pruned)
-		}
-		bans, _ := s.BanList()
-		if _, ok := bans["expired"]; ok {
-			t.Fatal("expired ban was not removed")
-		}
-		if _, ok := bans["live"]; !ok {
-			t.Fatal("live ban was incorrectly removed")
-		}
-		if _, ok := bans["permanent"]; !ok {
-			t.Fatal("permanent ban was incorrectly removed")
-		}
-	})
-
-	t.Run("empty store returns zero", func(t *testing.T) {
-		s := testutil.NewMockStore()
-		pruned, err := s.PruneExpiredBans()
-		if err != nil || pruned != 0 {
-			t.Fatalf("expected 0, nil; got %d, %v", pruned, err)
-		}
-	})
-}
-
 // TestMockStore_GroupCache covers GetGroup, SetGroup, DeleteGroup, ListGroups.
 func TestMockStore_GroupCache(t *testing.T) {
 	t.Run("get missing returns nil without error", func(t *testing.T) {
@@ -292,10 +254,6 @@ func TestMockStore_ErrorInjection(t *testing.T) {
 		{
 			"BanList",
 			func(s *testutil.MockStore) error { _, err := s.BanList(); return err },
-		},
-		{
-			"PruneExpiredBans",
-			func(s *testutil.MockStore) error { _, err := s.PruneExpiredBans(); return err },
 		},
 		{
 			"GetGroup",

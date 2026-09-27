@@ -28,10 +28,14 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # Allow egress to the UniFi controller (HTTPS).
+    # Allow egress to the UniFi controller: 443 on UniFi OS consoles (UDM,
+    # UCG, Cloud Key Gen2+), 8443 on a self-hosted Network Application.
+    # Remove the port you do not use.
     - ports:
         - protocol: TCP
           port: 443
+        - protocol: TCP
+          port: 8443
     # Allow egress to CrowdSec LAPI (default port 8080).
     - ports:
         - protocol: TCP

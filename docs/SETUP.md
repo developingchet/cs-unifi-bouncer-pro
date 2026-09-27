@@ -66,7 +66,7 @@ For all available configuration options, see [CONFIGURATION.md](CONFIGURATION.md
 ### Step 4: Start
 
 The bouncer needs to reach both your CrowdSec LAPI and your UniFi controller. Ensure that:
-- `CROWDSEC_LAPI_URL` (defaults to `http://crowdsec:8080`) is reachable from inside the bouncer container
+- `CROWDSEC_LAPI_URL` (defaults to `https://crowdsec:8080`) is reachable from inside the bouncer container
 - `UNIFI_URL` is reachable from inside the bouncer container
 
 If CrowdSec is in a separate container, you may need to connect them to the same Docker network, or use an IP address instead of a hostname.
@@ -154,6 +154,7 @@ UNIFI_API_KEY=your-api-key-here        # Preferred over username/password
 
 # Required — CrowdSec LAPI
 CROWDSEC_LAPI_URL=http://crowdsec:8080
+CROWDSEC_LAPI_ALLOW_HTTP=true
 CROWDSEC_LAPI_KEY=<key from step 1>
 
 # Firewall mode — leave as auto unless you need to force a specific mode
@@ -188,6 +189,12 @@ UNIFI_USERNAME=admin
 UNIFI_PASSWORD=yourpassword
 # Leave UNIFI_API_KEY unset or commented out
 ```
+
+Username/password works with legacy firewall rules only. If the site uses the zone-based firewall, startup stops and asks for `UNIFI_API_KEY`; set one, or set `FIREWALL_MODE=legacy`.
+
+#### Self-hosted UniFi Network Application
+
+The bouncer also works with a self-hosted controller (for example the `linuxserver/unifi-network-application` Docker image). Point `UNIFI_URL` at its HTTPS port, usually `https://<host>:8443`. The bouncer detects the controller type on startup and logs `"layout":"standalone"`. Self-hosted controllers use a self-signed certificate by default, so set `UNIFI_CA_CERT` to its certificate, or `UNIFI_VERIFY_TLS=false` on a trusted network.
 
 ### Step 4: Ensure Network Connectivity
 
@@ -226,8 +233,8 @@ The bouncer will:
 1. Load and validate configuration
 2. Open the bbolt database at `/data/bouncer.db`
 3. Connect to the UniFi controller and authenticate
-4. Run a startup reconcile (if `FIREWALL_RECONCILE_ON_START=true`)
-5. Connect to the CrowdSec LAPI stream and begin processing decisions
+4. Connect to the CrowdSec LAPI stream and apply the current decisions
+5. Run a startup reconcile once that first batch is applied (if `FIREWALL_RECONCILE_ON_START=true`)
 
 ### Step 7: Verify Deployment
 
@@ -310,6 +317,7 @@ Both CrowdSec and the bouncer run on the same host using a shared Docker network
 
 ```bash
 CROWDSEC_LAPI_URL=http://crowdsec:8080
+CROWDSEC_LAPI_ALLOW_HTTP=true
 ```
 
 ### TLS-enabled LAPI
@@ -319,6 +327,7 @@ If CrowdSec is configured with TLS:
 ```bash
 CROWDSEC_LAPI_URL=https://crowdsec:8080
 CROWDSEC_LAPI_VERIFY_TLS=true
+CROWDSEC_LAPI_CA_CERT=/etc/ssl/certs/crowdsec-ca.pem # when using a private CA
 ```
 
 ### Self-signed certificates (UniFi)
@@ -337,8 +346,8 @@ UNIFI_VERIFY_TLS=false
 ### Remote CrowdSec instance
 
 ```bash
-CROWDSEC_LAPI_URL=http://192.168.1.10:8080
-CROWDSEC_LAPI_VERIFY_TLS=false   # or set up TLS
+CROWDSEC_LAPI_URL=https://192.168.1.10:8080
+CROWDSEC_LAPI_CA_CERT=/etc/ssl/certs/crowdsec-ca.pem
 ```
 
 ### Multiple UniFi sites
@@ -381,4 +390,4 @@ docker volume rm cs-unifi-bouncer-pro_bouncer-data
 docker exec crowdsec cscli bouncers delete unifi-bouncer
 ```
 
-To clean up UniFi firewall objects created by the bouncer, run a final reconcile with an empty ban set before removing the bouncer, or delete the managed groups/rules manually from the UniFi console.
+To clean up UniFi firewall objects before removal, stop the daemon with `docker compose stop cs-unifi-bouncer-pro`, run `docker compose run --rm --no-deps cs-unifi-bouncer-pro drain --force`, then remove the container and volume.

@@ -11,8 +11,8 @@ body:
     id: version
     attributes:
       label: Version
-      description: Output of `cs-unifi-bouncer version` or the release tag
-      placeholder: "v1.2.3"
+      description: Output of `cs-unifi-bouncer-pro version` or the release tag
+      placeholder: "v1.2.5"
     validations:
       required: true
 

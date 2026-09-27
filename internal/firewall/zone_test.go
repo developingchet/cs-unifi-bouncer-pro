@@ -2,6 +2,7 @@ package firewall
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -18,9 +19,8 @@ func zoneTestNamer(t *testing.T) *Namer {
 	n, err := NewNamer(
 		"crowdsec-block-{{.Family}}-{{.Index}}",
 		"crowdsec-drop-{{.Family}}-{{.Index}}",
-		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}",
-		"test",
-	)
+		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}")
+
 	if err != nil {
 		t.Fatalf("NewNamer: %v", err)
 	}
@@ -35,11 +35,328 @@ func newTestZoneManager(ctrl controller.Controller, store storage.Store, namer *
 	}, namer, ctrl, store, zerolog.Nop())
 }
 
+func TestValidateZoneNetworks(t *testing.T) {
+	pairs := []config.ZonePair{{Src: "External", Dst: "Hotspot"}}
+	for _, tc := range []struct {
+		name  string
+		zones []controller.Zone
+		want  bool
+	}{
+		{"empty destination", []controller.Zone{{Name: "External", NetworkIDs: []string{}}, {Name: "Hotspot", NetworkIDs: []string{}}}, true},
+		{"assigned destination", []controller.Zone{{Name: "External", NetworkIDs: []string{}}, {Name: "Hotspot", NetworkIDs: []string{"network-1"}}}, false},
+		{"membership omitted", []controller.Zone{{Name: "External"}, {Name: "Hotspot"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateZoneNetworks("default", pairs, tc.zones)
+			if (err != nil) != tc.want {
+				t.Fatalf("validateZoneNetworks error = %v, want error %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestZoneManager_RepairsSparseShardPolicy(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	ctrl.SetTMLs(testSite, []controller.TrafficMatchingList{{
+		ID: "tml-3", Name: "crowdsec-block-v4-3", Type: "IPV4_ADDRESSES",
+		Items: []controller.TrafficMatchingListItem{{Type: "IP_ADDRESS", Value: "1.2.3.4"}},
+	}})
+	v4 := NewShardManager(testSite, false, 5, zoneTestNamer(t), ctrl, store, zerolog.Nop(), 0, false, "zone")
+	if err := v4.EnsureShards(ctx); err != nil {
+		t.Fatal(err)
+	}
+	zm := newTestZoneManager(ctrl, store, zoneTestNamer(t))
+	if err := zm.Bootstrap(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(policies) != 1 {
+		t.Fatalf("policies = %+v, %v", policies, err)
+	}
+	if policies[0].Name != "crowdsec-policy-wan-lan-v4-3" || policies[0].TrafficMatchingListIDs[0] != "tml-3" {
+		t.Fatalf("policy targets wrong shard: %+v", policies[0])
+	}
+	ctrl.SetPolicies(testSite, nil) // simulate external deletion
+	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	policies, err = ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(policies) != 1 || policies[0].Name != "crowdsec-policy-wan-lan-v4-3" {
+		t.Fatalf("missing policy not restored: %+v, %v", policies, err)
+	}
+}
+
+func TestZoneManager_KeepsFilterTMLReferencedByAnotherPolicy(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	ctrl.SetTMLs(testSite, []controller.TrafficMatchingList{
+		{ID: "shared", Name: "crowdsec-ports-dst-External-Web", Type: "PORTS"},
+		{ID: "stale", Name: "crowdsec-ports-dst-External-Old", Type: "PORTS"},
+	})
+	ctrl.SetPolicies(testSite, []controller.ZonePolicy{{
+		ID: "other-instance", Name: "staging-policy", Description: "staging",
+		Enabled: true, Action: "BLOCK", DstPortTMLID: "shared",
+	}})
+	zm := newTestZoneManager(ctrl, store, zoneTestNamer(t))
+
+	zm.cleanupOrphanedPortTMLs(ctx, testSite, nil)
+
+	tmls, err := ctrl.ListTrafficMatchingLists(ctx, testSite)
+	if err != nil || len(tmls) != 1 || tmls[0].ID != "shared" {
+		t.Fatalf("remaining TMLs = %+v, %v; want only the referenced list", tmls, err)
+	}
+}
+
+func TestZoneManager_AdoptsAndRepairsPolicyWithoutCache(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	ctrl.SetTMLs(testSite, []controller.TrafficMatchingList{{
+		ID: "tml-3", Name: "crowdsec-block-v4-3", Type: "IPV4_ADDRESSES",
+		Items: []controller.TrafficMatchingListItem{{Type: "IP_ADDRESS", Value: "1.2.3.4"}},
+	}})
+	ctrl.SetPolicies(testSite, []controller.ZonePolicy{{
+		ID: "policy-3", Name: "crowdsec-policy-wan-lan-v4-3", Description: "test",
+		Enabled: true, Action: "BLOCK", TrafficMatchingListIDs: []string{"old-group"},
+	}})
+	v4 := NewShardManager(testSite, false, 5, zoneTestNamer(t), ctrl, store, zerolog.Nop(), 0, false, "zone")
+	if err := v4.EnsureShards(ctx); err != nil {
+		t.Fatal(err)
+	}
+	zm := newTestZoneManager(ctrl, store, zoneTestNamer(t))
+	if err := zm.Bootstrap(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(policies) != 1 || len(policies[0].TrafficMatchingListIDs) != 1 || policies[0].TrafficMatchingListIDs[0] != "tml-3" {
+		t.Fatalf("policy was not repaired: %+v, %v", policies, err)
+	}
+	if ctrl.Calls("CreateZonePolicy") != 0 {
+		t.Fatal("existing policy was recreated")
+	}
+}
+
+func TestZoneManager_ReconcilesConnectionStatesAndLogging(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	zm := NewZoneManager(ZoneConfig{
+		ZonePairs:   []config.ZonePair{{Src: "wan", Dst: "lan"}},
+		Description: "test", ConnectionStates: []string{"NEW", "INVALID"}, LogDrops: true,
+	}, zoneTestNamer(t), ctrl, store, zerolog.Nop())
+	if err := zm.Bootstrap(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(policies) != 1 {
+		t.Fatalf("policies = %+v, %v", policies, err)
+	}
+	policy := policies[0]
+	if !sameConnectionStates(policy.ConnectionStateFilter, []string{"NEW", "INVALID"}) || !policy.LoggingEnabled {
+		t.Fatalf("created policy has wrong states or logging: %+v", policy)
+	}
+	policy.ConnectionStateFilter = nil
+	policy.LoggingEnabled = false
+	ctrl.SetPolicies(testSite, []controller.ZonePolicy{policy})
+	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	policies, err = ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(policies) != 1 || !policies[0].LoggingEnabled || !sameConnectionStates(policies[0].ConnectionStateFilter, []string{"NEW", "INVALID"}) {
+		t.Fatalf("policy settings not repaired: %+v, %v", policies, err)
+	}
+}
+
+func TestZoneManager_ReloadAppliesPairsAndPortFilters(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	zm := newTestZoneManager(ctrl, store, zoneTestNamer(t))
+	if err := zm.Bootstrap(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := zm.Reload(ctx, []string{testSite}, []config.ZonePair{{Src: "wan", Dst: "dmz", DstPorts: []int{443}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(policies) != 1 || policies[0].Name != "crowdsec-policy-wan-dmz-v4-0" || policies[0].DstPortTMLID == "" {
+		t.Fatalf("reload policies = %+v, %v", policies, err)
+	}
+}
+
+func TestZoneManager_ReloadFilterFailurePreservesActivePolicy(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	zm := NewZoneManager(ZoneConfig{
+		ZonePairs:   []config.ZonePair{{Src: "wan", Dst: "lan", DstPorts: []int{80}}},
+		Description: "test",
+	}, zoneTestNamer(t), ctrl, store, zerolog.Nop())
+	if err := zm.Bootstrap(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	before, err := ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(before) != 1 {
+		t.Fatalf("initial policies = %+v, %v", before, err)
+	}
+	oldFilterID := before[0].DstPortTMLID
+	ctrl.SetError("CreateTrafficMatchingList", errors.New("controller unavailable"))
+	if err := zm.Reload(ctx, []string{testSite}, []config.ZonePair{{Src: "wan", Dst: "lan", DstPorts: []int{443}}}); err == nil {
+		t.Fatal("Reload succeeded despite filter creation failure")
+	}
+	if got := zm.cfg.ZonePairs[0].DstPorts[0]; got != 80 {
+		t.Fatalf("active pair changed to port %d", got)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(policies) != 1 || policies[0].DstPortTMLID != oldFilterID {
+		t.Fatalf("active policy changed on failed reload: %+v, %v", policies, err)
+	}
+	tmls, err := ctrl.ListTrafficMatchingLists(ctx, testSite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tml := range tmls {
+		if tml.ID == oldFilterID {
+			if len(tml.Items) != 1 || tml.Items[0].Value != "80" {
+				t.Fatalf("active filter mutated on failed reload: %+v", tml)
+			}
+			return
+		}
+	}
+	t.Fatal("active filter disappeared on failed reload")
+}
+
+func TestZoneManager_ChangedFilterUsesNewListBeforePolicyUpdate(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	zm := NewZoneManager(ZoneConfig{
+		ZonePairs:   []config.ZonePair{{Src: "wan", Dst: "lan", DstPorts: []int{80}}},
+		Description: "test",
+	}, zoneTestNamer(t), ctrl, store, zerolog.Nop())
+	if err := zm.Bootstrap(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	before, err := ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(before) != 1 {
+		t.Fatalf("initial policies = %+v, %v", before, err)
+	}
+	oldFilterID := before[0].DstPortTMLID
+	updatesBefore := ctrl.Calls("UpdateTrafficMatchingList")
+	if err := zm.Reload(ctx, []string{testSite}, []config.ZonePair{{Src: "wan", Dst: "lan", DstPorts: []int{443}}}); err != nil {
+		t.Fatal(err)
+	}
+	// The old policy still refers to the old, unmodified filter until reconciliation.
+	policies, err := ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(policies) != 1 || policies[0].DstPortTMLID != oldFilterID {
+		t.Fatalf("policy changed before reconciliation: %+v, %v", policies, err)
+	}
+	tmls, err := ctrl.ListTrafficMatchingLists(ctx, testSite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldFound, newFound bool
+	for _, tml := range tmls {
+		if tml.ID == oldFilterID {
+			oldFound = len(tml.Items) == 1 && tml.Items[0].Value == "80"
+		} else if len(tml.Items) == 1 && tml.Items[0].Value == "443" {
+			newFound = true
+		}
+	}
+	if !oldFound || !newFound || ctrl.Calls("UpdateTrafficMatchingList") != updatesBefore {
+		t.Fatalf("filters not staged immutably: old=%v new=%v updates=%d", oldFound, newFound, ctrl.Calls("UpdateTrafficMatchingList")-updatesBefore)
+	}
+	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	policies, err = ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(policies) != 1 || policies[0].DstPortTMLID == oldFilterID {
+		t.Fatalf("policy not updated to new filter: %+v, %v", policies, err)
+	}
+}
+
+func TestZoneManager_FilterReplacementRetainsCoverageAndRetries(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	zm := NewZoneManager(ZoneConfig{
+		ZonePairs:   []config.ZonePair{{Src: "wan", Dst: "lan", DstPorts: []int{80}}},
+		Description: "test",
+	}, zoneTestNamer(t), ctrl, store, zerolog.Nop())
+	if err := zm.Bootstrap(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := zm.Reload(ctx, []string{testSite}, []config.ZonePair{{Src: "wan", Dst: "lan", DstPorts: []int{443}}}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl.SetError("DeleteZonePolicy", errors.New("controller unavailable"))
+	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err == nil {
+		t.Fatal("expected policy replacement to report delete failure")
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(policies) != 2 {
+		t.Fatalf("failed replacement should retain old and staged policies: %+v, %v", policies, err)
+	}
+	var oldFilterID, stagedFilterID string
+	for _, p := range policies {
+		if p.Name == "crowdsec-policy-wan-lan-v4-0" && p.DstPortTMLID != "" {
+			oldFilterID = p.DstPortTMLID
+		}
+		if strings.HasPrefix(p.Name, "crowdsec-policy-stage-") {
+			stagedFilterID = p.DstPortTMLID
+		}
+	}
+	if oldFilterID == "" || stagedFilterID == "" || oldFilterID == stagedFilterID {
+		t.Fatalf("replacement did not stage before deleting old policy: %+v", policies)
+	}
+	createsBeforeRetry := ctrl.Calls("CreateZonePolicy")
+	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	policies, err = ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(policies) != 1 || policies[0].Name != "crowdsec-policy-wan-lan-v4-0" ||
+		ctrl.Calls("CreateZonePolicy") != createsBeforeRetry {
+		t.Fatalf("replacement retry did not reuse staged policy: %+v, %v", policies, err)
+	}
+}
+
 // ensuredZoneV4Shard creates and ensures a v4 ShardManager for zone tests.
 func ensuredZoneV4Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
 	namer := zoneTestNamer(t)
-	sm := NewShardManager(testSite, false, 5, namer, ctrl, store, zerolog.Nop(), 0, nil, false, "zone")
+	sm := NewShardManager(testSite, false, 5, namer, ctrl, store, zerolog.Nop(), 0, false, "zone")
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards (v4): %v", err)
 	}
@@ -61,7 +378,7 @@ func ensuredZoneV4Shard(t *testing.T, ctrl controller.Controller, store storage.
 func ensuredZoneV6Shard(t *testing.T, ctrl controller.Controller, store storage.Store) *ShardManager {
 	t.Helper()
 	namer := zoneTestNamer(t)
-	sm := NewShardManager(testSite, true, 5, namer, ctrl, store, zerolog.Nop(), 0, nil, false, "zone")
+	sm := NewShardManager(testSite, true, 5, namer, ctrl, store, zerolog.Nop(), 0, false, "zone")
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards (v6): %v", err)
 	}
@@ -631,6 +948,42 @@ func TestZoneManager_EnsurePolicies_APIOrphan_DeletedWithoutBboltRecord(t *testi
 	}
 }
 
+func TestZoneManager_RemovesCustomNamedOrphanWithoutCache(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	namer, err := NewNamer("group-{{.Family}}-{{.Index}}", "rule-{{.Index}}", "blocked-{{.SrcZone}}-{{.DstZone}}-{{.Index}}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := controller.ZonePolicy{ID: "old-policy", Name: "blocked-wan-dmz-0", Description: "test", Action: "BLOCK"}
+	ctrl.SetPolicies(testSite, []controller.ZonePolicy{policy})
+	zm := newTestZoneManager(ctrl, store, namer)
+	if err := zm.cleanupOrphanedBlockPolicies(context.Background(), testSite, map[string]bool{}, map[string]controller.ZonePolicy{policy.ID: policy}); err != nil {
+		t.Fatal(err)
+	}
+	if ctrl.Calls("DeleteZonePolicy") != 1 {
+		t.Fatal("custom-named orphan was not removed")
+	}
+}
+
+func TestZoneManager_PreservesUntrackedPolicyWithoutStaticPrefix(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	store := newBboltStore(t)
+	namer, err := NewNamer("group-{{.Family}}-{{.Index}}", "rule-{{.Index}}", "{{.SrcZone}}-blocked-{{.Index}}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := controller.ZonePolicy{ID: "manual-policy", Name: "manual-block", Description: "test", Action: "BLOCK"}
+	ctrl.SetPolicies(testSite, []controller.ZonePolicy{policy})
+	zm := newTestZoneManager(ctrl, store, namer)
+	if err := zm.cleanupOrphanedBlockPolicies(context.Background(), testSite, map[string]bool{}, map[string]controller.ZonePolicy{policy.ID: policy}); err != nil {
+		t.Fatal(err)
+	}
+	if ctrl.Calls("DeleteZonePolicy") != 0 {
+		t.Fatal("untracked policy was removed without a static prefix")
+	}
+}
+
 // TestZoneManager_EnsurePolicies_UnmanagedAPIPolicy_Preserved verifies that a
 // policy with a description that does NOT match the managed description is left
 // alone by the API-level orphan sweep.
@@ -655,7 +1008,14 @@ func TestZoneManager_EnsurePolicies_UnmanagedAPIPolicy_Preserved(t *testing.T) {
 		Action:      "BLOCK",
 		Enabled:     true,
 	}
-	ctrl.SetPolicies(testSite, []controller.ZonePolicy{userPolicy})
+	otherPolicy := controller.ZonePolicy{
+		ID:          "unrelated-policy-id",
+		Name:        "unrelated-policy",
+		Description: "test",
+		Action:      "BLOCK",
+		Enabled:     true,
+	}
+	ctrl.SetPolicies(testSite, []controller.ZonePolicy{userPolicy, otherPolicy})
 
 	if err := zm.EnsurePolicies(context.Background(), testSite, v4, nil); err != nil {
 		t.Fatalf("EnsurePolicies: %v", err)

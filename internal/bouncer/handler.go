@@ -2,176 +2,100 @@ package bouncer
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 )
 
-// MetricsRecorder is implemented by the LAPI usage-metrics reporter.
-// A no-op implementation is used when reporting is disabled.
 type MetricsRecorder interface {
 	RecordBan(origin, remediationType string)
 	RecordDeletion()
 }
 
-// SyncJob represents a single ban or unban operation.
 type SyncJob struct {
-	Action          string // "ban" or "delete"
-	IP              string
-	IPv6            bool
-	ExpiresAt       time.Time
-	Origin          string    // CrowdSec decision origin (e.g. "CAPI", "crowdsec")
-	RemediationType string    // CrowdSec remediation type (e.g. "ban")
-	Scenario        string    // CrowdSec scenario name, used for per-scenario zone routing
-	ReceivedAt      time.Time // when this decision passed the filter pipeline; zero = unknown
+	Action           string
+	IP               string
+	IPv6             bool
+	ExpiresAt        time.Time
+	DurationOverride bool
+	Source           string
+	Origin           string
+	RemediationType  string
+	Scenario         string
+	ReceivedAt       time.Time
 }
 
-// JobHandler processes a single SyncJob.
 type JobHandler func(ctx context.Context, job SyncJob) error
 
-// makeJobHandler returns a JobHandler that performs idempotency checks
-// and firewall API calls for each SyncJob.
 func makeJobHandler(
-	ctrl controller.Controller,
 	store storage.Store,
-	fwMgr firewall.Manager,
+	claims *banstate.Manager,
 	cfg *config.Config,
 	recorder MetricsRecorder,
 	log zerolog.Logger,
 ) JobHandler {
 	return func(ctx context.Context, job SyncJob) error {
-		// Step 1: Idempotency check
-		exists, err := store.BanExists(job.IP)
-		if err != nil {
-			return fmt.Errorf("BanExists: %w", err)
+		if job.Action != "ban" && job.Action != "delete" {
+			return fmt.Errorf("unknown decision action %q", job.Action)
 		}
-		if job.Action == "ban" && exists {
-			log.Debug().Str("ip", job.IP).Msg("skipping: already banned")
-			return nil
-		}
-		if job.Action == "delete" && !exists {
-			log.Debug().Str("ip", job.IP).Msg("skipping: not in ban list")
-			return nil
-		}
-
-		// In dry run, skip bbolt state mutations and recorder calls to keep state consistent.
 		if cfg.DryRun {
-			log.Info().Str("action", job.Action).Str("ip", job.IP).Bool("ipv6", job.IPv6).
-				Strs("sites", cfg.UnifiSites).Msg("[DRY-RUN] would persist job to bbolt")
+			log.Info().Str("action", job.Action).Str("ip", job.IP).Msg("[DRY-RUN] would update ban")
 			return nil
 		}
-
-		// Step 2: Persist ban to bbolt BEFORE applying to UniFi.
-		// This order ensures that a crash between the two leaves the IP recorded in bbolt,
-		// so FIREWALL_RECONCILE_ON_START can restore it to UniFi on next startup.
-		// For the delete path the order is reversed: remove from UniFi first so a crash
-		// after the API call but before bbolt cleanup leaves the IP in bbolt (and reconcile
-		// will add it back), which is the safe side.
-		if job.Action == "ban" {
-			// Apply BAN_TTL as a safety cap: permanent or very long bans are capped to cfg.BanTTL.
-			// This ensures no IP stays banned permanently due to a missed delete event or a permanent decision.
-			expiresAt := job.ExpiresAt
-			if expiresAt.IsZero() || time.Until(expiresAt) > cfg.BanTTL {
-				expiresAt = time.Now().Add(cfg.BanTTL)
-			}
-			if err := store.BanRecord(job.IP, expiresAt, job.IPv6); err != nil {
-				return fmt.Errorf("record ban in bbolt: %w", err)
-			}
+		source := job.Source
+		if source == "" {
+			return fmt.Errorf("decision source is required")
 		}
-
-		// Step 3: Apply to all sites — continue on per-site transient errors.
-		// Auth/rate-limit errors abort immediately; all other errors are collected
-		// so that remaining sites still receive the decision.
-
-		// Resolve per-scenario zone pair override (N8).
-		var scenarioZonePairs []config.ZonePair
-		if job.Action == "ban" && job.Scenario != "" {
-			for prefix, pairs := range cfg.ZonePairsScenarioMap {
-				if prefix != "" && strings.Contains(job.Scenario, prefix) {
-					scenarioZonePairs = pairs
-					break
-				}
-			}
-		}
-
-		sites := cfg.UnifiSites
-		var siteErrors []error
-		for _, site := range sites {
-			var applyErr error
-			switch job.Action {
-			case "ban":
-				if len(scenarioZonePairs) > 0 {
-					applyErr = fwMgr.ApplyBanWithZones(ctx, site, job.IP, job.IPv6, scenarioZonePairs)
-				} else {
-					applyErr = fwMgr.ApplyBan(ctx, site, job.IP, job.IPv6)
-				}
-			case "delete":
-				applyErr = fwMgr.ApplyUnban(ctx, site, job.IP, job.IPv6)
-			}
-
-			if applyErr != nil {
-				var unauth *controller.ErrUnauthorized
-				var rateLimit *controller.ErrRateLimit
-				if errors.As(applyErr, &unauth) || errors.As(applyErr, &rateLimit) {
-					return applyErr
-				}
-				log.Warn().Err(applyErr).Str("site", site).Str("action", job.Action).
-					Str("ip", job.IP).Msg("apply failed for site — continuing to remaining sites")
-				siteErrors = append(siteErrors, fmt.Errorf("site %s: %w", site, applyErr))
-			}
-		}
-		if len(siteErrors) > 0 {
-			return errors.Join(siteErrors...)
-		}
-
-		// Step 4: Finalize bbolt state and record LAPI metrics.
 		switch job.Action {
 		case "ban":
-			// Observe decision-to-block latency for successfully applied bans.
+			expiry := job.ExpiresAt
+			if expiry.IsZero() || (!job.DurationOverride && time.Until(expiry) > cfg.BanTTL) {
+				expiry = time.Now().Add(cfg.BanTTL)
+			}
+			applied, err := claims.Claim(ctx, job.IP, job.IPv6, source, expiry)
+			if err != nil {
+				return fmt.Errorf("apply ban: %w", err)
+			}
+			if !applied {
+				return nil
+			}
 			if !job.ReceivedAt.IsZero() {
 				metrics.DecisionLatency.Observe(time.Since(job.ReceivedAt).Seconds())
 			}
 			recorder.RecordBan(job.Origin, job.RemediationType)
 			if err := store.RecordEvent(storage.EventEntry{
-				Action:     "ban",
-				Origin:     job.Origin,
-				Scenario:   job.Scenario,
-				IP:         job.IP,
-				RecordedAt: time.Now(),
+				Action: "ban", Origin: job.Origin, Scenario: job.Scenario,
+				IP: job.IP, RecordedAt: time.Now(),
 			}); err != nil {
 				log.Warn().Err(err).Str("ip", job.IP).Msg("failed to record ban event")
 			}
 		case "delete":
-			if err := store.BanDelete(job.IP); err != nil {
-				log.Warn().Err(err).Str("ip", job.IP).Msg("failed to delete ban from bbolt")
+			removed, err := claims.Release(ctx, job.IP, source)
+			if err != nil {
+				return fmt.Errorf("apply unban: %w", err)
+			}
+			if !removed {
+				return nil
 			}
 			recorder.RecordDeletion()
 			if err := store.RecordEvent(storage.EventEntry{
-				Action:     "unban",
-				IP:         job.IP,
-				RecordedAt: time.Now(),
+				Action: "unban", IP: job.IP, RecordedAt: time.Now(),
 			}); err != nil {
 				log.Warn().Err(err).Str("ip", job.IP).Msg("failed to record unban event")
 			}
 		}
-
-		log.Debug().Str("action", job.Action).Str("ip", job.IP).Bool("ipv6", job.IPv6).
-			Strs("sites", cfg.UnifiSites).Msg("job applied")
+		log.Debug().Str("action", job.Action).Str("ip", job.IP).Strs("sites", cfg.UnifiSites).Msg("job applied")
 		return nil
 	}
 }
 
-// metricsHandler returns the Prometheus HTTP handler.
 func metricsHandler() http.Handler {
 	return promhttp.Handler()
 }

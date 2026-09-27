@@ -8,9 +8,8 @@ func TestDefaultTemplates(t *testing.T) {
 	n, err := NewNamer(
 		"crowdsec-block-{{.Family}}-{{.Index}}",
 		"crowdsec-drop-{{.Family}}-{{.Index}}",
-		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}",
-		"Managed by cs-unifi-bouncer-pro.",
-	)
+		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}")
+
 	if err != nil {
 		t.Fatalf("NewNamer: %v", err)
 	}
@@ -39,9 +38,8 @@ func TestRuleNameTemplate(t *testing.T) {
 	n, err := NewNamer(
 		"crowdsec-block-{{.Family}}-{{.Index}}",
 		"crowdsec-drop-{{.Family}}-{{.Index}}",
-		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}",
-		"desc",
-	)
+		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}")
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,9 +58,8 @@ func TestPolicyNameTemplate(t *testing.T) {
 	n, err := NewNamer(
 		"crowdsec-block-{{.Family}}-{{.Index}}",
 		"crowdsec-drop-{{.Family}}-{{.Index}}",
-		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}",
-		"desc",
-	)
+		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}")
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,9 +79,8 @@ func TestCustomTemplate(t *testing.T) {
 	n, err := NewNamer(
 		"prod-block-{{.Family}}-{{.Index}}",
 		"prod-drop-{{.Family}}-{{.Index}}",
-		"prod-policy-{{.Family}}-{{.Index}}",
-		"Custom desc",
-	)
+		"prod-policy-{{.Family}}-{{.Index}}")
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,22 +99,10 @@ func TestInvalidTemplateReturnsError(t *testing.T) {
 	_, err := NewNamer(
 		"{{.Invalid unclosed",
 		"crowdsec-drop-{{.Family}}-{{.Index}}",
-		"crowdsec-policy-{{.Family}}-{{.Index}}",
-		"desc",
-	)
+		"crowdsec-policy-{{.Family}}-{{.Index}}")
+
 	if err == nil {
 		t.Error("expected error for invalid template")
-	}
-}
-
-func TestDescriptionReturned(t *testing.T) {
-	desc := "My custom description"
-	n, err := NewNamer("g-{{.Family}}", "r-{{.Family}}", "p-{{.Family}}", desc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n.Description() != desc {
-		t.Errorf("Description: got %q, want %q", n.Description(), desc)
 	}
 }
 
@@ -135,9 +119,8 @@ func TestSiteVariable(t *testing.T) {
 	n, err := NewNamer(
 		"{{.Site}}-block-{{.Family}}-{{.Index}}",
 		"{{.Site}}-drop-{{.Family}}-{{.Index}}",
-		"{{.Site}}-policy-{{.Family}}-{{.Index}}",
-		"desc",
-	)
+		"{{.Site}}-policy-{{.Family}}-{{.Index}}")
+
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -339,8 +339,8 @@ func TestListZonePolicies(t *testing.T) {
 					},
 				},
 			},
-			Destination:     apiV1PolicyDst{ZoneID: testZoneInternal},
-			IPProtocolScope: apiV1IPScope{IPVersion: "IPV4"},
+			Destination:           apiV1PolicyDst{ZoneID: testZoneInternal},
+			IPProtocolScope:       apiV1IPScope{IPVersion: "IPV4"},
 			ConnectionStateFilter: []string{"NEW", "INVALID"},
 		},
 	)
@@ -903,83 +903,6 @@ func TestDeleteTML(t *testing.T) {
 	}
 }
 
-func TestGetPolicyOrdering(t *testing.T) {
-	const siteID = testSiteUUID
-	const srcZone = testZoneExternal
-	const dstZone = testZoneInternal
-	expectedPath := fmt.Sprintf("/proxy/network/integration/v1/sites/%s/firewall/policies/ordering", siteID)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != expectedPath {
-			http.Error(w, fmt.Sprintf("unexpected %s %s", r.Method, r.URL.Path), http.StatusBadRequest)
-			return
-		}
-		// Verify zone query params are present.
-		if got := r.URL.Query().Get("sourceFirewallZoneId"); got != srcZone {
-			t.Errorf("sourceFirewallZoneId = %q, want %q", got, srcZone)
-		}
-		if got := r.URL.Query().Get("destinationFirewallZoneId"); got != dstZone {
-			t.Errorf("destinationFirewallZoneId = %q, want %q", got, dstZone)
-		}
-		resp := apiOrderingBody{
-			OrderedFirewallPolicyIDs: apiOrderedPolicyIDs{
-				BeforeSystemDefined: []string{"pol-1"},
-				AfterSystemDefined:  []string{"pol-2"},
-			},
-		}
-		b, _ := json.Marshal(resp)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(b)
-	}))
-	defer srv.Close()
-
-	c := newTestClient(srv.URL, "api-key")
-	got, err := getPolicyOrderingV1(context.Background(), c, siteID, srcZone, dstZone)
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
-	if len(got.BeforeSystemDefined) != 1 || got.BeforeSystemDefined[0] != "pol-1" {
-		t.Errorf("BeforeSystemDefined = %v, want [pol-1]", got.BeforeSystemDefined)
-	}
-}
-
-func TestSetPolicyOrdering(t *testing.T) {
-	const siteID = testSiteUUID
-	const srcZone = testZoneExternal
-	const dstZone = testZoneInternal
-	expectedPath := fmt.Sprintf("/proxy/network/integration/v1/sites/%s/firewall/policies/ordering", siteID)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut || r.URL.Path != expectedPath {
-			http.Error(w, fmt.Sprintf("unexpected %s %s", r.Method, r.URL.Path), http.StatusBadRequest)
-			return
-		}
-		if got := r.URL.Query().Get("sourceFirewallZoneId"); got != srcZone {
-			t.Errorf("sourceFirewallZoneId = %q, want %q", got, srcZone)
-		}
-		if got := r.URL.Query().Get("destinationFirewallZoneId"); got != dstZone {
-			t.Errorf("destinationFirewallZoneId = %q, want %q", got, dstZone)
-		}
-		var body apiOrderingBody
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "bad body", http.StatusBadRequest)
-			return
-		}
-		if len(body.OrderedFirewallPolicyIDs.BeforeSystemDefined) != 2 {
-			t.Errorf("BeforeSystemDefined: got %v, want 2 items", body.OrderedFirewallPolicyIDs.BeforeSystemDefined)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	c := newTestClient(srv.URL, "api-key")
-	ordering := PolicyOrdering{BeforeSystemDefined: []string{"pol-1", "pol-2"}}
-	if err := setPolicyOrderingV1(context.Background(), c, siteID, srcZone, dstZone, ordering); err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
-}
-
 func TestDiscoverSites(t *testing.T) {
 	expectedPath := "/proxy/network/integration/v1/sites"
 
@@ -1015,7 +938,7 @@ func TestDiscoverZones(t *testing.T) {
 
 	respBody := makeV1Page(
 		apiFirewallZoneV1{ID: testZoneExternal, Name: "WAN"},
-		apiFirewallZoneV1{ID: testZoneInternal, Name: "LAN"},
+		apiFirewallZoneV1{ID: testZoneInternal, Name: "LAN", NetworkIDs: []string{"network-1"}},
 	)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1039,6 +962,9 @@ func TestDiscoverZones(t *testing.T) {
 	}
 	if zones[0].ID != testZoneExternal {
 		t.Errorf("zones[0].ID = %q, want %q", zones[0].ID, testZoneExternal)
+	}
+	if len(zones[1].NetworkIDs) != 1 || zones[1].NetworkIDs[0] != "network-1" {
+		t.Fatalf("LAN network IDs = %v", zones[1].NetworkIDs)
 	}
 }
 
@@ -1108,6 +1034,49 @@ func TestListZonePolicies_Pagination(t *testing.T) {
 	}
 	if len(policies) != 5 {
 		t.Errorf("expected 5 policies via pagination, got %d", len(policies))
+	}
+}
+
+func TestListAllV1PagesRejectsMissingCount(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{}],"count":0,"totalCount":2}`))
+	}))
+	defer srv.Close()
+
+	_, err := listAllV1Pages(context.Background(), newTestClient(srv.URL, "key"), srv.URL+"/pages", "test-pages")
+	if err == nil || !strings.Contains(err.Error(), "pagination") {
+		t.Fatalf("missing count: got %v, want pagination error", err)
+	}
+	if requests != 1 {
+		t.Errorf("requests: got %d, want 1", requests)
+	}
+}
+
+func TestLegacyEnvelopeError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"meta":{"rc":"error","msg":"validation failed"},"data":[]}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(srv.URL, "key")
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{name: "GET", call: func() error { _, err := doGET(context.Background(), c, srv.URL, "test"); return err }},
+		{name: "POST", call: func() error {
+			_, err := doPOST(context.Background(), c, srv.URL, "test", map[string]string{"key": "value"})
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.call(); err == nil || !strings.Contains(err.Error(), "validation failed") {
+				t.Fatalf("call error = %v, want legacy envelope error", err)
+			}
+		})
 	}
 }
 

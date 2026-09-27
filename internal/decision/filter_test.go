@@ -21,6 +21,24 @@ func makeDecision(action, scope, value, scenario, origin, duration string) *mode
 	}
 }
 
+func TestFilterMissingRequiredFields(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		decision *models.Decision
+	}{
+		{name: "nil decision"},
+		{name: "missing type", decision: &models.Decision{Scope: strPtr("ip"), Value: strPtr("1.2.3.4")}},
+		{name: "missing scope", decision: &models.Decision{Type: strPtr("ban"), Value: strPtr("1.2.3.4")}},
+		{name: "missing value", decision: &models.Decision{Type: strPtr("ban"), Scope: strPtr("ip")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if Filter(tc.decision, NewFilterConfig(), zerolog.Nop()).Passed {
+				t.Fatal("incomplete decision passed the filter")
+			}
+		})
+	}
+}
+
 func TestStage1_UnsupportedAction(t *testing.T) {
 	cfg := NewFilterConfig()
 	d := makeDecision("captcha", "ip", "1.2.3.4", "test", "crowdsec", "24h")
@@ -178,6 +196,41 @@ func TestStage8_DeleteIgnoresMinDuration(t *testing.T) {
 	}
 }
 
+// A deletion must reach the handler even when the ban filters would now
+// reject its decision: otherwise a ban applied before BLOCK_SCENARIO_EXCLUDE,
+// CROWDSEC_ORIGINS or BLOCK_WHITELIST changed is never released.
+func TestFilter_DeletePassesBanOnlyStages(t *testing.T) {
+	wl, err := ParseWhitelist([]string{"203.0.113.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name  string
+		cfg   func(*FilterConfig)
+		value string
+	}{
+		{"excluded scenario", func(c *FilterConfig) { c.BlockScenarioExclude = []string{"ssh"} }, "198.51.100.1"},
+		{"origin not allowed", func(c *FilterConfig) { c.AllowedOrigins = []string{"lists"} }, "198.51.100.1"},
+		{"whitelisted", func(c *FilterConfig) { c.Whitelist = wl }, "203.0.113.5"},
+		{"private", func(*FilterConfig) {}, "10.1.2.3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := NewFilterConfig()
+			tt.cfg(&cfg)
+			// The stream reports a deleted ban with its original type.
+			d := makeDecision("ban", "ip", tt.value, "ssh-bf", "cscli", "4h")
+			if Filter(d, cfg, zerolog.Nop()).Passed {
+				t.Fatal("precondition: the ban should be filtered")
+			}
+			r := FilterDeleted(d, cfg, zerolog.Nop())
+			if !r.Passed || r.Action != "delete" || r.Value != tt.value {
+				t.Fatalf("delete filtered: %+v", r)
+			}
+		})
+	}
+}
+
 func TestCIDRDecision(t *testing.T) {
 	cfg := NewFilterConfig()
 	d := makeDecision("ban", "range", "203.0.113.0/24", "ssh-bf", "crowdsec", "24h")
@@ -187,6 +240,29 @@ func TestCIDRDecision(t *testing.T) {
 	}
 	if r.Value != "203.0.113.0/24" {
 		t.Errorf("CIDR value: got %q", r.Value)
+	}
+}
+
+func TestFilter_RejectsOverlyBroadRanges(t *testing.T) {
+	tests := []struct {
+		value string
+		pass  bool
+	}{
+		{"32.0.0.0/3", false},
+		{"45.0.0.0/7", false},
+		{"45.0.0.0/8", true},
+		{"2000::/3", false},
+		{"2a00::/31", false},
+		{"2a00:1450::/32", true},
+		{"203.0.113.9", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			d := makeDecision("ban", "range", tt.value, "ssh-bf", "crowdsec", "24h")
+			if got := Filter(d, NewFilterConfig(), zerolog.Nop()).Passed; got != tt.pass {
+				t.Fatalf("Passed = %v, want %v", got, tt.pass)
+			}
+		})
 	}
 }
 
@@ -263,6 +339,20 @@ func TestFilter_ScenarioDurationOverride(t *testing.T) {
 			scenario:    "ssh-bf",
 			duration:    "3h",
 			overrideMap: nil,
+			wantDur:     3 * time.Hour,
+		},
+		{
+			name:        "longest key wins",
+			scenario:    "crowdsecurity/ssh-bf",
+			duration:    "1h",
+			overrideMap: map[string]time.Duration{"ssh": 2 * time.Hour, "ssh-bf": 5 * time.Hour},
+			wantDur:     5 * time.Hour,
+		},
+		{
+			name:        "equal-length keys resolve lexically",
+			scenario:    "foobar",
+			duration:    "1h",
+			overrideMap: map[string]time.Duration{"foo": 2 * time.Hour, "bar": 3 * time.Hour},
 			wantDur:     3 * time.Hour,
 		},
 	}

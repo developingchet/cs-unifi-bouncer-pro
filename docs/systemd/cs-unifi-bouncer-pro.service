@@ -12,7 +12,7 @@ Restart=on-failure
 RestartSec=5s
 
 # Load secrets and configuration from an environment file.
-# Copy docs/bouncer.env.example to /etc/cs-unifi-bouncer-pro/bouncer.env and fill in values.
+# Copy .env.example from the repository root to /etc/cs-unifi-bouncer-pro/bouncer.env and fill in values.
 EnvironmentFile=/etc/cs-unifi-bouncer-pro/bouncer.env
 
 # Persistent state directory — bbolt database is stored here.
