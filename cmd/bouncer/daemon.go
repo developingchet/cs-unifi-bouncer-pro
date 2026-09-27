@@ -88,7 +88,7 @@ func runDaemon() error {
 		return fmt.Errorf("ensure infrastructure: %w", err)
 	}
 	go watchSIGHUP(ctx, notifySIGHUP(), cfg, fwMgr, log)
-	cfManager := startCloudflareWhitelist(ctx, cfg, ctrl, cfPairs, log)
+	cfManager := startCloudflareWhitelist(ctx, cfg, ctrl, fwMgr.ZoneManager(), cfPairs, log)
 
 	recorder, recorderDone, err := newMetricsRecorder(ctx, cfg, log)
 	if err != nil {

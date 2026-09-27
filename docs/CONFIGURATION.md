@@ -266,7 +266,7 @@ IPv4 and IPv6 destination IPs are split into separate Traffic Matching Lists (`c
 
 ## Cloudflare Whitelist
 
-When enabled, the bouncer periodically fetches current Cloudflare IP ranges and maintains ALLOW policies in UniFi so that Cloudflare traffic is never blocked by the CrowdSec block policies. ALLOW policies are created at startup (before block shard policies are created), ensuring they receive lower policy indices and are evaluated first.
+When enabled, the bouncer periodically fetches current Cloudflare IP ranges and maintains ALLOW policies in UniFi so that Cloudflare traffic is never blocked by the CrowdSec block policies. UniFi evaluates the bouncer's policies in creation order. When an ALLOW policy is created after the block policies of its zone pair already exist, the bouncer recreates those block policies so the ALLOW is evaluated first; the block copy is staged before the old one is deleted, so blocking never lapses.
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|

@@ -164,7 +164,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | Enable Cloudflare IP whitelist sync. When `true`, ALLOW policies are created for all current Cloudflare IP ranges before block policies take effect. |
+| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | Enable Cloudflare IP whitelist sync. When `true`, ALLOW policies for all current Cloudflare IP ranges are kept ahead of the block policies of each pair. |
 | `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | How often to re-fetch Cloudflare IP ranges and update the Traffic Matching Lists (default: weekly). |
 | `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | Source URL for Cloudflare IPv4 ranges. |
 | `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | Source URL for Cloudflare IPv6 ranges. |
@@ -295,9 +295,9 @@ ZONE_PAIRS=External->Internal:80,443;External->DMZ@10.0.0.5,10.0.0.6
 
 UniFi zone firewall evaluates policies in ascending index order — lower index means the policy is evaluated first, and the first match wins. The bouncer creates all zone policies via the UniFi integration v1 API. Policies created through this API are classified as `SYSTEM_DEFINED` origin by UniFi and cannot be reordered via the ordering endpoint — the API returns `non-user-defined-policy-ordering-forbidden`.
 
-Correct evaluation order (allow before block) is therefore established entirely by creation sequence. Block shard policies are created lazily: a new zone policy is only provisioned when a shard becomes active with IPs to block, via an activation callback triggered on the first ban that fills the shard. The Cloudflare whitelist ALLOW policies are created during startup (by the whitelist sync step) before the bouncer loop begins processing CrowdSec decisions. On a fresh deployment, this means ALLOW policies are assigned lower indices and are therefore evaluated before any block shard policy.
+Correct evaluation order (allow before block) is therefore established entirely by creation sequence. A Cloudflare ALLOW policy created for a zone pair whose block policies already exist (the whitelist enabled on a running deployment, a pair added, or an ALLOW recreated after its filters changed) lands behind them. After each whitelist sync the bouncer compares the controller's policy indices; a block policy it manages that precedes an ALLOW of the same pair and family is recreated, which moves it behind the ALLOW. The copy is staged first, so the shard stays blocked throughout. A block policy the bouncer does not manage is only reported.
 
-After a `drain` + redeploy, Cloudflare ALLOW policies are created before block shard policies. Each whitelist sync checks the controller's policy indices and reports a conflicting BLOCK policy. Other existing ALLOW policies may still be evaluated first and bypass a CrowdSec block. Check policy order in UniFi for each zone pair, especially after changing pairs or recreating policies; the bouncer cannot pin its system-defined policies through the ordering API.
+Other existing ALLOW policies may still be evaluated first and bypass a CrowdSec block. Check policy order in UniFi for each zone pair; the bouncer cannot pin its system-defined policies through the ordering API.
 
 ---
 

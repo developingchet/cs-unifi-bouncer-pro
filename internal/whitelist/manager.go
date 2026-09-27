@@ -25,12 +25,26 @@ type Manager struct {
 	ctrl     controller.Controller
 	sites    []string
 	provider *CloudflareProvider
+	blocks   BlockRecreator
 	log      zerolog.Logger
+}
+
+// BlockRecreator recreates block policies by ID, so the controller evaluates
+// them after policies created before the call.
+type BlockRecreator interface {
+	RecreatePolicies(ctx context.Context, site string, ids []string) error
 }
 
 // NewManager creates a whitelist Manager.
 func NewManager(ctrl controller.Controller, sites []string, provider *CloudflareProvider, log zerolog.Logger) *Manager {
 	return &Manager{ctrl: ctrl, sites: sites, provider: provider, log: log}
+}
+
+// SetBlockRecreator lets the manager recreate block policies that the
+// controller evaluates before a Cloudflare allow. Without one, such an order
+// is only reported.
+func (m *Manager) SetBlockRecreator(r BlockRecreator) {
+	m.blocks = r
 }
 
 // ZonePairConfig holds zone IDs for a source/destination pair, with optional port and IP filters.
@@ -414,22 +428,63 @@ func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZoneP
 	return created, nil
 }
 
-// checkWhitelistOrder detects a block that would take precedence over a
-// Cloudflare allow. Integration-created policies cannot be moved with the
-// user-defined policy ordering endpoint.
+// checkWhitelistOrder makes sure no block takes precedence over a Cloudflare
+// allow. Integration-created policies cannot be moved with the user-defined
+// policy ordering endpoint, and the controller evaluates them in creation
+// order, so an allow added to a pair whose blocks already exist lands behind
+// them. Those blocks are recreated, which moves them behind the allow, and the
+// order is checked again.
 func (m *Manager) checkWhitelistOrder(ctx context.Context, site string, pair ZonePairConfig, policyIDs []string) error {
+	wrong, err := m.blocksAheadOfAllow(ctx, site, pair, policyIDs)
+	if err != nil || len(wrong) == 0 || m.blocks == nil {
+		return orderError(site, wrong, err)
+	}
+	ids := make([]string, 0, len(wrong))
+	seen := make(map[string]bool, len(wrong))
+	for _, w := range wrong {
+		if !seen[w.block.ID] {
+			seen[w.block.ID] = true
+			ids = append(ids, w.block.ID)
+		}
+	}
+	m.log.Info().Int("blocks", len(ids)).Str("site", site).Str("pair", pair.SrcName+"->"+pair.DstName).
+		Msg("block policies precede the Cloudflare allow; recreating them")
+	if err := m.blocks.RecreatePolicies(ctx, site, ids); err != nil {
+		m.log.Warn().Err(err).Str("site", site).Msg("could not recreate every block policy that precedes the Cloudflare allow")
+	}
+	wrong, err = m.blocksAheadOfAllow(ctx, site, pair, policyIDs)
+	return orderError(site, wrong, err)
+}
+
+// misorderedBlock is a block policy the controller evaluates before an allow.
+type misorderedBlock struct {
+	allow, block controller.ZonePolicy
+}
+
+func orderError(site string, wrong []misorderedBlock, err error) error {
+	if err != nil || len(wrong) == 0 {
+		return err
+	}
+	w := wrong[0]
+	return fmt.Errorf("cloudflare allow policy %s follows block %s in site %s; recreate the block after the allow policy", w.allow.Name, w.block.Name, site)
+}
+
+// blocksAheadOfAllow lists the enabled blocks of pair's zones and address
+// family that the controller evaluates before one of the allows in policyIDs.
+func (m *Manager) blocksAheadOfAllow(ctx context.Context, site string, pair ZonePairConfig, policyIDs []string) ([]misorderedBlock, error) {
 	policies, err := m.ctrl.ListZonePolicies(ctx, site)
 	if err != nil {
-		return fmt.Errorf("list policies to verify Cloudflare order in site %s: %w", site, err)
+		return nil, fmt.Errorf("list policies to verify Cloudflare order in site %s: %w", site, err)
 	}
 	byID := make(map[string]controller.ZonePolicy, len(policies))
 	for _, p := range policies {
 		byID[p.ID] = p
 	}
+	var wrong []misorderedBlock
 	for _, id := range policyIDs {
 		allow, found := byID[id]
 		if !found {
-			return fmt.Errorf("cloudflare allow policy %s missing from site %s after sync", id, site)
+			return nil, fmt.Errorf("cloudflare allow policy %s missing from site %s after sync", id, site)
 		}
 		for _, p := range policies {
 			if !p.Enabled || p.Action != "BLOCK" || p.SrcZone != pair.SrcZoneID || p.DstZone != pair.DstZoneID {
@@ -446,11 +501,11 @@ func (m *Manager) checkWhitelistOrder(ctx context.Context, site string, pair Zon
 				continue
 			}
 			if *p.Index <= *allow.Index {
-				return fmt.Errorf("cloudflare allow policy %s follows block %s in site %s; recreate the block after the allow policy", allow.Name, p.Name, site)
+				wrong = append(wrong, misorderedBlock{allow: allow, block: p})
 			}
 		}
 	}
-	return nil
+	return wrong, nil
 }
 
 // Drain removes all Cloudflare whitelist policies and TMLs from all managed

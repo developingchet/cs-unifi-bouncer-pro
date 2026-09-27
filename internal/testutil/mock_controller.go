@@ -20,6 +20,9 @@ type MockController struct {
 	zones    map[string][]controller.Zone
 	tmls     map[string][]controller.TrafficMatchingList
 
+	// orderPolicies assigns creation-order indices to new zone policies.
+	orderPolicies bool
+
 	// Preset site ID mappings: internalReference -> UUID
 	siteIDs map[string]string
 
@@ -283,8 +286,26 @@ func (m *MockController) CreateZonePolicy(ctx context.Context, site string, p co
 		return controller.ZonePolicy{}, err
 	}
 	p.ID = m.newID()
+	if m.orderPolicies {
+		next := 0
+		for _, existing := range m.policies[site] {
+			if existing.Index != nil && *existing.Index >= next {
+				next = *existing.Index + 1
+			}
+		}
+		p.Index = &next
+	}
 	m.policies[site] = append(m.policies[site], p)
 	return p, nil
+}
+
+// OrderPoliciesOnCreate makes CreateZonePolicy give each new policy an index
+// after every existing one, as the controller orders integration-created
+// policies by creation.
+func (m *MockController) OrderPoliciesOnCreate() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.orderPolicies = true
 }
 
 func (m *MockController) UpdateZonePolicy(ctx context.Context, site string, p controller.ZonePolicy) error {

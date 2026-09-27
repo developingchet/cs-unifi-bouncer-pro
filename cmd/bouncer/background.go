@@ -156,7 +156,7 @@ func cloudflarePairs(cfg *config.Config) ([]whitelist.ZonePairConfig, error) {
 // is off, objects left by an earlier run are drained; they can only exist if
 // an API key created them.
 func startCloudflareWhitelist(ctx context.Context, cfg *config.Config, ctrl controller.Controller,
-	pairs []whitelist.ZonePairConfig, log zerolog.Logger,
+	zm *firewall.ZoneManager, pairs []whitelist.ZonePairConfig, log zerolog.Logger,
 ) *whitelist.Manager {
 	if cfg.DryRun {
 		return nil
@@ -171,6 +171,9 @@ func startCloudflareWhitelist(ctx context.Context, cfg *config.Config, ctrl cont
 	}
 	provider := whitelist.NewCloudflareProvider(cfg.CloudflareIPv4URL, cfg.CloudflareIPv6URL)
 	mgr := whitelist.NewManager(ctrl, cfg.UnifiSites, provider, log)
+	if zm != nil {
+		mgr.SetBlockRecreator(zm)
+	}
 	if err := mgr.Sync(ctx, pairs); err != nil {
 		log.Error().Err(err).
 			Msg("initial Cloudflare whitelist sync FAILED — Cloudflare IPs will NOT be whitelisted until next tick; false positives possible")
