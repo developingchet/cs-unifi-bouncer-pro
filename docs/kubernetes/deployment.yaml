@@ -28,7 +28,7 @@ spec:
         - name: cs-unifi-bouncer-pro
           # Pin to a specific release tag. Using 'latest' is not recommended in production
           # as it makes rollbacks and auditing difficult.
-          image: developingchet/cs-unifi-bouncer-pro:1.2.5
+          image: developingchet/cs-unifi-bouncer-pro:2.0.0
           args: ["run"]
           env:
             - name: DATA_DIR

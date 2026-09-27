@@ -40,6 +40,8 @@ Automatically translates CrowdSec ban decisions into UniFi firewall rules — bl
 
 ---
 
+> **Upgrading from 1.x?** 2.0 changes several defaults and rejects settings 1.x accepted. Read [docs/UPGRADING.md](docs/UPGRADING.md) before you pull the new image.
+
 ## Quick Start
 
 **Prerequisites**: Docker Engine 20.10+, Docker Compose v2+, a running CrowdSec instance.
@@ -692,6 +694,7 @@ The pod template includes `prometheus.io/scrape: "true"` annotations for automat
 | [docs/SETUP.md](docs/SETUP.md) | Full installation and deployment guide |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Complete environment variable reference |
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture decisions and internals |
+| [docs/UPGRADING.md](docs/UPGRADING.md) | Upgrading between major versions |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues and solutions |
 | [docs/REFERENCES.md](docs/REFERENCES.md) | External specifications and links |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |

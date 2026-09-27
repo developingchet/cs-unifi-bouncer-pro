@@ -2,7 +2,7 @@
 
 # cs-unifi-bouncer-pro
 
-[![Build](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml/badge.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml) [![Version](https://img.shields.io/badge/version-v1.2.5-blue)](https://github.com/developingchet/cs-unifi-bouncer-pro/releases/tag/v1.2.5) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/LICENSE) [![Docker Pulls](https://img.shields.io/docker/pulls/developingchet/cs-unifi-bouncer-pro)](https://hub.docker.com/r/developingchet/cs-unifi-bouncer-pro)
+[![Build](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml/badge.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml) [![Version](https://img.shields.io/badge/version-v2.0.0-blue)](https://github.com/developingchet/cs-unifi-bouncer-pro/releases/tag/v2.0.0) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/LICENSE) [![Docker Pulls](https://img.shields.io/docker/pulls/developingchet/cs-unifi-bouncer-pro)](https://hub.docker.com/r/developingchet/cs-unifi-bouncer-pro)
 
 ---
 
@@ -11,6 +11,8 @@
 cs-unifi-bouncer-pro is a production-grade [CrowdSec](https://crowdsec.net) bouncer for self-hosted [UniFi](https://ui.com) network controllers. It automatically translates CrowdSec ban decisions into firewall rules, blocking malicious IPs at the network edge in real time.
 
 It auto-detects zone-based (UniFi Network ≥ 8.x) or legacy WAN_IN firewall modes, applies bans across multiple sites simultaneously, and manages multi-shard Traffic Matching Lists with bin-packing and automatic rebalance. Bans are persisted in a crash-safe bbolt database, a configurable circuit breaker handles controller outages, and startup reconciliation corrects drift after a crash or restart. The image is distroless, under 20 MB, runs as nonroot (UID 65532), and is Cosign-signed with a CycloneDX SBOM attached to every release.
+
+> **Upgrading from 1.x?** 2.0 changes several defaults and rejects settings 1.x accepted. Read the [upgrade guide](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/UPGRADING.md) before you pull the new image.
 
 ---
 
@@ -83,9 +85,9 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) acc
 | Tag | When to use |
 |-----|-------------|
 | `latest` | stable, always points to the newest release |
-| `1.2.5` | exact version, recommended for production |
-| `1.2` | minor-pinned |
-| `1` | major-pinned |
+| `2.0.0` (also `v2.0.0`) | exact version, recommended for production |
+| `2.0` | minor-pinned |
+| `2` | major-pinned |
 
 ---
 
@@ -94,7 +96,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) acc
 This image is signed with [Cosign](https://docs.sigstore.dev/cosign/overview/) (keyless OIDC). Verify with:
 
 ```bash
-cosign verify developingchet/cs-unifi-bouncer-pro:1.2.5 \
+cosign verify developingchet/cs-unifi-bouncer-pro:2.0.0 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 ```
@@ -109,6 +111,7 @@ A CycloneDX SBOM is attached to each release and embedded as a Cosign attestatio
 - [Full README](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/README.md)
 - [Configuration Reference](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/CONFIGURATION.md)
 - [Setup Guide](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/SETUP.md)
+- [Upgrade Guide](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/UPGRADING.md)
 - [Troubleshooting](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/TROUBLESHOOTING.md)
 - [Security Policy](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/SECURITY.md)
 - [Docker Hub Image](https://hub.docker.com/r/developingchet/cs-unifi-bouncer-pro)
