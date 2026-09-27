@@ -2,7 +2,7 @@
 
 # cs-unifi-bouncer-pro
 
-[![Build](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml/badge.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml) [![Version](https://img.shields.io/badge/version-v2.0.1-blue)](https://github.com/developingchet/cs-unifi-bouncer-pro/releases/tag/v2.0.1) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/LICENSE) [![Docker Pulls](https://img.shields.io/docker/pulls/developingchet/cs-unifi-bouncer-pro)](https://hub.docker.com/r/developingchet/cs-unifi-bouncer-pro)
+[![Build](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml/badge.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml) [![Version](https://img.shields.io/badge/version-v2.0.2-blue)](https://github.com/developingchet/cs-unifi-bouncer-pro/releases/tag/v2.0.2) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/LICENSE) [![Docker Pulls](https://img.shields.io/docker/pulls/developingchet/cs-unifi-bouncer-pro)](https://hub.docker.com/r/developingchet/cs-unifi-bouncer-pro)
 
 ---
 
@@ -51,14 +51,14 @@ For full setup including CrowdSec registration, TLS, multi-site, and Docker Secr
 - **24 Prometheus metrics** — decisions, API calls, active bans, shard occupancy, decision latency, circuit breaker state
 - **Decision latency histogram** — end-to-end timing from CrowdSec filter pipeline to successful UniFi write
 - **CrowdSec usage-metrics** — decision telemetry pushed to LAPI `/v1/usage-metrics` (default: 30 min; configurable)
-- **Cloudflare whitelist sync** — ALLOW policies for Cloudflare IP ranges, auto-refreshed on a configurable schedule
-- **Ban history audit trail** — ring-buffer event log (up to 10,000 entries) for every ban, unban, and expiry; queryable via `status bans`, `status ip`, `status history`
+- **Cloudflare whitelist sync** — ALLOW policies for Cloudflare IP ranges, auto-refreshed on a configurable schedule; block policies created before the allow are recreated behind it so it takes effect
+- **Ban history audit trail** — ring-buffer event log (up to 10,000 entries) for every ban, unban, and expiry; queryable via `status bans`, `status ip`, `status history`, also against the running bouncer via `docker exec`
 - **External blocklist import** — fetch plain-text IP/CIDR lists from external URLs on a configurable interval; bans auto-expire if the feed goes offline
 - **Webhook notifications** — POST JSON alerts when the circuit breaker trips or reconcile drift is detected
 - **Per-scenario duration overrides** — set a duration for matching CrowdSec scenarios via `BLOCK_SCENARIO_DURATION_MAP`, including durations longer than `BAN_TTL`
 - **Destination IP filtering** — scope block policies to specific destination hosts or subnets via `@ip1,ip2,...` suffix on zone pairs
 - **Decision rate limiter** — token-bucket throttle for ban waves (`DECISION_RATE_LIMIT`)
-- **Validate and diagnose subcommands** — CI-safe config validation; three-phase connectivity check with zone discovery
+- **Validate and diagnose subcommands** — CI-safe config validation; three-phase connectivity check with zone discovery (`--lapi-auth` also checks the LAPI key)
 - **Log redaction** — RedactWriter masks passwords, API keys, and Bearer tokens before they reach stdout
 - **Dry-run mode** — connects and reads live state; logs all intended changes without writing anything to UniFi
 - **Multi-arch distroless image** — amd64, arm64, armv7; under 20 MB; runs as nonroot (UID 65532)
@@ -85,7 +85,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) acc
 | Tag | When to use |
 |-----|-------------|
 | `latest` | stable, always points to the newest release |
-| `2.0.1` (also `v2.0.1`) | exact version, recommended for production |
+| `2.0.2` (also `v2.0.2`) | exact version, recommended for production |
 | `2.0` | minor-pinned |
 | `2` | major-pinned |
 
@@ -96,7 +96,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) acc
 This image is signed with [Cosign](https://docs.sigstore.dev/cosign/overview/) (keyless OIDC). Verify with:
 
 ```bash
-cosign verify developingchet/cs-unifi-bouncer-pro:2.0.1 \
+cosign verify developingchet/cs-unifi-bouncer-pro:2.0.2 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 ```
