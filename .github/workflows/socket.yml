@@ -1,0 +1,70 @@
+name: socket
+
+# Socket.dev supply-chain scan of the Go modules and GitHub Actions.
+# Pull requests are blocked when a change adds a dependency that violates the
+# Socket security policy; scans of main are reported without blocking.
+# Needs the SOCKET_SECURITY_API_KEY secret; without it the job is skipped
+# (for example on pull requests from forks, which never receive secrets).
+# Token scopes: repo (list, create, update), security-policy:read,
+# triage (alerts-list, alerts-update), full-scans (list, create), packages:list.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: socket-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # PR alert comments
+      issues: write
+    env:
+      SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_SECURITY_API_KEY }}
+    steps:
+      - name: Check for the Socket API key
+        id: key
+        run: |
+          if [ -z "$SOCKET_SECURITY_API_KEY" ]; then
+            echo "::notice::SOCKET_SECURITY_API_KEY is not set; skipping the Socket scan."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.key.outputs.present == 'true'
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: steps.key.outputs.present == 'true'
+        with:
+          python-version: '3.12'
+      - name: Install the Socket CLI
+        if: steps.key.outputs.present == 'true'
+        # Hash-locked (see .github/requirements/socket-cli.in); Dependabot updates it.
+        run: pip install --disable-pip-version-check --require-hashes --no-deps -r .github/requirements/socket-cli.txt
+      - name: Scan
+        if: steps.key.outputs.present == 'true'
+        env:
+          GH_API_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          args=(--target-path "$GITHUB_WORKSPACE")
+          # PR comments and commit statuses only apply to pull requests; on
+          # other events the CLI would look up comments for a nonexistent PR.
+          if [ -n "$PR_NUMBER" ]; then
+            args+=(--scm github --pr-number "$PR_NUMBER")
+          fi
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            args+=(--default-branch --disable-blocking)
+          fi
+          socketcli "${args[@]}"

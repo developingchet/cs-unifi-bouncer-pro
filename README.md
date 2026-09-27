@@ -5,6 +5,7 @@
 # cs-unifi-bouncer-pro
 [![Build](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml/badge.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/developingchet/cs-unifi-bouncer-pro)](https://goreportcard.com/report/github.com/developingchet/cs-unifi-bouncer-pro)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/developingchet/cs-unifi-bouncer-pro/badge)](https://scorecard.dev/viewer/?uri=github.com/developingchet/cs-unifi-bouncer-pro)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/developingchet/cs-unifi-bouncer-pro)](https://github.com/developingchet/cs-unifi-bouncer-pro)
 [![Docker Pulls](https://img.shields.io/docker/pulls/developingchet/cs-unifi-bouncer-pro)](https://hub.docker.com/r/developingchet/cs-unifi-bouncer-pro)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)

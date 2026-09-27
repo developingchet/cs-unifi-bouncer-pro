@@ -1,0 +1,66 @@
+name: image-scan
+
+# Weekly Trivy scan of the image already published on Docker Hub. CI and
+# releases scan every image they build; this catches CVEs disclosed after a
+# release. Findings go to the Security tab, and the run fails on fixable
+# HIGH or CRITICAL vulnerabilities so the failure shows up in Actions.
+
+on:
+  schedule:
+    - cron: '23 6 * * 1' # Mondays 06:23 UTC
+  pull_request:
+    paths: [.github/workflows/image-scan.yml] # test edits to this workflow
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-scan
+  cancel-in-progress: true
+
+env:
+  IMAGE: docker.io/developingchet/cs-unifi-bouncer-pro:latest
+
+jobs:
+  trivy:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64, linux/arm/v7]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
+    env:
+      TRIVY_PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Scan for the Security tab
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          version: v0.69.2
+          format: sarif
+          output: trivy.sarif
+          limit-severities-for-sarif: true
+      - name: Name the SARIF category
+        id: category
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: echo "name=trivy-image-${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: trivy.sarif
+          category: ${{ steps.category.outputs.name }}
+      - name: Fail on fixable HIGH or CRITICAL vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          version: v0.69.2
+          exit-code: '1'
+          skip-setup-trivy: true
