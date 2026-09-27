@@ -2,6 +2,9 @@ name: Update Docker Hub Description
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [DOCKERHUB.md]
 
 permissions:
   contents: read  # default — Docker Hub credentials are separate secrets

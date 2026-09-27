@@ -1,0 +1,6 @@
+# Socket CLI used by .github/workflows/socket.yml.
+# socket-cli.txt is the hash-locked install list generated from this file
+# (Python 3.12): pip-compile --generate-hashes --strip-extras --no-header
+#   --output-file=socket-cli.txt socket-cli.in
+# Dependabot keeps socket-cli.txt current.
+socketsecurity==2.10.2

@@ -4,7 +4,28 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  - package-ecosystem: gomod
+    directory: /.github/tools
+    schedule:
+      interval: weekly
+    groups:
+      tools:
+        patterns: ['*']
   - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: pip
+    directory: /.github/requirements
+    schedule:
+      interval: weekly
+    groups:
+      socket-cli:
+        patterns: ['*']
+  - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly

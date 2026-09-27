@@ -1,0 +1,19 @@
+# Socket.dev configuration (https://docs.socket.dev/docs/socket-yml).
+# No alert types are disabled: expected alerts are triaged in SECURITY.md
+# ("Dependency alerts") instead of hidden here.
+version: 2
+
+# Only dependency changes trigger pull request alerts.
+triggerPaths:
+  - go.mod
+  - go.sum
+  - .github/tools/go.mod
+  - .github/tools/go.sum
+  - .github/requirements/socket-cli.txt
+
+# The Socket GitHub App stays silent here: the `socket` workflow
+# (.github/workflows/socket.yml) scans pull requests and posts the only comment.
+githubApp:
+  enabled: false
+  pullRequestAlertsEnabled: false
+  dependencyOverviewEnabled: false

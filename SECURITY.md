@@ -198,6 +198,16 @@ Every release tag triggers a GitHub Actions workflow that:
 3. Signs the image with **Cosign** keyless OIDC (no long-lived signing key)
 4. Generates a **CycloneDX SBOM** and attaches it as an OCI attestation
 5. Publishes binaries via a **manual binary build matrix** with checksums
+6. Signs `checksums.txt` with **Cosign** keyless OIDC; it covers every binary and the SBOM
+
+Every pull request and push to `main`, plus a weekly scheduled run, also:
+
+- Verifies module checksums against `go.sum` (`go mod verify`)
+- Runs **govulncheck**, which fails on known vulnerabilities in code the bouncer calls
+- Builds the image and scans it with **Trivy**
+- Scans the Go modules and GitHub Actions with **[Socket](https://socket.dev)**; pull requests that add a dependency violating the Socket policy are blocked
+
+A weekly workflow rescans the published `latest` image for every platform, so CVEs disclosed after a release show up in the Security tab. [OpenSSF Scorecard](https://scorecard.dev/viewer/?uri=github.com/developingchet/cs-unifi-bouncer-pro) grades the repository's own practices (pinned actions, token permissions, branch protection, signed releases).
 
 To verify a release image:
 
@@ -210,6 +220,15 @@ cosign verify developingchet/cs-unifi-bouncer-pro:latest \
 # Download and verify SBOM
 cosign download attestation developingchet/cs-unifi-bouncer-pro:latest \
   | jq -r '.payload | @base64d | fromjson | .predicate'
+```
+
+To verify downloaded release binaries:
+
+```bash
+cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
+  --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
+sha256sum --ignore-missing -c checksums.txt
 ```
 
 ## Vulnerability Scope
@@ -230,4 +249,8 @@ cosign download attestation developingchet/cs-unifi-bouncer-pro:latest \
 
 ## Dependency Updates
 
-Dependabot is configured to keep Go modules and GitHub Actions up to date. CVE patches in indirect dependencies are addressed on a best-effort basis as they appear in Trivy scans.
+Dependabot keeps the Go modules, the CI tools in `.github/tools`, the Socket CLI, GitHub Actions and the Dockerfile base images up to date. Every action is pinned to a commit SHA. CVE patches in indirect dependencies are addressed on a best-effort basis as they appear in govulncheck and Trivy scans.
+
+### Dependency alerts
+
+`socket.yml` disables no Socket alert types. An alert that is expected for this project (for example network access in an HTTP client library) is triaged in the Socket dashboard and recorded here with the reason, rather than hidden in the configuration.

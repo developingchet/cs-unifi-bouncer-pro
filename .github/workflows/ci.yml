@@ -5,9 +5,19 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Mondays: catch new Go advisories, base image CVEs and runner changes
+    # even in weeks with no commits.
+    - cron: '43 5 * * 1'
+  workflow_dispatch:
 
 permissions:
   contents: read  # default for all jobs — no write access needed
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Only superseded pull request runs are cancelled; main keeps every run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -23,8 +33,29 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Verify module checksums
+        run: go mod verify
+
       - name: Run tests (race detector)
         run: go test -race ./... -count=1 -timeout=120s
+
+  vulncheck:
+    name: Vulnerability Check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Fails only on vulnerabilities in code the bouncer actually calls.
+      # govulncheck is pinned in .github/tools/go.mod.
+      - name: Run govulncheck
+        run: go run -modfile=.github/tools/go.mod golang.org/x/vuln/cmd/govulncheck ./...
 
   lint:
     name: Lint
@@ -82,6 +113,17 @@ jobs:
             VERSION=ci-seccomp-test
             COMMIT=${{ github.sha }}
             BUILD_DATE=1970-01-01T00:00:00Z
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: cs-unifi-bouncer-test:ci
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          version: v0.69.2
 
       - name: Run bouncer version under seccomp profile
         run: |
