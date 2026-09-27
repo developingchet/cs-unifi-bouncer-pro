@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 )
 
@@ -274,6 +275,9 @@ func (sm *ShardManager) loadShardLocked(idx int, allGroups map[string]storage.Gr
 		if len(members) > 0 {
 			shard.IPs.Replace(members)
 			shard.IPs.MarkClean()
+			// A clean shard is not flushed again, so the count the controller
+			// holds is recorded here rather than after the next sync.
+			metrics.ShardIPCount.WithLabelValues(shard.Family, fmt.Sprintf("%d", idx), sm.site).Set(float64(len(members)))
 		} else {
 			// Restore cached members if a previously populated group has only
 			// the creation placeholder in UniFi.
@@ -303,14 +307,18 @@ func (sm *ShardManager) loadShardLocked(idx int, allGroups map[string]storage.Gr
 func (sm *ShardManager) assignOwnersLocked() {
 	family := sm.fam
 	for _, shard := range family.Shards {
+		removed := 0
 		for _, ip := range shard.IPs.Members() {
 			if _, exists := family.ipOwner[ip]; exists {
 				shard.IPs.Remove(ip)
-				sm.log.Warn().Str("shard", shard.Name).Str("ip", ip).
-					Msg("removed duplicate IP from higher-index shard during baseline load")
+				removed++
 				continue
 			}
 			family.ipOwner[ip] = shard.Index
+		}
+		if removed > 0 {
+			sm.log.Warn().Str("shard", shard.Name).Int("ips", removed).
+				Msg("removed IPs already held by a lower-index shard during baseline load")
 		}
 	}
 }

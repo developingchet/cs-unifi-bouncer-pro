@@ -242,7 +242,7 @@ The bouncer will:
 
 ```bash
 docker ps --filter name=cs-unifi-bouncer-pro
-# Status should show "healthy" after the start_period (10 s)
+# Status should show "healthy" after the start_period (15 s)
 ```
 
 #### Check startup logs
@@ -255,10 +255,15 @@ Look for these startup log lines (exact field order may vary):
 
 ```json
 {"level":"info","version":"v2.0.1","msg":"cs-unifi-bouncer-pro starting"}
-{"level":"info","sites":["default"],"msg":"ensuring firewall infrastructure"}
+{"level":"info","sites":["default"],"msg":"loading firewall infrastructure"}
 {"level":"info","addr":":9090","msg":"Prometheus metrics server started"}
 {"level":"info","addr":":8081","msg":"health server started"}
+{"level":"info","msg":"firewall policies and rules repaired"}
 ```
+
+The repair of existing policies or rules runs in the background after the
+health server starts; on a large ban list it can take a few minutes, and new
+decisions are applied meanwhile.
 
 If errors appear, check [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 

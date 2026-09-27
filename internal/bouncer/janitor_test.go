@@ -32,6 +32,8 @@ func (nopFWManager) Reconcile(_ context.Context, _ []string) (*firewall.Reconcil
 	return &firewall.ReconcileResult{}, nil
 }
 func (nopFWManager) EnsureInfrastructure(_ context.Context, _ []string) error { return nil }
+func (nopFWManager) LoadInfrastructure(_ context.Context, _ []string) error   { return nil }
+func (nopFWManager) RepairInfrastructure(_ context.Context, _ []string) error { return nil }
 func (nopFWManager) PrepareDrain(_ context.Context, _ []string) error         { return nil }
 func (nopFWManager) SyncDirty(_ context.Context, _ []string) error            { return nil }
 func (nopFWManager) Drain(_ context.Context, _ []string) error                { return nil }

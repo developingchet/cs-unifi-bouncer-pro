@@ -111,7 +111,7 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 		created, err := zm.ensureShardPolicy(ctx, site, pair, zoneMap, existingByID, ipv6, ref, !firstCreate)
 		if err != nil {
 			sm.MarkUnprovisioned(ref.Index)
-			failed = append(failed, fmt.Errorf("%s shard %d (%s->%s): %w", Family(ipv6), ref.Index, pair.Src, pair.Dst, err))
+			failed = append(failed, &shardError{family: Family(ipv6), index: ref.Index, scope: pair.Src + "->" + pair.Dst, err: err})
 			continue
 		}
 		if created {
@@ -281,6 +281,7 @@ func (zm *ZoneManager) repairPolicy(ctx context.Context, site string, current, d
 	}
 	var nf *controller.ErrNotFound
 	if !errors.As(err, &nf) {
+		zm.log.Warn().Err(err).Str("policy", desired.Name).Str("site", site).Msg("controller rejected zone policy update")
 		return false, fmt.Errorf("update zone policy %s: %w", desired.Name, err)
 	}
 	return zm.confirmPolicyGone(ctx, site, current, existingByID)

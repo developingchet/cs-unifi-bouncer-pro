@@ -184,6 +184,29 @@ func startCloudflareWhitelist(ctx context.Context, cfg *config.Config, ctrl cont
 	return mgr
 }
 
+// repairAndSyncWhitelist ensures the block policy or rule of every loaded
+// shard, then runs the Cloudflare whitelist: the first sync, then a refresh
+// every CLOUDFLARE_REFRESH_INTERVAL. A failed repair is retried by the
+// next reconcile.
+func repairAndSyncWhitelist(ctx context.Context, cfg *config.Config, ctrl controller.Controller,
+	fwMgr firewall.Manager, cfPairs []whitelist.ZonePairConfig, log zerolog.Logger,
+) {
+	start := time.Now()
+	log.Info().Msg("repairing firewall policies and rules")
+	if err := fwMgr.RepairInfrastructure(ctx, cfg.UnifiSites); err != nil {
+		log.Error().Err(err).Msg("firewall repair failed; the next reconcile retries it")
+	} else {
+		log.Info().Stringer("elapsed", time.Since(start)).Msg("firewall policies and rules repaired")
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	cfManager := startCloudflareWhitelist(ctx, cfg, ctrl, fwMgr.ZoneManager(), cfPairs, log)
+	if cfManager != nil {
+		runCloudflareRefresh(ctx, cfManager, cfPairs, cfg.CloudflareRefreshInterval, log)
+	}
+}
+
 func runCloudflareRefresh(ctx context.Context, mgr *whitelist.Manager, pairs []whitelist.ZonePairConfig, interval time.Duration, log zerolog.Logger) {
 	every(ctx, interval, func() {
 		if err := mgr.Sync(ctx, pairs); err != nil {

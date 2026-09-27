@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
@@ -26,6 +27,9 @@ type LegacyConfig struct {
 
 // LegacyManager manages legacy WAN_IN drop rules pointing at managed groups.
 type LegacyManager struct {
+	// opMu serializes rule operations: the full repair and the provisioning of
+	// a newly activated shard both create missing rules and must not race.
+	opMu  sync.Mutex
 	cfg   LegacyConfig
 	namer *Namer
 	ctrl  controller.Controller
@@ -44,6 +48,9 @@ func NewLegacyManager(cfg LegacyConfig, namer *Namer, ctrl controller.Controller
 // description and ownership evidence from the cache or static name prefix.
 // This catches rules left by removed shards, mode switches, or a wiped bbolt.
 func (lm *LegacyManager) EnsureRules(ctx context.Context, site string, v4Shards, v6Shards *ShardManager) error {
+	lm.opMu.Lock()
+	defer lm.opMu.Unlock()
+
 	// Fetch ALL existing rules once for all families (avoids one GET per family).
 	existingRules, err := lm.ctrl.ListFirewallRules(ctx, site)
 	if err != nil {
@@ -170,7 +177,7 @@ func (lm *LegacyManager) ensureRulesForFamily(ctx context.Context, site string, 
 		}
 		if err != nil {
 			sm.MarkUnprovisioned(ref.Index)
-			failed = append(failed, fmt.Errorf("%s shard %d: %w", family, ref.Index, err))
+			failed = append(failed, &shardError{family: family, index: ref.Index, err: err})
 			continue
 		}
 		if created {
@@ -309,6 +316,9 @@ func legacyRuleNeedsUpdate(rule controller.FirewallRule, groupID string, index i
 // EnsureRuleForShard creates the firewall rule for a single new shard if it doesn't already exist.
 // Called when a new shard overflows mid-operation.
 func (lm *LegacyManager) EnsureRuleForShard(ctx context.Context, site, groupID string, ipv6 bool, shardIdx int) error {
+	lm.opMu.Lock()
+	defer lm.opMu.Unlock()
+
 	family := Family(ipv6)
 	ruleset := lm.cfg.RulesetV4
 	indexStart := lm.cfg.RuleIndexStartV4
@@ -336,6 +346,9 @@ func (lm *LegacyManager) EnsureRuleForShard(ctx context.Context, site, groupID s
 // DeleteRuleForShard deletes the firewall rule for the given shard index.
 // Called during shard pruning.
 func (lm *LegacyManager) DeleteRuleForShard(ctx context.Context, site string, ipv6 bool, shardIdx int) error {
+	lm.opMu.Lock()
+	defer lm.opMu.Unlock()
+
 	family := Family(ipv6)
 
 	ruleName, err := lm.namer.RuleName(NameData{Family: family, Index: shardIdx, Site: site})
@@ -366,6 +379,9 @@ func (lm *LegacyManager) DeleteRuleForShard(ctx context.Context, site string, ip
 
 // DeleteRules removes all managed legacy rules for a site.
 func (lm *LegacyManager) DeleteRules(ctx context.Context, site string) error {
+	lm.opMu.Lock()
+	defer lm.opMu.Unlock()
+
 	policies, err := lm.store.ListPolicies()
 	if err != nil {
 		return err

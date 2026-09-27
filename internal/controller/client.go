@@ -221,8 +221,13 @@ func responseStatusError(resp *http.Response, req *http.Request) error {
 		_ = resp.Body.Close()
 		return &ErrRateLimit{RetryAfter: retryAfter}
 	case http.StatusConflict:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		_ = resp.Body.Close()
-		return &ErrConflict{Msg: "HTTP 409 conflict"}
+		msg := "HTTP 409 conflict"
+		if b := strings.TrimSpace(string(body)); b != "" {
+			msg += ": " + b
+		}
+		return &ErrConflict{Msg: msg}
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))

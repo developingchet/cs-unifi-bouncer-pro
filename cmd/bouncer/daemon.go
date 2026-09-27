@@ -83,12 +83,11 @@ func runDaemon() error {
 	}
 	claims := banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun)
 
-	log.Info().Strs("sites", cfg.UnifiSites).Msg("ensuring firewall infrastructure")
-	if err := fwMgr.EnsureInfrastructure(ctx, cfg.UnifiSites); err != nil {
-		return fmt.Errorf("ensure infrastructure: %w", err)
+	log.Info().Strs("sites", cfg.UnifiSites).Msg("loading firewall infrastructure")
+	if err := fwMgr.LoadInfrastructure(ctx, cfg.UnifiSites); err != nil {
+		return fmt.Errorf("load infrastructure: %w", err)
 	}
 	go watchSIGHUP(ctx, notifySIGHUP(), cfg, fwMgr, log)
-	cfManager := startCloudflareWhitelist(ctx, cfg, ctrl, fwMgr.ZoneManager(), cfPairs, log)
 
 	recorder, recorderDone, err := newMetricsRecorder(ctx, cfg, log)
 	if err != nil {
@@ -131,9 +130,11 @@ func runDaemon() error {
 			}
 		}()
 	}, log)
-	if cfManager != nil {
-		go runCloudflareRefresh(ctx, cfManager, cfPairs, cfg.CloudflareRefreshInterval, log)
-	}
+	// Repairing every shard's policy or rule and the first Cloudflare sync can
+	// take minutes on a large ban list. They run alongside the decision stream
+	// and the health server, so new bans are applied and the health check
+	// answers meanwhile.
+	go repairAndSyncWhitelist(ctx, cfg, ctrl, fwMgr, cfPairs, log)
 
 	done := make(chan error, 1)
 	go func() { done <- bnc.Run(ctx) }()

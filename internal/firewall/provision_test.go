@@ -3,6 +3,7 @@ package firewall
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
@@ -10,6 +11,25 @@ import (
 	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/rs/zerolog"
 )
+
+func TestShardProvisionError_Shards(t *testing.T) {
+	boom := errors.New("refused")
+	err := provisionFailure([]error{
+		&shardError{family: "v4", index: 3, scope: "wan->lan", err: boom},
+		&shardError{family: "v4", index: 3, scope: "wan->dmz", err: boom},
+		&shardError{family: "v6", index: 0, err: boom},
+	})
+	var spe *ShardProvisionError
+	if !errors.As(err, &spe) {
+		t.Fatalf("err = %v, want a ShardProvisionError", err)
+	}
+	if got, want := spe.Shards(), []string{"v4-3", "v6-0"}; !slices.Equal(got, want) {
+		t.Errorf("Shards() = %v, want %v", got, want)
+	}
+	if !errors.Is(err, boom) {
+		t.Error("the cause is not reachable with errors.Is")
+	}
+}
 
 // TestEnsurePolicies_OneRefusedShardDoesNotOrphanTheRest reproduces groups
 // that existed on the controller with no block policy: a refused policy must
