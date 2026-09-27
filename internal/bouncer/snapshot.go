@@ -58,8 +58,13 @@ func newSnapshotServer(store any, dataDir string, log zerolog.Logger) (*snapshot
 		return nil, fmt.Errorf("generate status token: %w", err)
 	}
 	token := hex.EncodeToString(raw)
-	if err := os.WriteFile(filepath.Join(dataDir, SnapshotTokenFile), []byte(token), 0o600); err != nil {
+	path := filepath.Join(dataDir, SnapshotTokenFile)
+	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
 		return nil, fmt.Errorf("write status token: %w", err)
+	}
+	// WriteFile keeps the mode of a file that already exists.
+	if err := os.Chmod(path, 0o600); err != nil {
+		return nil, fmt.Errorf("restrict status token: %w", err)
 	}
 	return &snapshotServer{store: sw, token: token, busy: make(chan struct{}, 1), log: log}, nil
 }
@@ -85,7 +90,7 @@ func (s *snapshotServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(snapshotWriteTimeout)); err != nil {
-		s.log.Debug().Err(err).Msg("cannot extend the write deadline for a database snapshot")
+		s.log.Warn().Err(err).Msg("cannot extend the write deadline for a database snapshot; a large one may be cut off")
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	if _, err := s.store.WriteSnapshot(w); err != nil {
