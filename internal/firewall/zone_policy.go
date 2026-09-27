@@ -52,7 +52,7 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 			if ipv6 {
 				sm = v6Shards
 			}
-			if sm == nil {
+			if sm == nil || !pairCoversFamily(pair, ipv6) {
 				continue
 			}
 			family := Family(ipv6)
@@ -75,8 +75,10 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	// without a policy, so failures are collected and the rest carry on.
 	var failed []error
 	for _, pair := range zm.cfg.ZonePairs {
-		failed = append(failed, zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, existingByID, false, v4Shards)...)
-		if v6Shards != nil {
+		if pairCoversFamily(pair, false) {
+			failed = append(failed, zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, existingByID, false, v4Shards)...)
+		}
+		if v6Shards != nil && pairCoversFamily(pair, true) {
 			failed = append(failed, zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, existingByID, true, v6Shards)...)
 		}
 	}
@@ -159,7 +161,7 @@ func (zm *ZoneManager) desiredPolicy(site string, pair config.ZonePair, zoneMap 
 	if ids, ok := zm.portTMLCache[site][pair.Src+":"+pair.Dst]; ok {
 		policy.SrcPortTMLID = ids.SrcTMLID
 		policy.DstPortTMLID = ids.DstTMLID
-		policy.DstIPTMLID = pickDstIPTML(ids.DstIPTMLIDs, ipv6)
+		policy.DstIPTMLID = ids.dstIPTML(ipv6)
 	}
 	zm.mu.RUnlock()
 	return policy, nil
@@ -218,7 +220,8 @@ func (zm *ZoneManager) ensurePolicy(ctx context.Context, site string, desired co
 	}
 	zm.log.Info().Str("name", name).Str("id", created.ID).
 		Str("src", desired.SrcZone).Str("dst", desired.DstZone).Msg("created zone policy")
-	return true, nil
+	// A replacement interrupted after deleting the old policy leaves its staged copy.
+	return true, zm.dropStagedPolicy(ctx, site, desired, existingByID)
 }
 
 // resolvePolicyID returns the ID of the listed policy named name, preferring
@@ -263,7 +266,9 @@ func (zm *ZoneManager) repairPolicy(ctx context.Context, site string, current, d
 		return false, nil
 	}
 	zm.log.Info().Str("policy", desired.Name).Msg("zone policy settings drifted; repairing")
-	if current.SrcPortTMLID != desired.SrcPortTMLID || current.DstPortTMLID != desired.DstPortTMLID || current.DstIPTMLID != desired.DstIPTMLID {
+	// A PUT carries no port or destination filters and the controller drops
+	// them, so a filtered policy is always replaced, never updated.
+	if hasFilters(desired) || current.SrcPortTMLID != desired.SrcPortTMLID || current.DstPortTMLID != desired.DstPortTMLID || current.DstIPTMLID != desired.DstIPTMLID {
 		return false, zm.replacePolicy(ctx, site, current, desired, existingByID)
 	}
 	updated := desired
@@ -281,10 +286,16 @@ func (zm *ZoneManager) repairPolicy(ctx context.Context, site string, current, d
 	return zm.confirmPolicyGone(ctx, site, current, existingByID)
 }
 
-// replacePolicy swaps current for desired when its filter lists change, which
-// the controller's PUT endpoint cannot do. The replacement is staged under a
-// temporary name first so a failed delete or rename never leaves the shard
-// without a block policy.
+// hasFilters reports whether p carries port or destination filters, which the
+// controller's PUT endpoint cannot set.
+func hasFilters(p controller.ZonePolicy) bool {
+	return p.SrcPortTMLID != "" || p.DstPortTMLID != "" || p.DstIPTMLID != ""
+}
+
+// replacePolicy swaps current for desired without a PUT, which would drop the
+// port and destination filters. A copy is staged under a temporary name first
+// so the shard stays covered while the old policy is deleted and desired is
+// created under its own name; the staged copy is removed last.
 func (zm *ZoneManager) replacePolicy(ctx context.Context, site string, current, desired controller.ZonePolicy,
 	existingByID map[string]controller.ZonePolicy,
 ) error {
@@ -300,16 +311,54 @@ func (zm *ZoneManager) replacePolicy(ctx context.Context, site string, current, 
 		}
 	}
 	delete(existingByID, current.ID)
-	renamed := desired
-	renamed.ID = staged.ID
-	if err := zm.ctrl.UpdateZonePolicy(ctx, site, renamed); err != nil {
-		return fmt.Errorf("rename staged zone policy %s: %w", name, err)
+	if err := deleteCachedPolicy(zm.store, site, name); err != nil {
+		return fmt.Errorf("clear cached zone policy %s: %w", name, err)
 	}
-	if err := setCachedPolicy(zm.store, site, name, storage.PolicyRecord{UnifiID: staged.ID, Site: site, Mode: "zone"}); err != nil {
+	created, err := zm.ctrl.CreateZonePolicy(ctx, site, desired)
+	if err != nil {
+		return fmt.Errorf("create replacement zone policy %s: %w", name, err)
+	}
+	existingByID[created.ID] = created
+	if err := setCachedPolicy(zm.store, site, name, storage.PolicyRecord{UnifiID: created.ID, Site: site, Mode: "zone"}); err != nil {
 		return fmt.Errorf("cache replacement zone policy %s: %w", name, err)
 	}
-	existingByID[staged.ID] = renamed
+	return zm.deleteStagedPolicy(ctx, site, staged, existingByID)
+}
+
+// dropStagedPolicy deletes the staged copy of desired, if one is listed. It is
+// called once desired exists under its own name.
+func (zm *ZoneManager) dropStagedPolicy(ctx context.Context, site string, desired controller.ZonePolicy,
+	existingByID map[string]controller.ZonePolicy,
+) error {
+	stagedName := stagedPolicyName(desired)
+	for _, p := range existingByID {
+		if p.Name == stagedName {
+			return zm.deleteStagedPolicy(ctx, site, p, existingByID)
+		}
+	}
 	return nil
+}
+
+func (zm *ZoneManager) deleteStagedPolicy(ctx context.Context, site string, staged controller.ZonePolicy,
+	existingByID map[string]controller.ZonePolicy,
+) error {
+	if err := zm.ctrl.DeleteZonePolicy(ctx, site, staged.ID); err != nil {
+		var nf *controller.ErrNotFound
+		if !errors.As(err, &nf) {
+			return fmt.Errorf("delete staged zone policy %s: %w", staged.Name, err)
+		}
+	}
+	delete(existingByID, staged.ID)
+	return nil
+}
+
+// stagedPolicyName is the temporary name a replacement for desired is staged
+// under; it changes with the shard list and filters.
+func stagedPolicyName(desired controller.ZonePolicy) string {
+	parts := []string{desired.Name, desired.SrcZone, desired.DstZone, desired.IPVersion,
+		desired.TrafficMatchingListIDs[0], desired.SrcPortTMLID, desired.DstPortTMLID, desired.DstIPTMLID}
+	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return "crowdsec-policy-stage-" + hex.EncodeToString(digest[:10])
 }
 
 // confirmPolicyGone handles a 404 on update. A restarting controller answers
@@ -346,22 +395,13 @@ func (zm *ZoneManager) confirmPolicyGone(ctx context.Context, site string, curre
 // managed name before the old policy is removed. A retry reuses an existing
 // stage only when it still targets the same group and filters.
 func (zm *ZoneManager) stageReplacementPolicy(ctx context.Context, site string, desired controller.ZonePolicy, existingByID map[string]controller.ZonePolicy) (controller.ZonePolicy, error) {
-	parts := []string{desired.Name, desired.SrcZone, desired.DstZone, desired.IPVersion,
-		desired.TrafficMatchingListIDs[0], desired.SrcPortTMLID, desired.DstPortTMLID, desired.DstIPTMLID}
-	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	stagedName := "crowdsec-policy-stage-" + hex.EncodeToString(digest[:10])
+	stagedName := stagedPolicyName(desired)
 	stagedDesired := desired
 	stagedDesired.Name = stagedName
 	reuse := func(candidate controller.ZonePolicy) (controller.ZonePolicy, error) {
 		if len(candidate.TrafficMatchingListIDs) != 1 || candidate.TrafficMatchingListIDs[0] != desired.TrafficMatchingListIDs[0] ||
 			candidate.SrcPortTMLID != desired.SrcPortTMLID || candidate.DstPortTMLID != desired.DstPortTMLID || candidate.DstIPTMLID != desired.DstIPTMLID {
 			return controller.ZonePolicy{}, fmt.Errorf("staged policy %s has unexpected group or filter IDs", stagedName)
-		}
-		if needsUpdateZonePolicy(candidate, desired) {
-			stagedDesired.ID = candidate.ID
-			if err := zm.ctrl.UpdateZonePolicy(ctx, site, stagedDesired); err != nil {
-				return controller.ZonePolicy{}, fmt.Errorf("repair staged policy %s: %w", stagedName, err)
-			}
 		}
 		return candidate, nil
 	}
@@ -409,6 +449,9 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 
 	firstCreate := true
 	for _, pair := range zm.cfg.ZonePairs {
+		if !pairCoversFamily(pair, ipv6) {
+			continue
+		}
 		desired, err := zm.desiredPolicy(site, pair, zoneMap, ipv6, shardIdx, groupID)
 		if err != nil {
 			return err

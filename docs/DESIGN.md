@@ -128,11 +128,12 @@ Before feature detection, `internal/controller/layout.go` detects the controller
 
 #### Zone policy portFilter constraint
 
-The UniFi zone policy API has two portFilter constraints:
+The UniFi zone policy API has these filter constraints:
 
 1. **Nesting**: `portFilter` must be nested inside `trafficFilter` on both source and destination — the POST endpoint rejects it as an unknown property if placed at the top level of `$.source` or `$.destination`.
 2. **`trafficFilter.type`**: When the only filter required is port-based (no IP/network filter), `trafficFilter.type` must be `"PORT"`. Using `"NETWORK"` requires a non-null `networkFilter`; using `"IP_ADDRESS"` requires a non-null `ipAddressFilter`. `"PORT"` is the dedicated port-only type and accepts only `portFilter`.
-3. **PUT exclusion**: The PUT endpoint (`/v1/firewall/policies/{id}`) rejects `portFilter` even when correctly nested. The wire structs used for PUT (`apiV1PolicyUpdateSrc` / `apiV1PolicyUpdateDst`) intentionally omit `trafficFilter.portFilter` — the server preserves the existing value on update. When portFilter needs to be added or changed on an existing policy, the bouncer deletes the existing policy and recreates it via POST. This is logged at `info` level with the message `portFilter changed — deleting policy for recreation with new portFilter`.
+3. **PUT exclusion**: The PUT endpoint (`/v1/firewall/policies/{id}`) rejects `portFilter` even when correctly nested. The wire structs used for PUT (`apiV1PolicyUpdateSrc` / `apiV1PolicyUpdateDst`) omit the source port filter and the whole destination `trafficFilter`, and the server replaces the policy, so a PUT drops the port and destination IP filters. A filtered policy is therefore never updated in place. A block policy is replaced: a copy is created under a temporary `crowdsec-policy-stage-*` name, the old policy is deleted, the policy is created again under its own name, and the staged copy is deleted, so the shard is never uncovered. A Cloudflare ALLOW policy is deleted and recreated.
+4. **Address family**: a destination IP list must match the policy's IP version; UniFi answers HTTP 500 to an IPv6 policy with an IPv4 destination list. A pair whose destination IPs are all one family gets policies for that family only.
 
 #### Orphan cleanup
 

@@ -16,9 +16,10 @@ import (
 
 // portTMLIDs holds TML IDs for a single zone pair (port filters and dst IP filter).
 type portTMLIDs struct {
-	SrcTMLID    string   // empty if no src port filter configured
-	DstTMLID    string   // empty if no dst port filter configured
-	DstIPTMLIDs []string // ordered: v4 TML first (if present), v6 TML second; use pickDstIPTML to select
+	SrcTMLID     string // empty if no src port filter configured
+	DstTMLID     string // empty if no dst port filter configured
+	DstIPv4TMLID string // empty if no IPv4 destination IPs configured
+	DstIPv6TMLID string // empty if no IPv6 destination IPs configured
 }
 
 // Name prefixes of the per-pair filter lists. A list is named prefix+"<src>-<dst>".
@@ -99,7 +100,7 @@ func (zm *ZoneManager) ensurePortTMLs(ctx context.Context, site string, pairs []
 				if err != nil {
 					return nil, fmt.Errorf("ensure dst IPv4 TML %q: %w", name, err)
 				}
-				ids.DstIPTMLIDs = append(ids.DstIPTMLIDs, id)
+				ids.DstIPv4TMLID = id
 			}
 			if len(v6IPs) > 0 {
 				name := filterTMLName(filterDstIPsV6Prefix, pair)
@@ -107,7 +108,7 @@ func (zm *ZoneManager) ensurePortTMLs(ctx context.Context, site string, pairs []
 				if err != nil {
 					return nil, fmt.Errorf("ensure dst IPv6 TML %q: %w", name, err)
 				}
-				ids.DstIPTMLIDs = append(ids.DstIPTMLIDs, id)
+				ids.DstIPv6TMLID = id
 			}
 		}
 		result[key] = ids
@@ -188,31 +189,28 @@ func tmlItemsMatch(existing, desired []controller.TrafficMatchingListItem) bool 
 	return true
 }
 
-// pickDstIPTML selects the destination IP TML ID for a policy.
-//
-// ids is the DstIPTMLIDs slice from portTMLIDs — ordered v4 first (if present),
-// v6 second (if present). Selection rule:
-//
-//	len 0 → ""             no destination IP filter configured
-//	len 1 → ids[0]         single-family: both v4 and v6 policies share the same TML
-//	len 2 → ids[1] if ipv6 mixed: each policy uses the TML whose family matches (API ceiling)
-//	         ids[0] otherwise
-//
-// This keeps the destination filter family-agnostic: a v4-only dst IP is applied
-// to the v6 block policy as well (and vice versa), scoping both address families
-// to the same destination host.
-func pickDstIPTML(ids []string, ipv6 bool) string {
-	switch len(ids) {
-	case 0:
-		return ""
-	case 1:
-		return ids[0]
-	default: // len >= 2: mixed; use the family-matching TML
-		if ipv6 {
-			return ids[1]
-		}
-		return ids[0]
+// dstIPTML returns the destination IP list for a policy of the given family,
+// or "" when the pair has no destination IPs of that family.
+func (ids portTMLIDs) dstIPTML(ipv6 bool) string {
+	if ipv6 {
+		return ids.DstIPv6TMLID
 	}
+	return ids.DstIPv4TMLID
+}
+
+// pairCoversFamily reports whether a pair needs block policies for the family.
+// A pair limited to destination IPs of one family gets no policy for the other:
+// UniFi rejects a policy whose destination list is of the other family (HTTP 500),
+// and traffic of that family cannot reach those destinations anyway.
+func pairCoversFamily(pair config.ZonePair, ipv6 bool) bool {
+	if len(pair.DstIPs) == 0 {
+		return true
+	}
+	v4, v6 := classifyIPs(pair.DstIPs)
+	if ipv6 {
+		return len(v6) > 0
+	}
+	return len(v4) > 0
 }
 
 // classifyIPs splits a list of IPs/CIDRs into IPv4 and IPv6 groups.
@@ -238,7 +236,7 @@ func classifyIPs(ips []string) (v4, v6 []string) {
 func (zm *ZoneManager) cleanupOrphanedPortTMLs(ctx context.Context, site string, sitePortTMLs map[string]portTMLIDs) {
 	expectedIDs := make(map[string]bool, len(sitePortTMLs)*4)
 	for _, ids := range sitePortTMLs {
-		for _, id := range append([]string{ids.SrcTMLID, ids.DstTMLID}, ids.DstIPTMLIDs...) {
+		for _, id := range []string{ids.SrcTMLID, ids.DstTMLID, ids.DstIPv4TMLID, ids.DstIPv6TMLID} {
 			if id != "" {
 				expectedIDs[id] = true
 			}
