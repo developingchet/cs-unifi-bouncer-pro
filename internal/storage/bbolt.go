@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/vmihailenco/msgpack/v5"
 	bolt "go.etcd.io/bbolt"
+	berrors "go.etcd.io/bbolt/errors"
 )
 
 const (
@@ -75,7 +76,7 @@ func OpenBboltFileReadOnly(path string) (Store, error) {
 		ReadOnly: true,
 		Timeout:  3 * time.Second,
 	})
-	if errors.Is(err, bolt.ErrTimeout) {
+	if errors.Is(err, berrors.ErrTimeout) {
 		return nil, fmt.Errorf("open bbolt (read-only) at %s: %w", path, ErrDatabaseLocked)
 	}
 	if err != nil {
