@@ -1,0 +1,106 @@
+name: csue2e
+
+services:
+  unifi-db:
+    image: mongo:7.0
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=root
+      - MONGO_INITDB_ROOT_PASSWORD=e2e-root-pass
+      - MONGO_USER=unifi
+      - MONGO_PASS=e2e-unifi-pass
+      - MONGO_DBNAME=unifi
+      - MONGO_AUTHSOURCE=admin
+    volumes:
+      - ./init-mongo.sh:/docker-entrypoint-initdb.d/init-mongo.sh:ro
+      - unifi-db:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      retries: 30
+    networks: [e2e]
+
+  unifi:
+    image: lscr.io/linuxserver/unifi-network-application:latest
+    depends_on:
+      unifi-db:
+        condition: service_healthy
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - MONGO_USER=unifi
+      - MONGO_PASS=e2e-unifi-pass
+      - MONGO_HOST=unifi-db
+      - MONGO_PORT=27017
+      - MONGO_DBNAME=unifi
+      - MONGO_AUTHSOURCE=admin
+      - MEM_LIMIT=1024
+    volumes:
+      - unifi-config:/config
+    ports:
+      - "127.0.0.1:18443:8443"
+    networks: [e2e]
+
+  mock:
+    build: ./mock
+    ports:
+      - "127.0.0.1:18080:8080"
+    networks: [e2e]
+
+  crowdsec:
+    image: crowdsecurity/crowdsec:v1.7.8
+    environment:
+      - BOUNCER_KEY_unifi=e2e-lapi-key-0123456789abcdef
+      - DISABLE_ONLINE_API=true
+      - COLLECTIONS=
+    volumes:
+      - crowdsec-data:/var/lib/crowdsec/data
+    healthcheck:
+      test: ["CMD", "cscli", "lapi", "status"]
+      interval: 5s
+      retries: 30
+    networks: [e2e]
+
+  bouncer:
+    build: ..
+    image: cs-unifi-bouncer-pro:e2e
+    profiles: [bouncer]
+    depends_on:
+      crowdsec:
+        condition: service_healthy
+      mock:
+        condition: service_started
+    env_file: [bouncer.env]
+    environment:
+      - FIREWALL_MODE=${E2E_FIREWALL_MODE:-auto}
+      - DRY_RUN=${E2E_DRY_RUN:-false}
+      - UNIFI_API_KEY=${E2E_UNIFI_API_KEY:-}
+      - CROWDSEC_LAPI_URL=http://crowdsec:8080
+      - CROWDSEC_LAPI_KEY=e2e-lapi-key-0123456789abcdef
+      - CROWDSEC_POLL_INTERVAL=2s
+      - UNIFI_URL=https://unifi:8443
+      - UNIFI_VERIFY_TLS=false
+      - UNIFI_SITES=default
+      - LOG_LEVEL=debug
+    volumes:
+      - bouncer-data:/data
+    ports:
+      - "127.0.0.1:19090:9090"
+      - "127.0.0.1:18081:8081"
+    read_only: true
+    tmpfs:
+      - /tmp:size=10m,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+      - "seccomp:../security/seccomp-unifi.json"
+    cap_drop: [ALL]
+    networks: [e2e]
+
+volumes:
+  unifi-db:
+  unifi-config:
+  crowdsec-data:
+  bouncer-data:
+
+networks:
+  e2e:
