@@ -157,11 +157,27 @@ How it stays in scope:
   policy and zone against a before-snapshot. Any change is a failure, so do
   not edit the controller while it runs.
 
-Steps: read-only preflight; dry run with `FIREWALL_MODE=auto` (must resolve to
-zone and write nothing); provisioning; v4/v6 ban and unban; sharding at 5 per
-list; drift repair; SIGHUP and restart; drain. Takes about 10 minutes and
-writes logs and snapshots to `e2e.local/udm-<run id>/` (gitignored: the
-snapshots hold the controller's whole firewall configuration).
+Sections (`E2E_UDM_SECTIONS`, default `main filters upgrade`), each ending
+with a drain that must leave none of its objects:
+
+- `main`: dry run with `FIREWALL_MODE=auto` (must resolve to zone and write
+  nothing); provisioning; v4/v6 ban and unban; sharding at 5 per list; drift
+  repair; SIGHUP and restart; drain.
+- `filters`: the pair with destination ports and IPs plus the Cloudflare
+  whitelist, checked on the controller, then restarted without either; the
+  filter lists and Cloudflare objects must be removed.
+- `upgrade`: the published `E2E_UDM_FROM` image (default `1.2.5`, a Docker Hub
+  tag) bans IPv4, IPv6 and a `/32` range, then this checkout starts on the
+  same database. It must migrate the `/32` ban once, keep every list and
+  policy (same IDs, no duplicates), and release old bans on unban.
+
+The `filters` section and releases up to 1.2.5 act on fixed names
+(`crowdsec-ports-*`, `crowdsec-dstips-*`, `crowdsec-whitelist-cloudflare-*`)
+site-wide, so the preflight refuses to run while any such object exists.
+
+A full run takes about 20 minutes and writes logs and snapshots to
+`e2e.local/udm-<run id>/` (gitignored: the snapshots hold the controller's
+whole firewall configuration).
 
 ## What it covers
 
@@ -196,7 +212,8 @@ snapshots hold the controller's whole firewall configuration).
 | `lib.sh` | Helpers shared by `run.sh` and `settings.sh` (`decide`, `has_ip`, `wait_for`, `metric`, `offline`, `case_up`/`case_down`, `rejects`, ...) |
 | `settings.sh` | The settings matrix (see above) |
 | `deploy.sh` | The deployment matrix (see above). Works in `.deploy/` |
-| `udm.sh` | Zone mode against a UniFi OS console (see above). Reads `udm.env` |
+| `udm.sh`, `udm-lib.sh` | Zone mode against a UniFi OS console (see above). Reads `udm.env` |
+| `upgrade.sh` | `E2E_FROM=X.Y.Z`: the published release builds a ban database on the local stack, then this checkout takes it over. Needs a release that can log in to the self-hosted Network Application (after 1.2.5) |
 | `up.sh` | Starts the stack and completes the wizard, leaving it up |
 | `try.sh 'cmd'` | Runs a command with `lib.sh` loaded |
 | `outage.sh` | Focused repro of step 11. Needs a stack left up with `KEEP=1`. Writes `outage-bouncer.log` and `outage-unifi.log` |

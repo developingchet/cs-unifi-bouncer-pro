@@ -2,6 +2,7 @@
 *.log
 cases/
 udm-*/
+upgrade-*/
 udm.env
 .cookies
 .deploy/
