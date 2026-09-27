@@ -2,7 +2,6 @@
 .env.*
 !.env.example
 *.local
-!e2e.local/
 *.local.yml
 docker-compose.override.yml
 *.db
