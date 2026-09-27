@@ -456,7 +456,7 @@ Available at `:8081` (configurable via `HEALTH_ADDR`):
 cs-unifi-bouncer-pro run          # Start the daemon
 cs-unifi-bouncer-pro healthcheck  # Exit 0 if healthy (used by Docker HEALTHCHECK)
 cs-unifi-bouncer-pro reconcile    # One-shot full reconcile then exit
-cs-unifi-bouncer-pro status       # Inspect bbolt state after stopping the daemon
+cs-unifi-bouncer-pro status       # Inspect bbolt state
 cs-unifi-bouncer-pro drain --dry-run   # Preview what drain would remove
 cs-unifi-bouncer-pro drain --force     # Actually remove all managed objects
 cs-unifi-bouncer-pro validate     # Validate configuration (no API calls; CI-safe)
@@ -482,7 +482,7 @@ last_group_update  2026-02-24T12:00:00Z
 ```
 
 The `--data-dir` flag overrides the data directory (default: `DATA_DIR` env or `/data`).
-All `status` subcommands require the daemon to be stopped because bbolt holds an exclusive lock while it runs. With Docker Compose, use `docker compose stop cs-unifi-bouncer-pro`, then `docker compose run --rm --no-deps cs-unifi-bouncer-pro status`, and restart with `docker compose up -d`.
+While the daemon runs, bbolt holds an exclusive lock on the database. Run `status` inside the bouncer's container, for example `docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status`: it then reads a consistent snapshot the daemon serves on `HEALTH_ADDR` at `/status/db`. That endpoint answers only requests from the container itself (loopback or its own address). With the daemon stopped, `status` opens the database directly.
 
 ### `drain` subcommand
 
@@ -519,13 +519,15 @@ Exits 0 on success, 1 if any validation rule fails. Deprecation warnings and ins
 Runs three-phase diagnostics and prints a tabular result:
 
 1. **Config** — loads and validates configuration; fails fast if invalid
-2. **LAPI** — probes `CROWDSEC_LAPI_URL/v1/decisions?limit=1` for reachability
+2. **LAPI** — probes the unauthenticated `CROWDSEC_LAPI_URL/health` for reachability; with `--lapi-auth`, queries `CROWDSEC_LAPI_URL/v1/decisions?limit=1` with the bouncer key, which also checks `CROWDSEC_LAPI_KEY`
 3. **UniFi** — pings the controller; in auto mode, reports each site's detected firewall mode (`firewall_mode[site]`); for zone-mode sites, lists discovered zones
+
+CrowdSec records every address that authenticates with a bouncer key as a separate `<bouncer>@<ip>` entry, which can only be removed together with the parent key. Run `diagnose --lapi-auth` from the bouncer's own address: `docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro diagnose --lapi-auth`, or `docker run --rm --network container:cs-unifi-bouncer-pro ... diagnose --lapi-auth`. `validate` makes no LAPI call.
 
 ```
 CHECK                    STATUS  DETAIL
 config_valid             PASS    mode=zone sites=[default]
-lapi_reachable           PASS    http://crowdsec:8080 → 200 OK
+lapi_reachable           PASS    http://crowdsec:8080/health → 200 OK (key not checked; see --lapi-auth)
 unifi_reachable          PASS    https://192.168.1.1 ping ok
 firewall_mode[default]   PASS    zone
 zone_discovery[default]  PASS    3 zones found

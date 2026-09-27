@@ -400,7 +400,9 @@ the short name from the controller URL (`/manage/<name>/...`), not the display n
 
 **Cause:** The bouncer's LAPI key has been deleted from CrowdSec, or was never
 registered. CrowdSec answers an unknown bouncer key with 403 Forbidden;
-`diagnose` reports both as `lapi_reachable FAIL ... check CROWDSEC_LAPI_KEY`.
+`diagnose --lapi-auth` reports both as `lapi_reachable FAIL ... check CROWDSEC_LAPI_KEY`.
+Run it inside the bouncer's container (`docker exec`), so CrowdSec does not
+record another `<bouncer>@<ip>` entry for the key.
 
 **Fix:**
 

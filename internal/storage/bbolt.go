@@ -3,7 +3,9 @@ package storage
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -56,17 +58,28 @@ func NewBboltStore(dataDir string, log zerolog.Logger, maxEvents int) (Store, er
 	return &bboltStore{db: db, log: log, maxEvents: maxEvents}, nil
 }
 
+// ErrDatabaseLocked is returned by a read-only open while another process,
+// normally the running bouncer, holds the database lock.
+var ErrDatabaseLocked = errors.New("database is locked by another process")
+
 // NewBboltStoreReadOnly opens an existing bbolt database in read-only mode.
-// It does not create the file or buckets. The running daemon must release its
-// exclusive database lock before an offline status command can open it.
+// It does not create the file or buckets. While the daemon holds its exclusive
+// lock the open fails with ErrDatabaseLocked.
 func NewBboltStoreReadOnly(dataDir string) (Store, error) {
-	path := filepath.Join(dataDir, "bouncer.db")
+	return OpenBboltFileReadOnly(filepath.Join(dataDir, "bouncer.db"))
+}
+
+// OpenBboltFileReadOnly opens the bbolt database file at path read-only.
+func OpenBboltFileReadOnly(path string) (Store, error) {
 	db, err := bolt.Open(path, 0o600, &bolt.Options{
 		ReadOnly: true,
 		Timeout:  3 * time.Second,
 	})
+	if errors.Is(err, bolt.ErrTimeout) {
+		return nil, fmt.Errorf("open bbolt (read-only) at %s: %w", path, ErrDatabaseLocked)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("open bbolt (read-only) at %s (stop the running bouncer before offline status): %w", path, err)
+		return nil, fmt.Errorf("open bbolt (read-only) at %s: %w", path, err)
 	}
 	return &bboltStore{db: db, log: zerolog.Nop()}, nil
 }
@@ -369,4 +382,16 @@ func (s *bboltStore) SizeBytes() (int64, error) {
 
 func (s *bboltStore) Close() error {
 	return s.db.Close()
+}
+
+// WriteSnapshot writes a consistent copy of the database file to w, taken in
+// one read transaction, so it can be opened while this process holds the lock.
+func (s *bboltStore) WriteSnapshot(w io.Writer) (int64, error) {
+	var n int64
+	err := s.db.View(func(tx *bolt.Tx) error {
+		var err error
+		n, err = tx.WriteTo(w)
+		return err
+	})
+	return n, err
 }

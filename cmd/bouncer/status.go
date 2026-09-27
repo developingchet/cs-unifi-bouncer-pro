@@ -1,26 +1,35 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/bouncer"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/spf13/cobra"
 )
 
 // statusCmd prints a read-only summary of the bbolt database state.
 // It opens the database in read-only mode and prints ban counts, group info,
-// and policy info. It makes no API calls and needs the daemon's database lock released.
+// and policy info. It makes no UniFi or LAPI calls.
 func statusCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Print a read-only summary of bbolt state (no API calls)",
+		Short: "Print a read-only summary of bbolt state (no UniFi or LAPI calls)",
 		Long: `Print ban counts, shard groups, and firewall policies stored in bbolt.
-Opens the database in read-only mode. Stop the daemon first to release its database lock.`,
+Opens the database in read-only mode. While the bouncer runs, its database is
+locked; run status inside the bouncer's container (docker exec) and it reads a
+snapshot from the bouncer's health server instead.`,
 	}
 
 	defaultDataDir := os.Getenv("DATA_DIR")
@@ -39,14 +48,78 @@ Opens the database in read-only mode. Stop the daemon first to release its datab
 	return cmd
 }
 
-// withReadOnlyStore opens the database read-only for the duration of fn.
+// withReadOnlyStore opens the database read-only for the duration of fn. While
+// the bouncer runs it holds the database lock, so a snapshot is fetched from
+// its health server instead; that works from inside the bouncer's container
+// (docker exec) or network namespace.
 func withReadOnlyStore(dataDir string, fn func(storage.Store) error) error {
 	store, err := storage.NewBboltStoreReadOnly(dataDir)
+	if errors.Is(err, storage.ErrDatabaseLocked) {
+		return withSnapshotStore(dataDir, fn)
+	}
 	if err != nil {
 		return fmt.Errorf("open store (read-only): %w", err)
 	}
 	defer store.Close()
 	return fn(store)
+}
+
+func withSnapshotStore(dataDir string, fn func(storage.Store) error) error {
+	path, err := fetchDBSnapshot(dataDir)
+	if err != nil {
+		return fmt.Errorf("the database is locked by the running bouncer, and a snapshot could not be fetched from it "+
+			"(run status inside its container, or stop it first): %w", err)
+	}
+	defer func() {
+		if err := os.Remove(path); err != nil {
+			fmt.Fprintf(os.Stderr, "remove snapshot %s: %v\n", path, err)
+		}
+	}()
+	fmt.Fprintln(os.Stderr, "reading a snapshot from the running bouncer")
+	store, err := storage.OpenBboltFileReadOnly(path)
+	if err != nil {
+		return fmt.Errorf("open snapshot: %w", err)
+	}
+	defer store.Close()
+	return fn(store)
+}
+
+// fetchDBSnapshot saves the running bouncer's database snapshot next to the
+// database and returns its path.
+func fetchDBSnapshot(dataDir string) (string, error) {
+	healthURL, err := localHealthURL(config.HealthAddrFromEnv())
+	if err != nil {
+		return "", err
+	}
+	snapshotURL := strings.TrimSuffix(healthURL, "/healthz") + bouncer.DBSnapshotPath
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, snapshotURL, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%s returned HTTP %d", bouncer.DBSnapshotPath, resp.StatusCode)
+	}
+	f, err := os.CreateTemp(dataDir, "bouncer.db.status-*")
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", fmt.Errorf("save snapshot: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(f.Name())
+		return "", fmt.Errorf("save snapshot: %w", err)
+	}
+	return f.Name(), nil
 }
 
 func newTable() *tabwriter.Writer {
