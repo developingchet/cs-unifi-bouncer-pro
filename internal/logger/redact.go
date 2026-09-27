@@ -14,7 +14,9 @@ type RedactWriter struct {
 }
 
 var secretField = regexp.MustCompile(`(?i)((?:unifi_password|password|unifi_api_key|crowdsec_lapi_key|lapi[_-]?key|bouncer[_-]?api[_-]?key|x-api-key|api[_-]?key|(?:set-)?cookie|unifises|token)["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'[^']*'|[^\s,}\]]+)`)
-var bearerToken = regexp.MustCompile(`(?i)(Bearer\s+)[A-Za-z0-9_\-.]+`)
+// bearerToken covers the RFC 6750 token alphabet, which includes the "+", "/"
+// and "=" of standard base64.
+var bearerToken = regexp.MustCompile(`(?i)(Bearer\s+)[A-Za-z0-9\-._~+/]+=*`)
 
 // NewRedactWriter returns a RedactWriter that applies all default sensitive patterns.
 func NewRedactWriter(w io.Writer) *RedactWriter {
