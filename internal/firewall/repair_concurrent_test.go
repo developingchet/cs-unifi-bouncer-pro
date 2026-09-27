@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 )
@@ -21,7 +22,7 @@ func TestRepairInfrastructureDuringSyncs(t *testing.T) {
 			if mode == "zone" {
 				cfg.ZoneCfg.ZonePairs = []config.ZonePair{{Src: "wan", Dst: "lan"}}
 			}
-			mgr, ctrl, _ := newTestManager(t, cfg)
+			mgr, ctrl, store := newTestManager(t, cfg)
 			sites := []string{testSite}
 			if err := mgr.LoadInfrastructure(ctx, sites); err != nil {
 				t.Fatalf("LoadInfrastructure: %v", err)
@@ -42,7 +43,14 @@ func TestRepairInfrastructureDuringSyncs(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				for i := 0; i < 20; i++ {
-					if err := mgr.ApplyBan(ctx, testSite, fmt.Sprintf("198.51.100.%d", i+1), false); err != nil {
+					ip := fmt.Sprintf("198.51.100.%d", i+1)
+					// Reconcile removes controller IPs the store does not hold,
+					// so each ban is recorded first, as the daemon does.
+					if err := store.BanRecord(ip, time.Time{}, false); err != nil {
+						errs <- fmt.Errorf("BanRecord: %w", err)
+						return
+					}
+					if err := mgr.ApplyBan(ctx, testSite, ip, false); err != nil {
 						errs <- fmt.Errorf("ApplyBan: %w", err)
 						return
 					}
