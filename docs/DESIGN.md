@@ -298,12 +298,13 @@ last window's data is not lost.
 
 ### Health endpoints
 
-Two HTTP endpoints run on `HEALTH_ADDR` (default `:8081`):
+Three HTTP endpoints run on `HEALTH_ADDR` (default `:8081`):
 
 - `GET /healthz` — liveness probe; returns 200 if the process is running
 - `GET /readyz` — readiness probe; pings the UniFi controller and returns 200 only if the connection succeeds
+- `GET /status/db` — a consistent copy of the ban database for the `status` command, which cannot open the file while the daemon holds its lock. It answers only requests from the same host that carry the token the daemon writes to `status.token` in `DATA_DIR`, and serves one copy at a time.
 
-These are used by the Docker `HEALTHCHECK` directive and Kubernetes probes.
+`/healthz` and `/readyz` are used by the Docker `HEALTHCHECK` directive and Kubernetes probes.
 
 ### Structured logging
 
