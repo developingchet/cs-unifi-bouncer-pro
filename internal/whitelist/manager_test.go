@@ -3,6 +3,7 @@ package whitelist
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1024,8 +1025,13 @@ func TestDrain_DeletesAllWhitelistObjects(t *testing.T) {
 	ctrl.SetPolicies("test-site", []controller.ZonePolicy{
 		{ID: "p-v4", Name: "crowdsec-whitelist-cloudflare-External-Dmz-v4", Description: managedDesc, Action: "ALLOW"},
 		{ID: "p-v6", Name: "crowdsec-whitelist-cloudflare-External-Dmz-v6", Description: managedDesc, Action: "ALLOW"},
-		// UniFi-auto-created Return mirror (no description).
+		// UniFi-derived Return mirror of p-v4: the controller refuses to delete
+		// it directly and removes it with its base.
 		{ID: "p-ret", Name: "crowdsec-whitelist-cloudflare-External-Dmz-v4 (Return)", Action: "ALLOW"},
+		// Mirror whose base is gone: deleted.
+		{ID: "p-ret-orphan", Name: "crowdsec-whitelist-cloudflare-External-Old-v4 (Return)", Action: "ALLOW"},
+		// Same prefix without the bouncer's description: not ours.
+		{ID: "p-user", Name: "crowdsec-whitelist-cloudflare-mine", Action: "ALLOW"},
 		// Non-whitelist block policy — must be preserved.
 		{ID: "p-block", Name: "crowdsec-ban-External-Dmz-v4-0", Action: "BLOCK"},
 	})
@@ -1041,7 +1047,8 @@ func TestDrain_DeletesAllWhitelistObjects(t *testing.T) {
 		t.Fatalf("Drain failed: %v", err)
 	}
 
-	// 3 whitelist policies deleted (v4, v6, Return); 1 block policy kept.
+	// v4, v6 and the orphaned mirror are deleted; the mock does not remove a
+	// mirror with its base, so p-ret stays listed here.
 	if got := ctrl.Calls("DeleteZonePolicy"); got != 3 {
 		t.Errorf("DeleteZonePolicy calls: got %d, want 3", got)
 	}
@@ -1049,8 +1056,12 @@ func TestDrain_DeletesAllWhitelistObjects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListZonePolicies failed: %v", err)
 	}
-	if len(policies) != 1 || policies[0].ID != "p-block" {
-		t.Errorf("expected only block policy to remain, got %+v", policies)
+	var kept []string
+	for _, p := range policies {
+		kept = append(kept, p.ID)
+	}
+	if want := []string{"p-ret", "p-user", "p-block"}; !slices.Equal(kept, want) {
+		t.Errorf("policies left: %v, want %v", kept, want)
 	}
 
 	// 3 whitelist TMLs deleted (v4, v6, srcports); 1 ban TML kept.

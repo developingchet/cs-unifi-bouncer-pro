@@ -218,32 +218,12 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 // ensured.
 func (m *Manager) sweepOrphanPolicies(ctx context.Context, site string, existing []controller.ZonePolicy,
 	managedIDs map[string]bool) {
-	listed := make(map[string]bool, len(existing))
+	deletable := deletableWhitelistPolicies(existing)
 	for _, p := range existing {
-		listed[p.Name] = true
-	}
-	for _, p := range existing {
-		if !strings.HasPrefix(p.Name, whitelistPrefix) {
+		// Keep only the exact IDs just ensured. ID-based tracking handles
+		// duplicate-named policies: only the one ensureAllowPolicy returned is kept.
+		if !deletable[p.ID] || managedIDs[p.ID] {
 			continue
-		}
-		// UniFi derives a "(Return)" mirror from every ALLOW policy with
-		// AllowReturnTraffic=true, refuses to delete it while its base exists,
-		// and removes it with its base. Only a mirror left without one is deleted.
-		if base, isReturn := strings.CutSuffix(p.Name, " (Return)"); isReturn {
-			if listed[base] {
-				continue
-			}
-		} else {
-			// Keep only the exact IDs just ensured. ID-based tracking handles
-			// duplicate-named policies: only the one ensureAllowPolicy returned is kept.
-			if managedIDs[p.ID] {
-				continue
-			}
-			// Delete only policies that are ours to clean up (our description, or an
-			// empty description from before description support).
-			if p.Description != whitelistDescription && p.Description != "" {
-				continue
-			}
 		}
 		if err := m.ctrl.DeleteZonePolicy(ctx, site, p.ID); err != nil {
 			m.log.Warn().Err(err).Str("policy", p.Name).Msg("failed to delete orphaned whitelist policy")
@@ -252,6 +232,31 @@ func (m *Manager) sweepOrphanPolicies(ctx context.Context, site string, existing
 				Msg("deleted orphaned Cloudflare whitelist policy (zone pair removed from config)")
 		}
 	}
+}
+
+// deletableWhitelistPolicies returns the IDs of the listed whitelist policies
+// the bouncer may delete: forward policies carrying its description, and
+// "(Return)" mirrors whose base is no longer listed. UniFi derives a mirror
+// from every ALLOW policy with AllowReturnTraffic=true, refuses to delete it
+// while its base exists (derived-firewall-policy-deletion-forbidden), and
+// removes it together with its base.
+func deletableWhitelistPolicies(policies []controller.ZonePolicy) map[string]bool {
+	listed := make(map[string]bool, len(policies))
+	for _, p := range policies {
+		listed[p.Name] = true
+	}
+	deletable := make(map[string]bool)
+	for _, p := range policies {
+		if !strings.HasPrefix(p.Name, whitelistPrefix) {
+			continue
+		}
+		if base, isReturn := strings.CutSuffix(p.Name, " (Return)"); isReturn {
+			deletable[p.ID] = !listed[base]
+			continue
+		}
+		deletable[p.ID] = p.Description == whitelistDescription
+	}
+	return deletable
 }
 
 // sweepOrphanTMLs deletes per-pair filter TMLs (srcports, dstports, dstips)
@@ -518,14 +523,9 @@ func (m *Manager) Drain(ctx context.Context) error {
 		if err != nil {
 			m.log.Warn().Err(err).Str("site", site).Msg("Cloudflare drain: failed to list zone policies")
 		} else {
+			deletable := deletableWhitelistPolicies(policies)
 			for _, p := range policies {
-				if !strings.HasPrefix(p.Name, whitelistPrefix) {
-					continue
-				}
-				// Return mirrors are auto-created by UniFi — no description to check.
-				// Forward policies: only delete if description marks them as ours.
-				baseName := strings.TrimSuffix(p.Name, " (Return)")
-				if baseName == p.Name && p.Description != whitelistDescription && p.Description != "" {
+				if !deletable[p.ID] {
 					continue
 				}
 				if err := m.ctrl.DeleteZonePolicy(ctx, site, p.ID); err != nil {
