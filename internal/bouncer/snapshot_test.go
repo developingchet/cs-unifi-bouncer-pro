@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -54,6 +55,29 @@ func TestNewSnapshotServerWithoutSnapshotSupport(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, SnapshotTokenFile)); !os.IsNotExist(err) {
 		t.Errorf("token file written for a store without snapshots (stat err %v)", err)
+	}
+}
+
+func TestWriteTokenFileRestrictsExistingFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file modes are not enforced on Windows")
+	}
+	path := filepath.Join(t.TempDir(), SnapshotTokenFile)
+	if err := os.WriteFile(path, []byte("old token, longer than the new one......................................"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTokenFile(path, "new"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("mode = %o, want 600", mode)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "new" {
+		t.Errorf("content = %q, want %q", got, "new")
 	}
 }
 

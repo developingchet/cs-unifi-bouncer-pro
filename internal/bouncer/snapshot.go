@@ -58,15 +58,32 @@ func newSnapshotServer(store any, dataDir string, log zerolog.Logger) (*snapshot
 		return nil, fmt.Errorf("generate status token: %w", err)
 	}
 	token := hex.EncodeToString(raw)
-	path := filepath.Join(dataDir, SnapshotTokenFile)
-	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
-		return nil, fmt.Errorf("write status token: %w", err)
-	}
-	// WriteFile keeps the mode of a file that already exists.
-	if err := os.Chmod(path, 0o600); err != nil {
-		return nil, fmt.Errorf("restrict status token: %w", err)
+	if err := writeTokenFile(filepath.Join(dataDir, SnapshotTokenFile), token); err != nil {
+		return nil, err
 	}
 	return &snapshotServer{store: sw, token: token, busy: make(chan struct{}, 1), log: log}, nil
+}
+
+// writeTokenFile writes token to path, readable by its owner only. Opening
+// with a mode leaves an existing file's mode alone, so the open file is
+// restricted with fchmod (the seccomp profile allows it, not fchmodat).
+func writeTokenFile(path, token string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("write status token: %w", err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("restrict status token: %w", err)
+	}
+	if _, err := f.WriteString(token); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write status token: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("write status token: %w", err)
+	}
+	return nil
 }
 
 // ServeHTTP writes the database to a caller that presents the token from the
