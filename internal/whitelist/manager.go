@@ -25,12 +25,26 @@ type Manager struct {
 	ctrl     controller.Controller
 	sites    []string
 	provider *CloudflareProvider
+	blocks   BlockRecreator
 	log      zerolog.Logger
+}
+
+// BlockRecreator recreates block policies by ID, so the controller evaluates
+// them after policies created before the call.
+type BlockRecreator interface {
+	RecreatePolicies(ctx context.Context, site string, ids []string) error
 }
 
 // NewManager creates a whitelist Manager.
 func NewManager(ctrl controller.Controller, sites []string, provider *CloudflareProvider, log zerolog.Logger) *Manager {
 	return &Manager{ctrl: ctrl, sites: sites, provider: provider, log: log}
+}
+
+// SetBlockRecreator lets the manager recreate block policies that the
+// controller evaluates before a Cloudflare allow. Without one, such an order
+// is only reported.
+func (m *Manager) SetBlockRecreator(r BlockRecreator) {
+	m.blocks = r
 }
 
 // ZonePairConfig holds zone IDs for a source/destination pair, with optional port and IP filters.
@@ -204,32 +218,12 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 // ensured.
 func (m *Manager) sweepOrphanPolicies(ctx context.Context, site string, existing []controller.ZonePolicy,
 	managedIDs map[string]bool) {
-	listed := make(map[string]bool, len(existing))
+	deletable := deletableWhitelistPolicies(existing)
 	for _, p := range existing {
-		listed[p.Name] = true
-	}
-	for _, p := range existing {
-		if !strings.HasPrefix(p.Name, whitelistPrefix) {
+		// Keep only the exact IDs just ensured. ID-based tracking handles
+		// duplicate-named policies: only the one ensureAllowPolicy returned is kept.
+		if !deletable[p.ID] || managedIDs[p.ID] {
 			continue
-		}
-		// UniFi derives a "(Return)" mirror from every ALLOW policy with
-		// AllowReturnTraffic=true, refuses to delete it while its base exists,
-		// and removes it with its base. Only a mirror left without one is deleted.
-		if base, isReturn := strings.CutSuffix(p.Name, " (Return)"); isReturn {
-			if listed[base] {
-				continue
-			}
-		} else {
-			// Keep only the exact IDs just ensured. ID-based tracking handles
-			// duplicate-named policies: only the one ensureAllowPolicy returned is kept.
-			if managedIDs[p.ID] {
-				continue
-			}
-			// Delete only policies that are ours to clean up (our description, or an
-			// empty description from before description support).
-			if p.Description != whitelistDescription && p.Description != "" {
-				continue
-			}
 		}
 		if err := m.ctrl.DeleteZonePolicy(ctx, site, p.ID); err != nil {
 			m.log.Warn().Err(err).Str("policy", p.Name).Msg("failed to delete orphaned whitelist policy")
@@ -238,6 +232,31 @@ func (m *Manager) sweepOrphanPolicies(ctx context.Context, site string, existing
 				Msg("deleted orphaned Cloudflare whitelist policy (zone pair removed from config)")
 		}
 	}
+}
+
+// deletableWhitelistPolicies returns the IDs of the listed whitelist policies
+// the bouncer may delete: forward policies carrying its description, and
+// "(Return)" mirrors whose base is no longer listed. UniFi derives a mirror
+// from every ALLOW policy with AllowReturnTraffic=true, refuses to delete it
+// while its base exists (derived-firewall-policy-deletion-forbidden), and
+// removes it together with its base.
+func deletableWhitelistPolicies(policies []controller.ZonePolicy) map[string]bool {
+	listed := make(map[string]bool, len(policies))
+	for _, p := range policies {
+		listed[p.Name] = true
+	}
+	deletable := make(map[string]bool)
+	for _, p := range policies {
+		if !strings.HasPrefix(p.Name, whitelistPrefix) {
+			continue
+		}
+		if base, isReturn := strings.CutSuffix(p.Name, " (Return)"); isReturn {
+			deletable[p.ID] = !listed[base]
+			continue
+		}
+		deletable[p.ID] = p.Description == whitelistDescription
+	}
+	return deletable
 }
 
 // sweepOrphanTMLs deletes per-pair filter TMLs (srcports, dstports, dstips)
@@ -414,22 +433,63 @@ func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZoneP
 	return created, nil
 }
 
-// checkWhitelistOrder detects a block that would take precedence over a
-// Cloudflare allow. Integration-created policies cannot be moved with the
-// user-defined policy ordering endpoint.
+// checkWhitelistOrder makes sure no block takes precedence over a Cloudflare
+// allow. Integration-created policies cannot be moved with the user-defined
+// policy ordering endpoint, and the controller evaluates them in creation
+// order, so an allow added to a pair whose blocks already exist lands behind
+// them. Those blocks are recreated, which moves them behind the allow, and the
+// order is checked again.
 func (m *Manager) checkWhitelistOrder(ctx context.Context, site string, pair ZonePairConfig, policyIDs []string) error {
+	wrong, err := m.blocksAheadOfAllow(ctx, site, pair, policyIDs)
+	if err != nil || len(wrong) == 0 || m.blocks == nil {
+		return orderError(site, wrong, err)
+	}
+	ids := make([]string, 0, len(wrong))
+	seen := make(map[string]bool, len(wrong))
+	for _, w := range wrong {
+		if !seen[w.block.ID] {
+			seen[w.block.ID] = true
+			ids = append(ids, w.block.ID)
+		}
+	}
+	m.log.Info().Int("blocks", len(ids)).Str("site", site).Str("pair", pair.SrcName+"->"+pair.DstName).
+		Msg("block policies precede the Cloudflare allow; recreating them")
+	if err := m.blocks.RecreatePolicies(ctx, site, ids); err != nil {
+		m.log.Warn().Err(err).Str("site", site).Msg("could not recreate every block policy that precedes the Cloudflare allow")
+	}
+	wrong, err = m.blocksAheadOfAllow(ctx, site, pair, policyIDs)
+	return orderError(site, wrong, err)
+}
+
+// misorderedBlock is a block policy the controller evaluates before an allow.
+type misorderedBlock struct {
+	allow, block controller.ZonePolicy
+}
+
+func orderError(site string, wrong []misorderedBlock, err error) error {
+	if err != nil || len(wrong) == 0 {
+		return err
+	}
+	w := wrong[0]
+	return fmt.Errorf("cloudflare allow policy %s follows block %s in site %s; recreate the block after the allow policy", w.allow.Name, w.block.Name, site)
+}
+
+// blocksAheadOfAllow lists the enabled blocks of pair's zones and address
+// family that the controller evaluates before one of the allows in policyIDs.
+func (m *Manager) blocksAheadOfAllow(ctx context.Context, site string, pair ZonePairConfig, policyIDs []string) ([]misorderedBlock, error) {
 	policies, err := m.ctrl.ListZonePolicies(ctx, site)
 	if err != nil {
-		return fmt.Errorf("list policies to verify Cloudflare order in site %s: %w", site, err)
+		return nil, fmt.Errorf("list policies to verify Cloudflare order in site %s: %w", site, err)
 	}
 	byID := make(map[string]controller.ZonePolicy, len(policies))
 	for _, p := range policies {
 		byID[p.ID] = p
 	}
+	var wrong []misorderedBlock
 	for _, id := range policyIDs {
 		allow, found := byID[id]
 		if !found {
-			return fmt.Errorf("cloudflare allow policy %s missing from site %s after sync", id, site)
+			return nil, fmt.Errorf("cloudflare allow policy %s missing from site %s after sync", id, site)
 		}
 		for _, p := range policies {
 			if !p.Enabled || p.Action != "BLOCK" || p.SrcZone != pair.SrcZoneID || p.DstZone != pair.DstZoneID {
@@ -446,11 +506,11 @@ func (m *Manager) checkWhitelistOrder(ctx context.Context, site string, pair Zon
 				continue
 			}
 			if *p.Index <= *allow.Index {
-				return fmt.Errorf("cloudflare allow policy %s follows block %s in site %s; recreate the block after the allow policy", allow.Name, p.Name, site)
+				wrong = append(wrong, misorderedBlock{allow: allow, block: p})
 			}
 		}
 	}
-	return nil
+	return wrong, nil
 }
 
 // Drain removes all Cloudflare whitelist policies and TMLs from all managed
@@ -463,14 +523,9 @@ func (m *Manager) Drain(ctx context.Context) error {
 		if err != nil {
 			m.log.Warn().Err(err).Str("site", site).Msg("Cloudflare drain: failed to list zone policies")
 		} else {
+			deletable := deletableWhitelistPolicies(policies)
 			for _, p := range policies {
-				if !strings.HasPrefix(p.Name, whitelistPrefix) {
-					continue
-				}
-				// Return mirrors are auto-created by UniFi — no description to check.
-				// Forward policies: only delete if description marks them as ours.
-				baseName := strings.TrimSuffix(p.Name, " (Return)")
-				if baseName == p.Name && p.Description != whitelistDescription && p.Description != "" {
+				if !deletable[p.ID] {
 					continue
 				}
 				if err := m.ctrl.DeleteZonePolicy(ctx, site, p.ID); err != nil {

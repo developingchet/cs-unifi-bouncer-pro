@@ -349,6 +349,14 @@ func (b *Bouncer) serveHealth(ctx context.Context) error {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/readyz", b.ready)
+	if !b.cfg.DryRun {
+		snap, err := newSnapshotServer(b.store, b.cfg.DataDir, b.log)
+		if err != nil {
+			b.log.Warn().Err(err).Msg("status snapshots disabled")
+		} else if snap != nil {
+			mux.Handle(DBSnapshotPath, snap)
+		}
+	}
 
 	srv := &http.Server{
 		Addr:              b.cfg.HealthAddr,
@@ -384,6 +392,7 @@ func (b *Bouncer) ready(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		lapiReq.Header.Set("X-Api-Key", b.cfg.CrowdSecLAPIKey)
+		lapiReq.Header.Set("User-Agent", lapihttp.UserAgent(BinaryVersion))
 		lapiResp, err := b.lapiHTTP.Do(lapiReq)
 		if err != nil {
 			http.Error(w, "lapi: unreachable", http.StatusServiceUnavailable)

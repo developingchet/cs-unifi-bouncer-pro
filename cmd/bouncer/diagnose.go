@@ -88,87 +88,102 @@ type diagCheck struct {
 
 // diagnoseCmd runs a structured connectivity probe against LAPI and UniFi.
 func diagnoseCmd() *cobra.Command {
-	return &cobra.Command{
+	var lapiAuth bool
+	cmd := &cobra.Command{
 		Use:   "diagnose",
 		Short: "Run connectivity checks against LAPI and UniFi controller",
 		Long: `Runs three-phase diagnostics:
   1. Load and validate configuration
-  2. Probe CrowdSec LAPI reachability
+  2. Probe CrowdSec LAPI reachability (its /health endpoint; with --lapi-auth,
+     an authenticated decision query that also checks CROWDSEC_LAPI_KEY)
   3. Probe UniFi controller reachability, and if zone mode: discover and list zones
 
+CrowdSec records every address that authenticates with a bouncer key as a
+separate "<bouncer>@<ip>" entry, which only a removal of the parent key
+deletes. Run --lapi-auth from the bouncer's own address, for example
+docker exec, or docker run --network container:cs-unifi-bouncer-pro.
+
 Exits 0 when all checks pass, 1 if any check fails.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			var checks []diagCheck
-			allPass := true
+	}
+	cmd.Flags().BoolVar(&lapiAuth, "lapi-auth", false, "also check CROWDSEC_LAPI_KEY with an authenticated LAPI query")
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		var checks []diagCheck
+		allPass := true
 
-			cfg, err := config.Load()
-			if err != nil {
-				checks = append(checks, diagCheck{"config_valid", "FAIL", err.Error()})
-				printDiagChecks(checks)
-				os.Exit(1)
-			}
-			checks = append(checks, diagCheck{
-				"config_valid", "PASS",
-				fmt.Sprintf("mode=%s sites=%v", cfg.FirewallMode, cfg.UnifiSites),
-			})
+		cfg, err := config.Load()
+		if err != nil {
+			checks = append(checks, diagCheck{"config_valid", "FAIL", err.Error()})
+			printDiagChecks(checks)
+			os.Exit(1)
+		}
+		checks = append(checks, diagCheck{
+			"config_valid", "PASS",
+			fmt.Sprintf("mode=%s sites=%v", cfg.FirewallMode, cfg.UnifiSites),
+		})
 
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 
-			lapiCheck := probeLAPI(ctx, cfg)
-			checks = append(checks, lapiCheck)
-			allPass = allPass && lapiCheck.status != "FAIL"
+		lapiCheck := probeLAPI(ctx, cfg, lapiAuth)
+		checks = append(checks, lapiCheck)
+		allPass = allPass && lapiCheck.status != "FAIL"
 
-			ctrl, ctrlErr := controller.NewClient(ctx, controllerConfig(cfg), zerolog.Nop())
-			if ctrlErr != nil {
-				checks = append(checks, diagCheck{"unifi_reachable", "FAIL", ctrlErr.Error()})
-				allPass = false
-				printDiagChecks(checks)
-				if !allPass {
-					os.Exit(1)
-				}
-				return nil
-			}
-			defer ctrl.Close()
-
-			if pingErr := ctrl.Ping(ctx); pingErr != nil {
-				checks = append(checks, diagCheck{"unifi_reachable", "FAIL", pingErr.Error()})
-				allPass = false
-			} else {
-				checks = append(checks, diagCheck{"unifi_reachable", "PASS", cfg.UnifiURL + " ping ok"})
-			}
-
-			if cfg.FirewallMode != "legacy" {
-				for _, site := range cfg.UnifiSites {
-					siteChecks, ok := diagnoseSiteZones(ctx, ctrl, cfg.FirewallMode, site)
-					checks = append(checks, siteChecks...)
-					allPass = allPass && ok
-				}
-			}
-
+		ctrl, ctrlErr := controller.NewClient(ctx, controllerConfig(cfg), zerolog.Nop())
+		if ctrlErr != nil {
+			checks = append(checks, diagCheck{"unifi_reachable", "FAIL", ctrlErr.Error()})
+			allPass = false
 			printDiagChecks(checks)
 			if !allPass {
 				os.Exit(1)
 			}
 			return nil
-		},
+		}
+		defer ctrl.Close()
+
+		if pingErr := ctrl.Ping(ctx); pingErr != nil {
+			checks = append(checks, diagCheck{"unifi_reachable", "FAIL", pingErr.Error()})
+			allPass = false
+		} else {
+			checks = append(checks, diagCheck{"unifi_reachable", "PASS", cfg.UnifiURL + " ping ok"})
+		}
+
+		if cfg.FirewallMode != "legacy" {
+			for _, site := range cfg.UnifiSites {
+				siteChecks, ok := diagnoseSiteZones(ctx, ctrl, cfg.FirewallMode, site)
+				checks = append(checks, siteChecks...)
+				allPass = allPass && ok
+			}
+		}
+
+		printDiagChecks(checks)
+		if !allPass {
+			os.Exit(1)
+		}
+		return nil
 	}
+	return cmd
 }
 
-// probeLAPI checks that the LAPI answers an authenticated decision query.
-// A 401 or 403 fails (CrowdSec answers 403 to an unknown bouncer key); any
-// other non-2xx answer is a warning.
-func probeLAPI(ctx context.Context, cfg *config.Config) diagCheck {
+// probeLAPI checks that the LAPI answers. Without authenticate it queries the
+// unauthenticated /health endpoint. An authenticated query also checks the
+// key, but CrowdSec registers every new calling address as a separate
+// "<bouncer>@<ip>" entry, so it should come from the bouncer's own address.
+func probeLAPI(ctx context.Context, cfg *config.Config, authenticate bool) diagCheck {
 	const name = "lapi_reachable"
 	client, err := lapihttp.NewClient(cfg.CrowdSecLAPIVerifyTLS, cfg.CrowdSecLAPICACert, 10*time.Second)
 	if err != nil {
 		return diagCheck{name, "FAIL", err.Error()}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.CrowdSecLAPIURL+"/v1/decisions?limit=1", nil)
+	base := strings.TrimRight(cfg.CrowdSecLAPIURL, "/")
+	if !authenticate {
+		return probeLAPIHealth(ctx, client, base)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/decisions?limit=1", nil)
 	if err != nil {
 		return diagCheck{name, "FAIL", err.Error()}
 	}
 	req.Header.Set("X-Api-Key", cfg.CrowdSecLAPIKey)
+	req.Header.Set("User-Agent", lapihttp.UserAgent(Version))
 	resp, err := client.Do(req)
 	if err != nil {
 		return diagCheck{name, "FAIL", err.Error()}
@@ -183,6 +198,25 @@ func probeLAPI(ctx context.Context, cfg *config.Config) diagCheck {
 	default:
 		return diagCheck{name, "WARN", detail}
 	}
+}
+
+func probeLAPIHealth(ctx context.Context, client *http.Client, base string) diagCheck {
+	const name = "lapi_reachable"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/health", nil)
+	if err != nil {
+		return diagCheck{name, "FAIL", err.Error()}
+	}
+	req.Header.Set("User-Agent", lapihttp.UserAgent(Version))
+	resp, err := client.Do(req)
+	if err != nil {
+		return diagCheck{name, "FAIL", err.Error()}
+	}
+	_ = resp.Body.Close()
+	detail := fmt.Sprintf("%s → %d %s", base+"/health", resp.StatusCode, http.StatusText(resp.StatusCode))
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return diagCheck{name, "PASS", detail + " (key not checked; see --lapi-auth)"}
+	}
+	return diagCheck{name, "WARN", detail}
 }
 
 // diagnoseSiteZones resolves the firewall mode for one site (in auto mode, the

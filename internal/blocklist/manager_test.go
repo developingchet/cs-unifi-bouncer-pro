@@ -41,6 +41,8 @@ func (m *mockFWManager) ApplyBan(_ context.Context, _, _ string, _ bool) error {
 
 func (m *mockFWManager) ApplyUnban(_ context.Context, _, _ string, _ bool) error  { return nil }
 func (m *mockFWManager) EnsureInfrastructure(_ context.Context, _ []string) error { return nil }
+func (m *mockFWManager) LoadInfrastructure(_ context.Context, _ []string) error   { return nil }
+func (m *mockFWManager) RepairInfrastructure(_ context.Context, _ []string) error { return nil }
 func (m *mockFWManager) PrepareDrain(_ context.Context, _ []string) error         { return nil }
 func (m *mockFWManager) Reconcile(_ context.Context, _ []string) (*firewall.ReconcileResult, error) {
 	return &firewall.ReconcileResult{}, nil

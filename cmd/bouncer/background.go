@@ -156,7 +156,7 @@ func cloudflarePairs(cfg *config.Config) ([]whitelist.ZonePairConfig, error) {
 // is off, objects left by an earlier run are drained; they can only exist if
 // an API key created them.
 func startCloudflareWhitelist(ctx context.Context, cfg *config.Config, ctrl controller.Controller,
-	pairs []whitelist.ZonePairConfig, log zerolog.Logger,
+	zm *firewall.ZoneManager, pairs []whitelist.ZonePairConfig, log zerolog.Logger,
 ) *whitelist.Manager {
 	if cfg.DryRun {
 		return nil
@@ -171,6 +171,9 @@ func startCloudflareWhitelist(ctx context.Context, cfg *config.Config, ctrl cont
 	}
 	provider := whitelist.NewCloudflareProvider(cfg.CloudflareIPv4URL, cfg.CloudflareIPv6URL)
 	mgr := whitelist.NewManager(ctrl, cfg.UnifiSites, provider, log)
+	if zm != nil {
+		mgr.SetBlockRecreator(zm)
+	}
 	if err := mgr.Sync(ctx, pairs); err != nil {
 		log.Error().Err(err).
 			Msg("initial Cloudflare whitelist sync FAILED — Cloudflare IPs will NOT be whitelisted until next tick; false positives possible")
@@ -179,6 +182,31 @@ func startCloudflareWhitelist(ctx context.Context, cfg *config.Config, ctrl cont
 		log.Info().Msg("Cloudflare whitelist initial sync complete")
 	}
 	return mgr
+}
+
+// repairAndSyncWhitelist ensures the block policy or rule of every loaded
+// shard, then runs the Cloudflare whitelist: the first sync, then a refresh
+// every CLOUDFLARE_REFRESH_INTERVAL. Shards that could not be provisioned are
+// retried by the next sync; any other repair error is sent on failed and
+// stops the daemon, as it did when the repair ran before startup finished.
+func repairAndSyncWhitelist(ctx context.Context, cfg *config.Config, ctrl controller.Controller,
+	fwMgr firewall.Manager, cfPairs []whitelist.ZonePairConfig, failed chan<- error, log zerolog.Logger,
+) {
+	start := time.Now()
+	log.Info().Msg("repairing firewall policies and rules")
+	err := fwMgr.RepairInfrastructure(ctx, cfg.UnifiSites)
+	if ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		failed <- fmt.Errorf("repair firewall infrastructure: %w", err)
+		return
+	}
+	log.Info().Stringer("elapsed", time.Since(start)).Msg("firewall policies and rules repaired")
+	cfManager := startCloudflareWhitelist(ctx, cfg, ctrl, fwMgr.ZoneManager(), cfPairs, log)
+	if cfManager != nil {
+		runCloudflareRefresh(ctx, cfManager, cfPairs, cfg.CloudflareRefreshInterval, log)
+	}
 }
 
 func runCloudflareRefresh(ctx context.Context, mgr *whitelist.Manager, pairs []whitelist.ZonePairConfig, interval time.Duration, log zerolog.Logger) {

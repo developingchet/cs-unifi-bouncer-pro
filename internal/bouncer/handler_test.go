@@ -65,6 +65,9 @@ func (m *mockFirewallManager) EnsureInfrastructure(_ context.Context, sites []st
 	return nil
 }
 
+func (m *mockFirewallManager) LoadInfrastructure(_ context.Context, _ []string) error   { return nil }
+func (m *mockFirewallManager) RepairInfrastructure(_ context.Context, _ []string) error { return nil }
+
 func (m *mockFirewallManager) PrepareDrain(_ context.Context, _ []string) error { return nil }
 
 func (m *mockFirewallManager) SyncDirty(_ context.Context, sites []string) error {

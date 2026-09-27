@@ -111,7 +111,7 @@ func (zm *ZoneManager) ensurePoliciesForPair(ctx context.Context, site string, p
 		created, err := zm.ensureShardPolicy(ctx, site, pair, zoneMap, existingByID, ipv6, ref, !firstCreate)
 		if err != nil {
 			sm.MarkUnprovisioned(ref.Index)
-			failed = append(failed, fmt.Errorf("%s shard %d (%s->%s): %w", Family(ipv6), ref.Index, pair.Src, pair.Dst, err))
+			failed = append(failed, &shardError{family: Family(ipv6), index: ref.Index, scope: pair.Src + "->" + pair.Dst, err: err})
 			continue
 		}
 		if created {
@@ -281,6 +281,7 @@ func (zm *ZoneManager) repairPolicy(ctx context.Context, site string, current, d
 	}
 	var nf *controller.ErrNotFound
 	if !errors.As(err, &nf) {
+		zm.log.Warn().Err(err).Str("policy", desired.Name).Str("site", site).Msg("controller rejected zone policy update")
 		return false, fmt.Errorf("update zone policy %s: %w", desired.Name, err)
 	}
 	return zm.confirmPolicyGone(ctx, site, current, existingByID)
@@ -358,7 +359,55 @@ func stagedPolicyName(desired controller.ZonePolicy) string {
 	parts := []string{desired.Name, desired.SrcZone, desired.DstZone, desired.IPVersion,
 		desired.TrafficMatchingListIDs[0], desired.SrcPortTMLID, desired.DstPortTMLID, desired.DstIPTMLID}
 	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return "crowdsec-policy-stage-" + hex.EncodeToString(digest[:10])
+	return stagedPolicyPrefix + hex.EncodeToString(digest[:10])
+}
+
+const stagedPolicyPrefix = "crowdsec-policy-stage-"
+
+// RecreatePolicies replaces each block policy in ids with an identical copy.
+// The controller evaluates policies in creation order, so a recreated block
+// moves behind policies created since, such as a Cloudflare ALLOW added for
+// the same zone pair. The shard stays covered throughout: the copy is staged
+// before the old policy is deleted. Only policies this bouncer owns are
+// recreated; any other ID is an error.
+func (zm *ZoneManager) RecreatePolicies(ctx context.Context, site string, ids []string) error {
+	zm.opMu.Lock()
+	defer zm.opMu.Unlock()
+
+	existingByID, err := zm.policiesByID(ctx, site)
+	if err != nil {
+		return fmt.Errorf("list zone policies for site %s: %w", site, err)
+	}
+	var errs []error
+	for _, id := range ids {
+		current, found := existingByID[id]
+		if !found {
+			errs = append(errs, fmt.Errorf("zone policy %s not found in site %s", id, site))
+			continue
+		}
+		if !zm.ownsBlockPolicy(current) {
+			errs = append(errs, fmt.Errorf("zone policy %s in site %s is not managed by this bouncer", current.Name, site))
+			continue
+		}
+		desired := current
+		desired.ID = ""
+		desired.Index = nil
+		if err := zm.replacePolicy(ctx, site, current, desired, existingByID); err != nil {
+			errs = append(errs, fmt.Errorf("recreate zone policy %s: %w", current.Name, err))
+			continue
+		}
+		zm.log.Info().Str("policy", current.Name).Str("site", site).
+			Msg("recreated zone policy so it follows newer policies for its zone pair")
+	}
+	return errors.Join(errs...)
+}
+
+// ownsBlockPolicy reports whether p is a block policy this bouncer keeps under
+// its own name. Staged copies are transient and excluded.
+func (zm *ZoneManager) ownsBlockPolicy(p controller.ZonePolicy) bool {
+	prefix := zm.namer.PolicyPrefix()
+	return p.Action == "BLOCK" && p.Description == zm.cfg.Description &&
+		prefix != "" && strings.HasPrefix(p.Name, prefix) && !strings.HasPrefix(p.Name, stagedPolicyPrefix)
 }
 
 // confirmPolicyGone handles a 404 on update. A restarting controller answers

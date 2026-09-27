@@ -400,7 +400,9 @@ the short name from the controller URL (`/manage/<name>/...`), not the display n
 
 **Cause:** The bouncer's LAPI key has been deleted from CrowdSec, or was never
 registered. CrowdSec answers an unknown bouncer key with 403 Forbidden;
-`diagnose` reports both as `lapi_reachable FAIL ... check CROWDSEC_LAPI_KEY`.
+`diagnose --lapi-auth` reports both as `lapi_reachable FAIL ... check CROWDSEC_LAPI_KEY`.
+Run it inside the bouncer's container (`docker exec`), so CrowdSec does not
+record another `<bouncer>@<ip>` entry for the key.
 
 **Fix:**
 
@@ -441,18 +443,9 @@ Common causes and fixes:
 
 **Symptom:** Traffic from Cloudflare IPs is being dropped despite the whitelist being enabled.
 
-**Cause:** ALLOW policies must be created before block shard policies — they are evaluated in ascending index order. If the bouncer was redeployed without draining first, block policies may have lower indices than the ALLOW policies.
+**Cause:** policies are evaluated in ascending index order, so an ALLOW policy must have a lower index than the block policies of its zone pair. The bouncer recreates its own block policies behind a newer ALLOW after each whitelist sync. If the log shows `cloudflare allow policy ... follows block ...`, the block is one it does not manage (or recreating it failed; the preceding warning says why).
 
-**Fix:**
-
-```bash
-# 1. Stop the daemon to release the bbolt lock, then drain managed objects
-docker compose stop cs-unifi-bouncer-pro
-docker compose run --rm --no-deps cs-unifi-bouncer-pro drain --force
-
-# 2. Restart — ALLOW policies are created first (startup sync), then block shard policies
-docker compose up -d cs-unifi-bouncer-pro
-```
+**Fix:** move or recreate a block policy you created yourself after the ALLOW. If the conflicting block is one of the bouncer's, fix the cause given in the `could not recreate every block policy` warning and restart the bouncer: the whitelist sync runs at startup and then every `CLOUDFLARE_REFRESH_INTERVAL`, and each run retries.
 
 ### Port filter TML not applied to whitelist policy
 

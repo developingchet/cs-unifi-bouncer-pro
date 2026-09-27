@@ -2,6 +2,7 @@ package firewall
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -37,6 +38,15 @@ type Manager interface {
 	// EnsureInfrastructure bootstraps all firewall groups, rules, and policies
 	// for every configured site. Must be called before ApplyBan/ApplyUnban.
 	EnsureInfrastructure(ctx context.Context, sites []string) error
+
+	// LoadInfrastructure is the part of EnsureInfrastructure that must finish
+	// before ApplyBan/ApplyUnban: it resolves each site's mode and loads its
+	// shards. RepairInfrastructure does the rest and may run alongside bans.
+	LoadInfrastructure(ctx context.Context, sites []string) error
+
+	// RepairInfrastructure ensures the block policy or rule of every shard
+	// loaded by LoadInfrastructure.
+	RepairInfrastructure(ctx context.Context, sites []string) error
 
 	// PrepareDrain loads current managed objects without creating or changing
 	// firewall objects. Drain uses this snapshot for deletion or preview.
@@ -141,6 +151,48 @@ func NewManager(cfg ManagerConfig, ctrl controller.Controller, store storage.Sto
 
 // EnsureInfrastructure bootstraps all groups and rules/policies for every site.
 func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) error {
+	if err := m.LoadInfrastructure(ctx, sites); err != nil {
+		return err
+	}
+	return m.RepairInfrastructure(ctx, sites)
+}
+
+// RepairInfrastructure ensures the block policy or rule of every loaded shard.
+// Shards that cannot be provisioned are retried on later syncs and do not
+// fail the call.
+func (m *managerImpl) RepairInfrastructure(ctx context.Context, sites []string) error {
+	for _, site := range sites {
+		m.mu.RLock()
+		v4Mgr := m.v4Mgrs[site]
+		v6Mgr := m.v6Mgrs[site]
+		m.mu.RUnlock()
+		if v4Mgr == nil {
+			return fmt.Errorf("site %s has no loaded infrastructure", site)
+		}
+		mode := m.cachedMode(site)
+		if m.cfg.DryRun {
+			m.log.Info().Str("site", site).Str("mode", mode).
+				Msg("[DRY-RUN] would ensure firewall rules or policies for all shards")
+			continue
+		}
+		switch mode {
+		case "legacy":
+			if err := m.tolerateShardFailures(site, m.legacyMgr.EnsureRules(ctx, site, v4Mgr, v6Mgr)); err != nil {
+				return fmt.Errorf("ensure legacy rules for site %s: %w", site, err)
+			}
+		case "zone":
+			if err := m.tolerateShardFailures(site, m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr)); err != nil {
+				return fmt.Errorf("ensure zone policies for site %s: %w", site, err)
+			}
+		}
+	}
+	return nil
+}
+
+// LoadInfrastructure resolves each site's firewall mode and loads its shards,
+// so bans can be applied. The block policies or rules of loaded shards are
+// ensured by RepairInfrastructure.
+func (m *managerImpl) LoadInfrastructure(ctx context.Context, sites []string) error {
 	m.bgCtxMu.Do(func() { m.bgCtx = ctx })
 	m.sites = sites
 
@@ -197,28 +249,11 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 		}
 		m.mu.RUnlock()
 
-		switch mode {
-		case "legacy":
-			if m.cfg.DryRun {
-				m.log.Info().Str("site", site).Str("mode", "legacy").
-					Msg("[DRY-RUN] would ensure legacy firewall rules for all shards")
-			} else {
-				if err := m.tolerateShardFailures(site, m.legacyMgr.EnsureRules(ctx, site, v4Mgr, v6Mgr)); err != nil {
-					return fmt.Errorf("ensure legacy rules for site %s: %w", site, err)
-				}
-			}
-		case "zone":
-			if m.cfg.DryRun {
-				m.log.Info().Str("site", site).Str("mode", "zone").
-					Msg("[DRY-RUN] would ensure zone policies for all shards")
-			} else {
-				// Bootstrap performs fail-fast site UUID resolution and zone discovery.
-				if err := m.zoneMgr.Bootstrap(ctx, []string{site}); err != nil {
-					return fmt.Errorf("zone bootstrap for site %s: %w", site, err)
-				}
-				if err := m.tolerateShardFailures(site, m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr)); err != nil {
-					return fmt.Errorf("ensure zone policies for site %s: %w", site, err)
-				}
+		// Bootstrap performs fail-fast site UUID resolution and zone discovery,
+		// which a newly activated shard needs for its policies.
+		if mode == "zone" && !m.cfg.DryRun {
+			if err := m.zoneMgr.Bootstrap(ctx, []string{site}); err != nil {
+				return fmt.Errorf("zone bootstrap for site %s: %w", site, err)
 			}
 		}
 	}
@@ -285,11 +320,12 @@ func (m *managerImpl) cleanupOrphanedShardGroups(ctx context.Context, site, mode
 // counted in unsynced_ips, which is better than refusing to start and
 // enforcing nothing.
 func (m *managerImpl) tolerateShardFailures(site string, err error) error {
-	if err == nil || !IsShardProvisionError(err) {
+	var spe *ShardProvisionError
+	if err == nil || !errors.As(err, &spe) {
 		return err
 	}
-	m.log.Error().Err(err).Str("site", site).
-		Msg("some shards have no block policy or rule; their bans are not enforced yet and are retried on every sync")
+	m.log.Warn().Err(err).Str("site", site).Strs("shards", spe.Shards()).
+		Msg("shards have no block policy or rule yet; their bans are not enforced until a sync provisions them")
 	return nil
 }
 

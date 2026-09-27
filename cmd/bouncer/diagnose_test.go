@@ -50,23 +50,36 @@ func TestCheckSitesExist(t *testing.T) {
 func TestProbeLAPI(t *testing.T) {
 	tests := []struct {
 		name       string
+		auth       bool
 		code       int
+		wantPath   string
 		wantStatus string
 		wantKeyTip bool
 	}{
-		{name: "ok", code: http.StatusOK, wantStatus: "PASS"},
-		{name: "unauthorized", code: http.StatusUnauthorized, wantStatus: "FAIL", wantKeyTip: true},
-		{name: "unknown bouncer key", code: http.StatusForbidden, wantStatus: "FAIL", wantKeyTip: true},
-		{name: "server error", code: http.StatusInternalServerError, wantStatus: "WARN"},
+		{name: "health ok", code: http.StatusOK, wantPath: "/health", wantStatus: "PASS"},
+		{name: "health error", code: http.StatusServiceUnavailable, wantPath: "/health", wantStatus: "WARN"},
+		{name: "authenticated ok", auth: true, code: http.StatusOK, wantPath: "/v1/decisions", wantStatus: "PASS"},
+		{name: "unauthorized", auth: true, code: http.StatusUnauthorized, wantPath: "/v1/decisions", wantStatus: "FAIL", wantKeyTip: true},
+		{name: "unknown bouncer key", auth: true, code: http.StatusForbidden, wantPath: "/v1/decisions", wantStatus: "FAIL", wantKeyTip: true},
+		{name: "server error", auth: true, code: http.StatusInternalServerError, wantPath: "/v1/decisions", wantStatus: "WARN"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tt.wantPath {
+					t.Errorf("path = %s, want %s", r.URL.Path, tt.wantPath)
+				}
+				if hasKey := r.Header.Get("X-Api-Key") != ""; hasKey != tt.auth {
+					t.Errorf("request carries the API key: %v, want %v", hasKey, tt.auth)
+				}
+				if ua := r.Header.Get("User-Agent"); !strings.HasPrefix(ua, "crowdsec-unifi-bouncer/") {
+					t.Errorf("User-Agent = %q, want the bouncer's own", ua)
+				}
 				w.WriteHeader(tt.code)
 			}))
 			defer srv.Close()
 
-			got := probeLAPI(context.Background(), &config.Config{CrowdSecLAPIURL: srv.URL, CrowdSecLAPIKey: "key"})
+			got := probeLAPI(context.Background(), &config.Config{CrowdSecLAPIURL: srv.URL, CrowdSecLAPIKey: "key"}, tt.auth)
 			if got.status != tt.wantStatus {
 				t.Fatalf("status = %q, want %q (%+v)", got.status, tt.wantStatus, got)
 			}

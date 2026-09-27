@@ -164,7 +164,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | Enable Cloudflare IP whitelist sync. When `true`, ALLOW policies are created for all current Cloudflare IP ranges before block policies take effect. |
+| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | Enable Cloudflare IP whitelist sync. When `true`, ALLOW policies for all current Cloudflare IP ranges are kept ahead of the block policies of each pair. |
 | `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | How often to re-fetch Cloudflare IP ranges and update the Traffic Matching Lists (default: weekly). |
 | `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | Source URL for Cloudflare IPv4 ranges. |
 | `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | Source URL for Cloudflare IPv6 ranges. |
@@ -295,9 +295,9 @@ ZONE_PAIRS=External->Internal:80,443;External->DMZ@10.0.0.5,10.0.0.6
 
 UniFi zone firewall evaluates policies in ascending index order — lower index means the policy is evaluated first, and the first match wins. The bouncer creates all zone policies via the UniFi integration v1 API. Policies created through this API are classified as `SYSTEM_DEFINED` origin by UniFi and cannot be reordered via the ordering endpoint — the API returns `non-user-defined-policy-ordering-forbidden`.
 
-Correct evaluation order (allow before block) is therefore established entirely by creation sequence. Block shard policies are created lazily: a new zone policy is only provisioned when a shard becomes active with IPs to block, via an activation callback triggered on the first ban that fills the shard. The Cloudflare whitelist ALLOW policies are created during startup (by the whitelist sync step) before the bouncer loop begins processing CrowdSec decisions. On a fresh deployment, this means ALLOW policies are assigned lower indices and are therefore evaluated before any block shard policy.
+Correct evaluation order (allow before block) is therefore established entirely by creation sequence. A Cloudflare ALLOW policy created for a zone pair whose block policies already exist (the whitelist enabled on a running deployment, a pair added, or an ALLOW recreated after its filters changed) lands behind them. After each whitelist sync the bouncer compares the controller's policy indices; a block policy it manages that precedes an ALLOW of the same pair and family is recreated, which moves it behind the ALLOW. The copy is staged first, so the shard stays blocked throughout. A block policy the bouncer does not manage is only reported.
 
-After a `drain` + redeploy, Cloudflare ALLOW policies are created before block shard policies. Each whitelist sync checks the controller's policy indices and reports a conflicting BLOCK policy. Other existing ALLOW policies may still be evaluated first and bypass a CrowdSec block. Check policy order in UniFi for each zone pair, especially after changing pairs or recreating policies; the bouncer cannot pin its system-defined policies through the ordering API.
+Other existing ALLOW policies may still be evaluated first and bypass a CrowdSec block. Check policy order in UniFi for each zone pair; the bouncer cannot pin its system-defined policies through the ordering API.
 
 ---
 
@@ -456,7 +456,7 @@ Available at `:8081` (configurable via `HEALTH_ADDR`):
 cs-unifi-bouncer-pro run          # Start the daemon
 cs-unifi-bouncer-pro healthcheck  # Exit 0 if healthy (used by Docker HEALTHCHECK)
 cs-unifi-bouncer-pro reconcile    # One-shot full reconcile then exit
-cs-unifi-bouncer-pro status       # Inspect bbolt state after stopping the daemon
+cs-unifi-bouncer-pro status       # Inspect bbolt state
 cs-unifi-bouncer-pro drain --dry-run   # Preview what drain would remove
 cs-unifi-bouncer-pro drain --force     # Actually remove all managed objects
 cs-unifi-bouncer-pro validate     # Validate configuration (no API calls; CI-safe)
@@ -482,7 +482,7 @@ last_group_update  2026-02-24T12:00:00Z
 ```
 
 The `--data-dir` flag overrides the data directory (default: `DATA_DIR` env or `/data`).
-All `status` subcommands require the daemon to be stopped because bbolt holds an exclusive lock while it runs. With Docker Compose, use `docker compose stop cs-unifi-bouncer-pro`, then `docker compose run --rm --no-deps cs-unifi-bouncer-pro status`, and restart with `docker compose up -d`.
+While the daemon runs, bbolt holds an exclusive lock on the database. Run `status` inside the bouncer's container, for example `docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status`: it then reads a consistent snapshot the daemon serves on `HEALTH_ADDR` at `/status/db`. That endpoint answers only requests from the container itself (loopback or its own address) that present the token the daemon writes to `status.token` in `DATA_DIR` at startup, so only a caller that can already read the data directory gets the snapshot. With the daemon stopped, `status` opens the database directly.
 
 ### `drain` subcommand
 
@@ -519,13 +519,15 @@ Exits 0 on success, 1 if any validation rule fails. Deprecation warnings and ins
 Runs three-phase diagnostics and prints a tabular result:
 
 1. **Config** — loads and validates configuration; fails fast if invalid
-2. **LAPI** — probes `CROWDSEC_LAPI_URL/v1/decisions?limit=1` for reachability
+2. **LAPI** — probes the unauthenticated `CROWDSEC_LAPI_URL/health` for reachability; with `--lapi-auth`, queries `CROWDSEC_LAPI_URL/v1/decisions?limit=1` with the bouncer key, which also checks `CROWDSEC_LAPI_KEY`
 3. **UniFi** — pings the controller; in auto mode, reports each site's detected firewall mode (`firewall_mode[site]`); for zone-mode sites, lists discovered zones
+
+CrowdSec records every address that authenticates with a bouncer key as a separate `<bouncer>@<ip>` entry, which can only be removed together with the parent key. Run `diagnose --lapi-auth` from the bouncer's own address: `docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro diagnose --lapi-auth`, or `docker run --rm --network container:cs-unifi-bouncer-pro ... diagnose --lapi-auth`. `validate` makes no LAPI call.
 
 ```
 CHECK                    STATUS  DETAIL
 config_valid             PASS    mode=zone sites=[default]
-lapi_reachable           PASS    http://crowdsec:8080 → 200 OK
+lapi_reachable           PASS    http://crowdsec:8080/health → 200 OK (key not checked; see --lapi-auth)
 unifi_reachable          PASS    https://192.168.1.1 ping ok
 firewall_mode[default]   PASS    zone
 zone_discovery[default]  PASS    3 zones found
