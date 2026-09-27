@@ -345,10 +345,56 @@ func TestZoneManager_FilterReplacementRetainsCoverageAndRetries(t *testing.T) {
 	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err != nil {
 		t.Fatal(err)
 	}
+	// The retry reuses the staged copy, creates the policy under its own name
+	// with the new filter, and removes the staged copy.
 	policies, err = ctrl.ListZonePolicies(ctx, testSite)
 	if err != nil || len(policies) != 1 || policies[0].Name != "crowdsec-policy-wan-lan-v4-0" ||
-		ctrl.Calls("CreateZonePolicy") != createsBeforeRetry {
+		policies[0].DstPortTMLID != stagedFilterID || ctrl.Calls("CreateZonePolicy") != createsBeforeRetry+1 {
 		t.Fatalf("replacement retry did not reuse staged policy: %+v, %v", policies, err)
+	}
+}
+
+// TestZoneManager_FilteredPolicyDriftIsReplacedNotUpdated: a PUT would drop the
+// port and destination filters, so drift on a filtered policy is repaired by
+// replacing it, and the filters survive.
+func TestZoneManager_FilteredPolicyDriftIsReplacedNotUpdated(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore()
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	zm := NewZoneManager(ZoneConfig{
+		ZonePairs:   []config.ZonePair{{Src: "wan", Dst: "lan", DstPorts: []int{443}, DstIPs: []string{"10.0.5.251"}}},
+		Description: "test",
+	}, zoneTestNamer(t), ctrl, store, zerolog.Nop())
+	if err := zm.Bootstrap(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(policies) != 1 {
+		t.Fatalf("setup: %+v, %v", policies, err)
+	}
+	want := policies[0]
+	drifted := want
+	drifted.Enabled = false
+	ctrl.SetPolicies(testSite, []controller.ZonePolicy{drifted})
+
+	updatesBefore := ctrl.Calls("UpdateZonePolicy")
+	if err := zm.EnsurePolicies(ctx, testSite, v4, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := ctrl.Calls("UpdateZonePolicy"); got != updatesBefore {
+		t.Errorf("UpdateZonePolicy calls: got %d, want %d (a PUT drops the filters)", got, updatesBefore)
+	}
+	policies, err = ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil || len(policies) != 1 {
+		t.Fatalf("after repair: %+v, %v", policies, err)
+	}
+	got := policies[0]
+	if got.Name != want.Name || !got.Enabled || got.DstPortTMLID != want.DstPortTMLID || got.DstIPTMLID != want.DstIPTMLID {
+		t.Errorf("repaired policy = %+v, want enabled with filters of %+v", got, want)
 	}
 }
 
@@ -785,6 +831,48 @@ func TestZoneManager_EnsurePolicies_DstIPTML(t *testing.T) {
 	}
 }
 
+// TestZoneManager_EnsurePolicies_SingleFamilyDstIPsRemovesOtherFamily: when a
+// pair is limited to IPv4 destination IPs, its existing v6 block policy is
+// removed, and a pair without destination IPs keeps both families.
+func TestZoneManager_EnsurePolicies_SingleFamilyDstIPsRemovesOtherFamily(t *testing.T) {
+	ctx := context.Background()
+	ctrl := testutil.NewMockController()
+	store := testutil.NewMockStore()
+	namer := zoneTestNamer(t)
+	v4 := ensuredZoneV4Shard(t, ctrl, store)
+	v6 := ensuredZoneV6Shard(t, ctrl, store)
+
+	ensure := func(pairs []config.ZonePair) {
+		t.Helper()
+		zm := NewZoneManager(ZoneConfig{ZonePairs: pairs, Description: "test"}, namer, ctrl, store, zerolog.Nop())
+		if err := zm.Bootstrap(ctx, []string{testSite}); err != nil {
+			t.Fatalf("Bootstrap: %v", err)
+		}
+		if err := zm.EnsurePolicies(ctx, testSite, v4, v6); err != nil {
+			t.Fatalf("EnsurePolicies: %v", err)
+		}
+	}
+	ensure([]config.ZonePair{{Src: "wan", Dst: "lan"}, {Src: "wan", Dst: "dmz"}})
+	ensure([]config.ZonePair{{Src: "wan", Dst: "lan", DstIPs: []string{"10.0.5.251"}}, {Src: "wan", Dst: "dmz"}})
+
+	policies, err := ctrl.ListZonePolicies(ctx, testSite)
+	if err != nil {
+		t.Fatalf("ListZonePolicies: %v", err)
+	}
+	have := map[string]bool{}
+	for _, p := range policies {
+		have[p.Name] = true
+	}
+	for _, want := range []string{"crowdsec-policy-wan-lan-v4-0", "crowdsec-policy-wan-dmz-v4-0", "crowdsec-policy-wan-dmz-v6-0"} {
+		if !have[want] {
+			t.Errorf("missing policy %s (have %v)", want, have)
+		}
+	}
+	if have["crowdsec-policy-wan-lan-v6-0"] {
+		t.Error("v6 block policy for the IPv4-only destination was not removed")
+	}
+}
+
 // TestZoneManager_EnsurePolicies_AlwaysHasTMLSourceFilter verifies that
 // block policies are never created with "Any IP" source.
 func TestZoneManager_EnsurePolicies_AlwaysHasTMLSourceFilter(t *testing.T) {
@@ -1026,10 +1114,9 @@ func TestZoneManager_EnsurePolicies_UnmanagedAPIPolicy_Preserved(t *testing.T) {
 	}
 }
 
-// TestZoneManager_EnsurePoliciesForShard_DstIPTML_V4Only verifies the family-agnostic
-// dst IP behaviour in the EnsurePoliciesForShard path: when only v4 destination IPs
-// are configured, both the v4 and v6 new-shard block policies must carry the v4 TML ID.
-// This exercises the pickDstIPTML helper in the shard-overflow activation path.
+// TestZoneManager_EnsurePoliciesForShard_DstIPTML_V4Only: in the shard-overflow
+// activation path, a pair with only IPv4 destination IPs gets a v4 block policy
+// scoped to the v4 destination list and no v6 policy.
 func TestZoneManager_EnsurePoliciesForShard_DstIPTML_V4Only(t *testing.T) {
 	ctrl := testutil.NewMockController()
 	store := testutil.NewMockStore()
@@ -1081,31 +1168,53 @@ func TestZoneManager_EnsurePoliciesForShard_DstIPTML_V4Only(t *testing.T) {
 		t.Fatal("expected crowdsec-dstips-v4-* TML to be created during Bootstrap")
 	}
 
-	// Both the v4 and v6 shard policies must carry the v4 dst IP TML ID.
+	// The v4 shard policy carries the v4 dst IP list. No v6 policy exists: UniFi
+	// rejects an IPv6 policy with an IPv4 destination list.
 	policies, err := ctrl.ListZonePolicies(context.Background(), testSite)
 	if err != nil {
 		t.Fatalf("ListZonePolicies: %v", err)
 	}
-	var v4Policy, v6Policy *controller.ZonePolicy
+	var v4Policy *controller.ZonePolicy
 	for i := range policies {
 		switch policies[i].IPVersion {
 		case "IPV4":
 			v4Policy = &policies[i]
 		case "IPV6":
-			v6Policy = &policies[i]
+			t.Fatalf("v6 block policy %q created for an IPv4-only destination (DstIPTMLID %q)", policies[i].Name, policies[i].DstIPTMLID)
 		}
 	}
 	if v4Policy == nil {
 		t.Fatal("expected v4 block policy to be created")
 	}
-	if v6Policy == nil {
-		t.Fatal("expected v6 block policy to be created")
-	}
 	if v4Policy.DstIPTMLID != dstIPTML.ID {
 		t.Errorf("v4 policy DstIPTMLID = %q, want %q", v4Policy.DstIPTMLID, dstIPTML.ID)
 	}
-	if v6Policy.DstIPTMLID != dstIPTML.ID {
-		t.Errorf("v6 policy DstIPTMLID = %q, want %q (v4-only dst IPs must reuse v4 TML for v6 policy)", v6Policy.DstIPTMLID, dstIPTML.ID)
+}
+
+// TestPairCoversFamily: a pair limited to destination IPs of one family needs
+// block policies for that family only.
+func TestPairCoversFamily(t *testing.T) {
+	tests := []struct {
+		name   string
+		dstIPs []string
+		wantV4 bool
+		wantV6 bool
+	}{
+		{"no destination IPs", nil, true, true},
+		{"IPv4 only", []string{"10.0.5.251", "10.0.6.0/24"}, true, false},
+		{"IPv6 only", []string{"2001:db8::1"}, false, true},
+		{"both families", []string{"10.0.5.251", "2001:db8::/64"}, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pair := config.ZonePair{Src: "wan", Dst: "lan", DstIPs: tt.dstIPs}
+			if got := pairCoversFamily(pair, false); got != tt.wantV4 {
+				t.Errorf("IPv4: got %v, want %v", got, tt.wantV4)
+			}
+			if got := pairCoversFamily(pair, true); got != tt.wantV6 {
+				t.Errorf("IPv6: got %v, want %v", got, tt.wantV6)
+			}
+		})
 	}
 }
 

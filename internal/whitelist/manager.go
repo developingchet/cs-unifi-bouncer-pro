@@ -99,12 +99,11 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 	}
 
 	// Ensure ALLOW policies for each zone pair, creating port TMLs as needed.
-	// Track managed policy IDs (exact IDs returned by ensureAllowPolicy) and
-	// managed base names (forward policy names, for Return mirror matching).
+	// Track managed policy IDs (exact IDs returned by ensureAllowPolicy).
 	// Using ID-based tracking ensures duplicate-named stale policies are cleaned up.
 	managedPolicyIDs := make(map[string]bool)
-	managedBaseNames := make(map[string]bool)
 	expectedTMLNames := map[string]bool{TMLNameV4: true, TMLNameV6: true}
+	var orderErrs []error
 
 	for _, pair := range zonePairs {
 		if pair.SrcZoneID == "" {
@@ -144,90 +143,90 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 			expectedTMLNames[dstPortTMLName] = true
 		}
 
-		// Create/ensure destination IP TMLs (one per IP family) when DstIPs are configured.
-		// dstIPTMLIDs is ordered: v4 TML first (if present), v6 TML second.
-		var dstIPTMLIDs []string
-		if len(pair.DstIPs) > 0 {
-			v4IPs, v6IPs := splitByFamily(pair.DstIPs)
-			if len(v4IPs) > 0 {
-				dstIPv4TMLName := whitelistName("dstips-", pair, "-v4")
-				t, ipErr := m.ensureTML(ctx, site, dstIPv4TMLName, "IPV4_ADDRESSES", ipsToItems(v4IPs))
-				if ipErr != nil {
-					return fmt.Errorf("ensure destination IPv4 TML for %s->%s: %w", pair.SrcName, pair.DstName, ipErr)
-				}
-				dstIPTMLIDs = append(dstIPTMLIDs, t.ID)
-				expectedTMLNames[dstIPv4TMLName] = true
-			}
-			if len(v6IPs) > 0 {
-				dstIPv6TMLName := whitelistName("dstips-", pair, "-v6")
-				t, ipErr := m.ensureTML(ctx, site, dstIPv6TMLName, "IPV6_ADDRESSES", ipsToItems(v6IPs))
-				if ipErr != nil {
-					return fmt.Errorf("ensure destination IPv6 TML for %s->%s: %w", pair.SrcName, pair.DstName, ipErr)
-				}
-				dstIPTMLIDs = append(dstIPTMLIDs, t.ID)
-				expectedTMLNames[dstIPv6TMLName] = true
-			}
+		// With destination IPs of one family only, the other family gets no ALLOW
+		// policy: UniFi rejects a policy whose destination list is of the other
+		// family (HTTP 500), and that family cannot reach those destinations anyway.
+		// An existing policy for it is removed by the orphan sweep below.
+		v4IPs, v6IPs := splitByFamily(pair.DstIPs)
+		families := []struct {
+			label, suffix, tmlType, ipVersion, srcTMLID string
+			dstIPs                                      []string
+		}{
+			{"IPv4", "-v4", "IPV4_ADDRESSES", "IPV4", tmlV4.ID, v4IPs},
+			{"IPv6", "-v6", "IPV6_ADDRESSES", "IPV6", tmlV6.ID, v6IPs},
 		}
-		dstIPTMLIDForV4 := pickDstIPTML(dstIPTMLIDs, false)
-		dstIPTMLIDForV6 := pickDstIPTML(dstIPTMLIDs, true)
-
-		v4Name := whitelistName("", pair, "-v4")
-		v6Name := whitelistName("", pair, "-v6")
-		// Register base names so their UniFi-managed (Return) mirrors are preserved.
-		managedBaseNames[v4Name] = true
-		managedBaseNames[v6Name] = true
-
 		var pairPolicyIDs []string
-		p, err := m.ensureAllowPolicy(ctx, site, pair, tmlV4.ID, srcPortTMLID, dstPortTMLID, dstIPTMLIDForV4, "IPV4", v4Name, existingPolicies)
-		if err != nil {
-			return fmt.Errorf("ensure IPv4 allow policy for %s->%s: %w", pair.SrcName, pair.DstName, err)
+		for _, f := range families {
+			if len(pair.DstIPs) > 0 && len(f.dstIPs) == 0 {
+				continue
+			}
+			var dstIPTMLID string
+			if len(f.dstIPs) > 0 {
+				name := whitelistName("dstips-", pair, f.suffix)
+				t, ipErr := m.ensureTML(ctx, site, name, f.tmlType, ipsToItems(f.dstIPs))
+				if ipErr != nil {
+					return fmt.Errorf("ensure destination %s TML for %s->%s: %w", f.label, pair.SrcName, pair.DstName, ipErr)
+				}
+				dstIPTMLID = t.ID
+				expectedTMLNames[name] = true
+			}
+			policyName := whitelistName("", pair, f.suffix)
+			p, err := m.ensureAllowPolicy(ctx, site, pair, f.srcTMLID, srcPortTMLID, dstPortTMLID, dstIPTMLID, f.ipVersion, policyName, existingPolicies)
+			if err != nil {
+				return fmt.Errorf("ensure %s allow policy for %s->%s: %w", f.label, pair.SrcName, pair.DstName, err)
+			}
+			managedPolicyIDs[p.ID] = true
+			pairPolicyIDs = append(pairPolicyIDs, p.ID)
 		}
-		managedPolicyIDs[p.ID] = true
-		pairPolicyIDs = append(pairPolicyIDs, p.ID)
-		p, err = m.ensureAllowPolicy(ctx, site, pair, tmlV6.ID, srcPortTMLID, dstPortTMLID, dstIPTMLIDForV6, "IPV6", v6Name, existingPolicies)
-		if err != nil {
-			return fmt.Errorf("ensure IPv6 allow policy for %s->%s: %w", pair.SrcName, pair.DstName, err)
-		}
-		managedPolicyIDs[p.ID] = true
-		pairPolicyIDs = append(pairPolicyIDs, p.ID)
 
 		// Verify that the controller evaluates the allow policies before blocks.
+		// A wrong order is reported once every pair is ensured and the sweeps
+		// have run: it needs the block recreated, and stale policies must not
+		// outlive it.
 		if err := m.checkWhitelistOrder(ctx, site, pair, pairPolicyIDs); err != nil {
-			return err
+			orderErrs = append(orderErrs, err)
 		}
 	}
 
-	m.sweepOrphanPolicies(ctx, site, existingPolicies, managedPolicyIDs, managedBaseNames)
+	// Sweep a fresh listing: policies recreated above may have taken the IDs of
+	// the ones they replaced.
+	current, err := m.ctrl.ListZonePolicies(ctx, site)
+	if err != nil {
+		return errors.Join(append(orderErrs, fmt.Errorf("list zone policies for site %s: %w", site, err))...)
+	}
+	m.sweepOrphanPolicies(ctx, site, current, managedPolicyIDs)
 	m.sweepOrphanTMLs(ctx, site, expectedTMLNames)
-	return nil
+	return errors.Join(orderErrs...)
 }
 
 // sweepOrphanPolicies deletes whitelist policies that are ours but no longer
 // declared in CLOUDFLARE_ZONE_PAIRS. managedIDs are the forward policies just
-// ensured; managedBaseNames keep their UniFi-created "(Return)" mirrors.
+// ensured.
 func (m *Manager) sweepOrphanPolicies(ctx context.Context, site string, existing []controller.ZonePolicy,
-	managedIDs, managedBaseNames map[string]bool) {
+	managedIDs map[string]bool) {
+	listed := make(map[string]bool, len(existing))
+	for _, p := range existing {
+		listed[p.Name] = true
+	}
 	for _, p := range existing {
 		if !strings.HasPrefix(p.Name, whitelistPrefix) {
 			continue
 		}
-		// UniFi auto-creates a "(Return)" mirror for every ALLOW policy with
-		// AllowReturnTraffic=true. Handle Return mirrors and forward policies separately.
-		baseName := strings.TrimSuffix(p.Name, " (Return)")
-		if baseName != p.Name {
-			// Return mirror: keep if its base forward policy is currently managed.
-			if managedBaseNames[baseName] {
+		// UniFi derives a "(Return)" mirror from every ALLOW policy with
+		// AllowReturnTraffic=true, refuses to delete it while its base exists,
+		// and removes it with its base. Only a mirror left without one is deleted.
+		if base, isReturn := strings.CutSuffix(p.Name, " (Return)"); isReturn {
+			if listed[base] {
 				continue
 			}
 		} else {
-			// Forward policy: keep only if this exact ID is actively managed.
-			// ID-based tracking correctly handles duplicate-named policies — only
-			// the specific policy returned by ensureAllowPolicy is protected.
+			// Keep only the exact IDs just ensured. ID-based tracking handles
+			// duplicate-named policies: only the one ensureAllowPolicy returned is kept.
 			if managedIDs[p.ID] {
 				continue
 			}
-			// Not actively managed by ID — only delete if it's ours to clean up
-			// (our description, or empty description from before description support).
+			// Delete only policies that are ours to clean up (our description, or an
+			// empty description from before description support).
 			if p.Description != whitelistDescription && p.Description != "" {
 				continue
 			}
@@ -266,29 +265,6 @@ func (m *Manager) sweepOrphanTMLs(ctx context.Context, site string, expected map
 			m.log.Info().Str("tml", t.Name).Str("site", site).
 				Msg("deleted orphaned Cloudflare whitelist port TML (zone pair removed from config)")
 		}
-	}
-}
-
-// pickDstIPTML selects the destination IP TML ID for a policy.
-//
-// ids is an ordered slice of dst IP TML IDs: v4 TML first (if present), v6 second.
-// Selection rule:
-//
-//	len 0 → ""             no destination IP filter configured
-//	len 1 → ids[0]         single-family: both v4 and v6 policies share the same TML
-//	len 2 → ids[1] if ipv6 mixed: each policy uses the TML whose family matches (API ceiling)
-//	         ids[0] otherwise
-func pickDstIPTML(ids []string, ipv6 bool) string {
-	switch len(ids) {
-	case 0:
-		return ""
-	case 1:
-		return ids[0]
-	default:
-		if ipv6 {
-			return ids[1]
-		}
-		return ids[0]
 	}
 }
 
@@ -407,12 +383,14 @@ func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZoneP
 				return p, nil // up to date
 			}
 
-			// If portFilter or dstIPTMLID is changing, the UniFi PUT endpoint rejects
-			// these fields. Recreate to also clear any existing connection state filter.
+			// A PUT carries no port or destination filters and the controller drops
+			// them, so a filtered policy is recreated rather than updated. Recreating
+			// also clears any connection state filter.
+			filtered := srcPortTMLID != "" || dstPortTMLID != "" || dstIPTMLID != ""
 			filterChanging := p.SrcPortTMLID != srcPortTMLID || p.DstPortTMLID != dstPortTMLID || p.DstIPTMLID != dstIPTMLID || len(p.ConnectionStateFilter) > 0
-			if filterChanging {
+			if filtered || filterChanging {
 				m.log.Info().Str("policy", policyName).Str("site", site).
-					Msg("filter changed on existing policy — deleting for recreation with new filter")
+					Msg("filtered policy drifted — deleting for recreation")
 				if delErr := m.ctrl.DeleteZonePolicy(ctx, site, p.ID); delErr != nil {
 					return controller.ZonePolicy{}, fmt.Errorf("delete policy %s before filter recreation: %w", policyName, delErr)
 				}
@@ -420,7 +398,6 @@ func (m *Manager) ensureAllowPolicy(ctx context.Context, site string, pair ZoneP
 				break
 			}
 
-			// PUT preserves the port and destination IP filters.
 			desired.ID = p.ID
 			if err := m.ctrl.UpdateZonePolicy(ctx, site, desired); err != nil {
 				return controller.ZonePolicy{}, fmt.Errorf("update allow policy %s: %w", policyName, err)

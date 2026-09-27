@@ -3,6 +3,7 @@ package whitelist
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
@@ -897,21 +898,57 @@ func TestSyncSite_DstIPs_CreatesDstIPTML(t *testing.T) {
 		t.Errorf("v4 policy DstIPTMLID: got %q, want %q", v4Policy.DstIPTMLID, dstIPTML.ID)
 	}
 
-	// The v6 ALLOW policy must also have DstIPTMLID set: when only IPv4 dst IPs are
-	// configured the v4 TML is reused for the v6 policy so both policies are equally
-	// scoped to the destination host.
-	var v6Policy *controller.ZonePolicy
+	// No v6 ALLOW policy: the destination is IPv4 only, and UniFi rejects an IPv6
+	// policy with an IPv4 destination list.
 	for i := range policies {
 		if policies[i].Name == "crowdsec-whitelist-cloudflare-External-Dmz-v6" {
-			v6Policy = &policies[i]
-			break
+			t.Fatalf("v6 ALLOW policy created for an IPv4-only destination (DstIPTMLID %q)", policies[i].DstIPTMLID)
 		}
 	}
-	if v6Policy == nil {
-		t.Fatal("expected v6 ALLOW policy to be created")
+}
+
+// TestSyncSite_DstIPs_SingleFamilyRemovesOtherFamilyPolicy: a v6 ALLOW policy
+// for a pair now limited to IPv4 destination IPs is removed, and a pair without
+// destination IPs keeps both families.
+func TestSyncSite_DstIPs_SingleFamilyRemovesOtherFamilyPolicy(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	mgr := NewManager(ctrl, []string{"s"}, NewCloudflareProvider("", ""), zerolog.Nop())
+	ctx := context.Background()
+	ctrl.SetTMLs("s", []controller.TrafficMatchingList{
+		{ID: "tml-v4", Name: TMLNameV4, Type: "IPV4_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Type: "SUBNET", Value: "1.1.1.0/24"}}},
+		{ID: "tml-v6", Name: TMLNameV6, Type: "IPV6_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Type: "SUBNET", Value: "2606:4700::/32"}}},
+	})
+	unscoped := ZonePairConfig{SrcName: "External", DstName: "Dmz", SrcZoneID: "z-ext", DstZoneID: "z-dmz", DstPorts: []int{443}}
+	scoped := unscoped
+	scoped.DstIPs = []string{"10.0.5.251"}
+	open := ZonePairConfig{SrcName: "External", DstName: "Internal", SrcZoneID: "z-ext", DstZoneID: "z-int", DstPorts: []int{443}}
+	v4, v6 := []string{"1.1.1.0/24"}, []string{"2606:4700::/32"}
+
+	if err := mgr.syncSite(ctx, "s", v4, v6, []ZonePairConfig{unscoped}); err != nil {
+		t.Fatalf("first syncSite: %v", err)
 	}
-	if v6Policy.DstIPTMLID != dstIPTML.ID {
-		t.Errorf("v6 ALLOW policy DstIPTMLID: got %q, want %q (should fall back to v4 TML)", v6Policy.DstIPTMLID, dstIPTML.ID)
+	if err := mgr.syncSite(ctx, "s", v4, v6, []ZonePairConfig{scoped, open}); err != nil {
+		t.Fatalf("second syncSite: %v", err)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, "s")
+	if err != nil {
+		t.Fatalf("ListZonePolicies: %v", err)
+	}
+	have := map[string]bool{}
+	for _, p := range policies {
+		have[p.Name] = true
+	}
+	for _, want := range []string{
+		"crowdsec-whitelist-cloudflare-External-Dmz-v4",
+		"crowdsec-whitelist-cloudflare-External-Internal-v4",
+		"crowdsec-whitelist-cloudflare-External-Internal-v6",
+	} {
+		if !have[want] {
+			t.Errorf("missing policy %s (have %v)", want, have)
+		}
+	}
+	if have["crowdsec-whitelist-cloudflare-External-Dmz-v6"] {
+		t.Error("v6 ALLOW policy for the IPv4-only destination was not removed")
 	}
 }
 
@@ -1026,6 +1063,92 @@ func TestDrain_DeletesAllWhitelistObjects(t *testing.T) {
 	}
 	if len(tmls) != 1 || tmls[0].ID != "tml-ban" {
 		t.Errorf("expected only ban TML to remain, got %+v", tmls)
+	}
+}
+
+// TestSyncSite_WrongOrderStillSweeps: an allow policy that follows a block is
+// reported, but stale whitelist policies are still removed.
+func TestSyncSite_WrongOrderStillSweeps(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	mgr := NewManager(ctrl, []string{"s"}, NewCloudflareProvider("", ""), zerolog.Nop())
+	ctx := context.Background()
+	idx := func(i int) *int { return &i }
+	ctrl.SetTMLs("s", []controller.TrafficMatchingList{
+		{ID: "tml-v4", Name: TMLNameV4, Type: "IPV4_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Type: "SUBNET", Value: "1.1.1.0/24"}}},
+		{ID: "tml-v6", Name: TMLNameV6, Type: "IPV6_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Type: "SUBNET", Value: "2606:4700::/32"}}},
+	})
+	allow := func(id, name, ipVersion, tml string, index int) controller.ZonePolicy {
+		return controller.ZonePolicy{ID: id, Name: name, Enabled: true, Action: "ALLOW", AllowReturnTraffic: true,
+			SrcZone: "z-ext", DstZone: "z-dmz", IPVersion: ipVersion, Description: whitelistDescription,
+			TrafficMatchingListIDs: []string{tml}, Index: idx(index)}
+	}
+	ctrl.SetPolicies("s", []controller.ZonePolicy{
+		allow("allow-v4", "crowdsec-whitelist-cloudflare-External-Dmz-v4", "IPV4", "tml-v4", 200),
+		allow("allow-v6", "crowdsec-whitelist-cloudflare-External-Dmz-v6", "IPV6", "tml-v6", 201),
+		allow("stale", "crowdsec-whitelist-cloudflare-External-Old-v4", "IPV4", "tml-v4", 202),
+		{ID: "block", Name: "crowdsec-policy-External-Dmz-v4-0", Enabled: true, Action: "BLOCK", IPVersion: "IPV4",
+			SrcZone: "z-ext", DstZone: "z-dmz", Index: idx(100)},
+	})
+	pair := ZonePairConfig{SrcName: "External", DstName: "Dmz", SrcZoneID: "z-ext", DstZoneID: "z-dmz"}
+
+	err := mgr.syncSite(ctx, "s", []string{"1.1.1.0/24"}, []string{"2606:4700::/32"}, []ZonePairConfig{pair})
+	if err == nil || !strings.Contains(err.Error(), "follows block") {
+		t.Fatalf("syncSite err = %v, want the allow-after-block error", err)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, "s")
+	if err != nil {
+		t.Fatalf("ListZonePolicies: %v", err)
+	}
+	for _, p := range policies {
+		if p.ID == "stale" {
+			t.Error("stale whitelist policy was not removed")
+		}
+	}
+}
+
+// TestSyncSite_FilteredPolicyDriftIsRecreatedNotUpdated: a PUT would drop the
+// port filter, so a drifted filtered ALLOW policy is recreated with it.
+func TestSyncSite_FilteredPolicyDriftIsRecreatedNotUpdated(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	mgr := NewManager(ctrl, []string{"s"}, NewCloudflareProvider("", ""), zerolog.Nop())
+	ctx := context.Background()
+	ctrl.SetTMLs("s", []controller.TrafficMatchingList{
+		{ID: "tml-v4", Name: TMLNameV4, Type: "IPV4_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Type: "SUBNET", Value: "1.1.1.0/24"}}},
+		{ID: "tml-v6", Name: TMLNameV6, Type: "IPV6_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Type: "SUBNET", Value: "2606:4700::/32"}}},
+		{ID: "tml-ports", Name: "crowdsec-whitelist-cloudflare-dstports-External-Dmz", Type: "PORTS", Items: []controller.TrafficMatchingListItem{{Type: "PORT_NUMBER", Value: "443"}}},
+	})
+	pair := ZonePairConfig{SrcName: "External", DstName: "Dmz", SrcZoneID: "z-ext", DstZoneID: "z-dmz", DstPorts: []int{443}}
+	v4, v6 := []string{"1.1.1.0/24"}, []string{"2606:4700::/32"}
+	if err := mgr.syncSite(ctx, "s", v4, v6, []ZonePairConfig{pair}); err != nil {
+		t.Fatalf("first syncSite: %v", err)
+	}
+	policies, err := ctrl.ListZonePolicies(ctx, "s")
+	if err != nil {
+		t.Fatalf("ListZonePolicies: %v", err)
+	}
+	for i := range policies {
+		policies[i].Enabled = false
+	}
+	ctrl.SetPolicies("s", policies)
+
+	updatesBefore := ctrl.Calls("UpdateZonePolicy")
+	if err := mgr.syncSite(ctx, "s", v4, v6, []ZonePairConfig{pair}); err != nil {
+		t.Fatalf("second syncSite: %v", err)
+	}
+	if got := ctrl.Calls("UpdateZonePolicy"); got != updatesBefore {
+		t.Errorf("UpdateZonePolicy calls: got %d, want %d (a PUT drops the port filter)", got, updatesBefore)
+	}
+	policies, err = ctrl.ListZonePolicies(ctx, "s")
+	if err != nil {
+		t.Fatalf("ListZonePolicies: %v", err)
+	}
+	if len(policies) != 2 {
+		t.Fatalf("policies: got %d, want 2: %+v", len(policies), policies)
+	}
+	for _, p := range policies {
+		if !p.Enabled || p.DstPortTMLID != "tml-ports" {
+			t.Errorf("policy %s: enabled %v, DstPortTMLID %q; want enabled with tml-ports", p.Name, p.Enabled, p.DstPortTMLID)
+		}
 	}
 }
 
