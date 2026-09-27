@@ -103,7 +103,7 @@ jobs:
             BUILD_DATE=${{ github.event.repository.updated_at }}
 
       - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.34.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           image-ref: local:scan
           exit-code: "1"
@@ -113,7 +113,7 @@ jobs:
           format: table
 
       - name: Trivy SARIF scan (non-blocking, for Security tab)
-        uses: aquasecurity/trivy-action@0.34.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         if: always()
         with:
           image-ref: local:scan
