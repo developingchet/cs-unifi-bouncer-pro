@@ -8,9 +8,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -65,8 +67,13 @@ func withReadOnlyStore(dataDir string, fn func(storage.Store) error) error {
 	return fn(store)
 }
 
+// withSnapshotStore runs fn on a snapshot copied into dataDir. An interrupt
+// cancels the download instead of killing the process, so the copy is always
+// removed.
 func withSnapshotStore(dataDir string, fn func(storage.Store) error) error {
-	path, err := fetchDBSnapshot(dataDir)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	path, err := fetchDBSnapshot(ctx, dataDir)
 	if err != nil {
 		return fmt.Errorf("the database is locked by the running bouncer, and a snapshot could not be fetched from it "+
 			"(run status inside its container, or stop it first): %w", err)
@@ -87,7 +94,7 @@ func withSnapshotStore(dataDir string, fn func(storage.Store) error) error {
 
 // fetchDBSnapshot saves the running bouncer's database snapshot next to the
 // database and returns its path.
-func fetchDBSnapshot(dataDir string) (string, error) {
+func fetchDBSnapshot(ctx context.Context, dataDir string) (string, error) {
 	healthURL, err := localHealthURL(config.HealthAddrFromEnv())
 	if err != nil {
 		return "", err
@@ -97,7 +104,7 @@ func fetchDBSnapshot(dataDir string) (string, error) {
 		return "", fmt.Errorf("read status token: %w", err)
 	}
 	snapshotURL := strings.TrimSuffix(healthURL, "/healthz") + bouncer.DBSnapshotPath
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, snapshotURL, nil)
 	if err != nil {
