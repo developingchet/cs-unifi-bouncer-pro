@@ -482,7 +482,7 @@ last_group_update  2026-02-24T12:00:00Z
 ```
 
 The `--data-dir` flag overrides the data directory (default: `DATA_DIR` env or `/data`).
-While the daemon runs, bbolt holds an exclusive lock on the database. Run `status` inside the bouncer's container, for example `docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status`: it then reads a consistent snapshot the daemon serves on `HEALTH_ADDR` at `/status/db`. That endpoint answers only requests from the container itself (loopback or its own address). With the daemon stopped, `status` opens the database directly.
+While the daemon runs, bbolt holds an exclusive lock on the database. Run `status` inside the bouncer's container, for example `docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status`: it then reads a consistent snapshot the daemon serves on `HEALTH_ADDR` at `/status/db`. That endpoint answers only requests from the container itself (loopback or its own address) that present the token the daemon writes to `status.token` in `DATA_DIR` at startup, so only a caller that can already read the data directory gets the snapshot. With the daemon stopped, `status` opens the database directly.
 
 ### `drain` subcommand
 

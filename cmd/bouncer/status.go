@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -91,13 +92,18 @@ func fetchDBSnapshot(dataDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	token, err := os.ReadFile(filepath.Join(dataDir, bouncer.SnapshotTokenFile))
+	if err != nil {
+		return "", fmt.Errorf("read status token: %w", err)
+	}
 	snapshotURL := strings.TrimSuffix(healthURL, "/healthz") + bouncer.DBSnapshotPath
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, snapshotURL, nil)
 	if err != nil {
 		return "", err
 	}
+	req.Header.Set(bouncer.SnapshotTokenHeader, strings.TrimSpace(string(token)))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err

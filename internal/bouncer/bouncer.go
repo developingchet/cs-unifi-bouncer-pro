@@ -349,7 +349,14 @@ func (b *Bouncer) serveHealth(ctx context.Context) error {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/readyz", b.ready)
-	mux.HandleFunc(DBSnapshotPath, b.dbSnapshot)
+	if !b.cfg.DryRun {
+		snap, err := newSnapshotServer(b.store, b.cfg.DataDir, b.log)
+		if err != nil {
+			b.log.Warn().Err(err).Msg("status snapshots disabled")
+		} else if snap != nil {
+			mux.Handle(DBSnapshotPath, snap)
+		}
+	}
 
 	srv := &http.Server{
 		Addr:              b.cfg.HealthAddr,
