@@ -165,7 +165,7 @@ jobs:
 
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
         with:
           images: developingchet/cs-unifi-bouncer-pro
           tags: |
@@ -193,7 +193,7 @@ jobs:
 
       - name: Generate SBOM (CycloneDX)
         timeout-minutes: 10
-        uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11  # v0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0
         with:
           image: developingchet/cs-unifi-bouncer-pro@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
@@ -231,7 +231,7 @@ jobs:
             developingchet/cs-unifi-bouncer-pro@${{ steps.build.outputs.digest }}
 
       - name: Update Docker Hub description
-        uses: peter-evans/dockerhub-description@432a30c9e07499fd01da9f8a49f0faf9e0ca5b77  # v4
+        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa  # v5.0.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
