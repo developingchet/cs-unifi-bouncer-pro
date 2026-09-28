@@ -1,6 +1,6 @@
 module github.com/developingchet/cs-unifi-bouncer-pro
 
-go 1.26.6
+go 1.27.1
 
 require (
 	github.com/crowdsecurity/crowdsec v1.8.1
