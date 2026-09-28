@@ -4,7 +4,7 @@
 //   go run -modfile=.github/tools/go.mod golang.org/x/vuln/cmd/govulncheck ./...
 module github.com/developingchet/cs-unifi-bouncer-pro/.github/tools
 
-go 1.26.6
+go 1.27.1
 
 tool golang.org/x/vuln/cmd/govulncheck
 
