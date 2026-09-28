@@ -443,7 +443,7 @@ BLOCKLIST_URLS=https://example.com/badips.txt,https://example.net/threatlist.txt
 BLOCKLIST_REFRESH_INTERVAL=12h
 ```
 
-Each feed URL owns a separate ban claim. If CrowdSec or another feed still claims an IP, expiry of one feed's claim does not remove the firewall ban. Feed refreshes extend claim expiry to twice the refresh interval. A failed fetch keeps the feed's current bans (logged as "keeping bans from the last successful fetch"); once a feed has failed for longer than `BAN_TTL`, its bans are no longer extended and expire. Feed imports are logged with entry, new and skipped counts. Feed URLs often carry an access token, so logs and stored claim sources show the URL without credentials, query string or fragment (`https://example.com/badips.txt?<redacted>`).
+Each feed URL owns a separate ban claim. If CrowdSec or another feed still claims an IP, expiry of one feed's claim does not remove the firewall ban. Feed refreshes extend claim expiry to twice the refresh interval. A failed fetch keeps the feed's current bans (logged as "keeping bans from the last successful fetch"); once a feed has failed for longer than `BAN_TTL`, its bans are no longer extended and expire. Feed imports are logged with entry, new and skipped counts. Logs show only the feed scheme and host. Stored claim sources use an opaque SHA-256 key derived from the full URL and importer kind, so URL path tokens and query credentials are not stored in new claims. On startup, old URL-based claims migrate while preserving their expiry. If multiple configured importers matched the same old claim, its original expiry is retained under an opaque legacy key until a fresh fetch establishes ownership.
 
 Addresses are recorded and applied in batches of 500, so a large feed does not hold up CrowdSec decisions while it imports. Addresses the controller rejects stay recorded as pending and are retried by the next reconcile.
 
@@ -456,6 +456,7 @@ The bouncer can import one of the aggregated AbuseIPDB lists published by [bores
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ABUSEIPDB_LIST` | none | Which list to import, by days of reports: `1d`, `3d`, `7d`, `14d`, `30d`, `60d`, `90d`, `120d`, `180d` or `365d`. Empty disables the feed. |
+| `ABUSEIPDB_URL` | derived from `ABUSEIPDB_LIST` | Optional absolute HTTP(S) URL for a trusted mirror or local test feed. Requires `ABUSEIPDB_LIST`. The URL contributes to an opaque feed claim key. |
 | `ABUSEIPDB_COUNTRY_INCLUDE` | none | Comma-separated ISO 3166 two-letter country codes. When set, only entries from these countries are banned; entries without a country tag are dropped. |
 | `ABUSEIPDB_COUNTRY_EXCLUDE` | none | Comma-separated country codes never banned from this list. Applied after the include list. A code may not appear in both. |
 | `ABUSEIPDB_REFRESH_INTERVAL` | `6h` | How often to re-fetch the list. Bans expire at `now + 2×ABUSEIPDB_REFRESH_INTERVAL` unless refreshed. |
@@ -478,7 +479,7 @@ ABUSEIPDB_COUNTRY_EXCLUDE=US
 
 **Size limits.** A feed may hold at most 250,000 addresses, counted after filtering, and the download is capped at 64 MB. As of this writing the `1d` list is about 51,000 addresses and `90d` about 13 MB; `120d` and longer exceed the address limit unfiltered, so they are only accepted with `ABUSEIPDB_COUNTRY_INCLUDE`. If a filtered result still exceeds the limit, the fetch fails and the previous bans are kept, as for any failing feed.
 
-The feed shares the ban database, whitelist (`BLOCK_WHITELIST`) and outage handling of [External Blocklists](#external-blocklists). Its claim source is `blocklist:https://raw.githubusercontent.com/borestad/blocklist-abuseipdb/main/abuseipdb-s100-<list>.ipv4`, visible in `status ip` and `status bans`. Fetch logs include `filtered` and `removed` counts.
+The feed shares the ban database, whitelist (`BLOCK_WHITELIST`) and outage handling of [External Blocklists](#external-blocklists). Its opaque `abuseipdb:sha256:...` claim key is distinct from a generic blocklist claim even when both use the same URL. Fetch logs include `filtered` and `removed` counts.
 
 ---
 

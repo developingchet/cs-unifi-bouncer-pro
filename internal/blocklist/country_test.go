@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/testutil"
 	"github.com/rs/zerolog"
 )
@@ -96,6 +95,40 @@ func TestFetchFeed_FilterMatchingNothingPrunes(t *testing.T) {
 	}
 }
 
+func TestFetchFeed_InvalidResponseDoesNotPruneFilteredFeed(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+	}{
+		{"html error", "<html>maintenance</html>\n"},
+		{"invalid tagged address", "not-an-ip # US AS12345\n"},
+		{"excluded address and error page", "203.0.113.3 # US AS16509\n<html>maintenance</html>\n"},
+		{"included address and error page", "203.0.113.9 # CN AS45090\n<html>maintenance</html>\n"},
+		{"empty body", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := abuseipdbBody
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+
+			feed := Feed{URL: srv.URL, SourceKind: SourceKindAbuseIPDB, Include: codes("CN"), Prune: true}
+			mgr, store := newFeedTestManager(feed)
+			if err := mgr.fetchFeed(context.Background(), feed); err != nil {
+				t.Fatal(err)
+			}
+			body = tc.body
+			if err := mgr.fetchFeed(context.Background(), feed); err == nil {
+				t.Fatal("malformed 200 response was accepted")
+			}
+			bans, _ := store.BanList()
+			if len(bans) != 1 || bans["203.0.113.1"].Claims[feed.sourceKey()].IsZero() {
+				t.Fatalf("invalid response pruned the previous ban: %v", bans)
+			}
+		})
+	}
+}
+
 // Narrowing the filter releases the entries it now excludes, but an address
 // another source also holds stays banned.
 func TestFetchFeed_PruneReleasesOnlyThisSource(t *testing.T) {
@@ -125,8 +158,37 @@ func TestFetchFeed_PruneReleasesOnlyThisSource(t *testing.T) {
 	if !ok {
 		t.Fatal("203.0.113.2 is also held by CrowdSec but was unbanned")
 	}
-	if _, held := entry.Claims["blocklist:"+logger.SafeURL(srv.URL)]; held {
+	if _, held := entry.Claims[feed.sourceKey()]; held {
 		t.Error("feed claim on 203.0.113.2 was not dropped")
+	}
+}
+
+func TestFetchFeed_SameURLImportersKeepIndependentClaims(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(abuseipdbBody))
+	}))
+	defer srv.Close()
+
+	plain := Feed{URL: srv.URL}
+	abuse := Feed{URL: srv.URL, SourceKind: SourceKindAbuseIPDB, Include: codes("CN"), Prune: true}
+	mgr, store := newFeedTestManager(plain)
+	if plain.sourceKey() == abuse.sourceKey() {
+		t.Fatal("independent importers share a claim key")
+	}
+	for _, feed := range []Feed{plain, abuse} {
+		if err := mgr.fetchFeed(context.Background(), feed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bans, err := store.BanList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, held := bans["203.0.113.3"].Claims[plain.sourceKey()]; !held {
+		t.Fatal("generic US ban was released by AbuseIPDB filtering")
+	}
+	if _, held := bans["203.0.113.3"].Claims[abuse.sourceKey()]; held {
+		t.Fatal("AbuseIPDB claimed an excluded US address")
 	}
 }
 

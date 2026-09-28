@@ -1,6 +1,7 @@
 package blocklist
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -127,6 +128,58 @@ func TestManager_ServerError(t *testing.T) {
 	}
 	if fwMgr.BanCount() != 0 {
 		t.Errorf("expected 0 ApplyBan calls after server error, got %d", fwMgr.BanCount())
+	}
+}
+
+func TestManager_PathTokenAbsentFromClaimsAndLogs(t *testing.T) {
+	const token = "private-path-token"
+	for _, tc := range []struct {
+		name   string
+		status int
+		closed bool
+	}{
+		{"successful fetch", http.StatusOK, false},
+		{"failed fetch", http.StatusInternalServerError, false},
+		{"transport failure", http.StatusOK, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte("203.0.113.9\n"))
+			}))
+			defer srv.Close()
+			feed := Feed{URL: srv.URL + "/" + token + "/list?key=query-secret"}
+			mgr, store := newFeedTestManager(feed)
+			var logs bytes.Buffer
+			mgr.log = zerolog.New(&logs)
+			if tc.closed {
+				srv.Close()
+			}
+			fetchErr := mgr.fetchFeed(context.Background(), feed)
+			if tc.status == http.StatusOK && !tc.closed && fetchErr != nil {
+				t.Fatal(fetchErr)
+			}
+			if tc.status != http.StatusOK || tc.closed {
+				if fetchErr == nil || strings.Contains(fetchErr.Error(), token) || strings.Contains(fetchErr.Error(), "query-secret") {
+					t.Fatalf("unsafe feed error: %v", fetchErr)
+				}
+			}
+			mgr.fetchAndApply(context.Background())
+			if strings.Contains(logs.String(), token) || strings.Contains(logs.String(), "query-secret") {
+				t.Fatalf("feed URL secret in logs: %s", logs.String())
+			}
+			bans, err := store.BanList()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range bans {
+				for source := range entry.Claims {
+					if strings.Contains(source, token) || strings.Contains(source, "query-secret") {
+						t.Fatalf("feed URL secret in claim source: %s", source)
+					}
+				}
+			}
+		})
 	}
 }
 

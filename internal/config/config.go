@@ -137,6 +137,7 @@ type Config struct {
 
 	// AbuseIPDB feed (github.com/borestad/blocklist-abuseipdb)
 	AbuseIPDBList            string        `koanf:"abuseipdb_list"`
+	AbuseIPDBURLOverride     string        `koanf:"abuseipdb_url"`
 	AbuseIPDBCountryInclude  []string      `koanf:"-"` // parsed from ABUSEIPDB_COUNTRY_INCLUDE CSV
 	AbuseIPDBCountryExclude  []string      `koanf:"-"` // parsed from ABUSEIPDB_COUNTRY_EXCLUDE CSV
 	AbuseIPDBRefreshInterval time.Duration `koanf:"abuseipdb_refresh_interval"`
@@ -309,6 +310,7 @@ func (c *Config) sanitise() {
 	c.CloudflareIPv4URL = stripEnvQuotes(c.CloudflareIPv4URL)
 	c.CloudflareIPv6URL = stripEnvQuotes(c.CloudflareIPv6URL)
 	c.AbuseIPDBList = strings.ToLower(strings.TrimSpace(stripEnvQuotes(c.AbuseIPDBList)))
+	c.AbuseIPDBURLOverride = stripEnvQuotes(c.AbuseIPDBURLOverride)
 
 	// Slice fields: strip each element
 	for i, s := range c.UnifiSites {
@@ -762,16 +764,22 @@ func (c *Config) AbuseIPDBURL() string {
 	if c.AbuseIPDBList == "" {
 		return ""
 	}
+	if c.AbuseIPDBURLOverride != "" {
+		return c.AbuseIPDBURLOverride
+	}
 	return "https://raw.githubusercontent.com/borestad/blocklist-abuseipdb/main/abuseipdb-s100-" + c.AbuseIPDBList + ".ipv4"
 }
 
 // validateAbuseIPDB checks the AbuseIPDB list name and country filters.
 func (c *Config) validateAbuseIPDB() error {
 	if c.AbuseIPDBList == "" {
-		if len(c.AbuseIPDBCountryInclude) > 0 || len(c.AbuseIPDBCountryExclude) > 0 {
-			return fmt.Errorf("ABUSEIPDB_COUNTRY_INCLUDE/ABUSEIPDB_COUNTRY_EXCLUDE need ABUSEIPDB_LIST to be set")
+		if len(c.AbuseIPDBCountryInclude) > 0 || len(c.AbuseIPDBCountryExclude) > 0 || c.AbuseIPDBURLOverride != "" {
+			return fmt.Errorf("ABUSEIPDB_URL/ABUSEIPDB_COUNTRY_INCLUDE/ABUSEIPDB_COUNTRY_EXCLUDE need ABUSEIPDB_LIST to be set")
 		}
 		return nil
+	}
+	if c.AbuseIPDBURLOverride != "" && !isHTTPURL(c.AbuseIPDBURLOverride) {
+		return fmt.Errorf("ABUSEIPDB_URL must be an absolute http:// or https:// URL")
 	}
 	if !slices.Contains(AbuseIPDBLists, c.AbuseIPDBList) {
 		return fmt.Errorf("ABUSEIPDB_LIST: unknown list %q; valid lists are %s", c.AbuseIPDBList, strings.Join(AbuseIPDBLists, ", "))

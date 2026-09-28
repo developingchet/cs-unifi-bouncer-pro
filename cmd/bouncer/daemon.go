@@ -33,6 +33,15 @@ func runDaemon() error {
 		return fmt.Errorf("open storage: %w", err)
 	}
 	defer store.Close()
+	if !cfg.DryRun {
+		feeds := blocklist.PlainFeeds(cfg.BlocklistURLs)
+		if feed := abuseIPDBFeed(cfg); feed.URL != "" {
+			feeds = append(feeds, feed)
+		}
+		if err := blocklist.MigrateLegacySources(store, feeds); err != nil {
+			return fmt.Errorf("migrate blocklist claim sources: %w", err)
+		}
+	}
 
 	ctrl, err := controller.NewClient(context.Background(), controllerConfig(cfg), log)
 	if err != nil {
@@ -258,11 +267,12 @@ func abuseIPDBFeed(cfg *config.Config) blocklist.Feed {
 		return blocklist.Feed{}
 	}
 	return blocklist.Feed{
-		URL:      url,
-		Include:  countrySet(cfg.AbuseIPDBCountryInclude),
-		Exclude:  countrySet(cfg.AbuseIPDBCountryExclude),
-		MaxBytes: 64 << 20,
-		Prune:    true,
+		URL:        url,
+		SourceKind: blocklist.SourceKindAbuseIPDB,
+		Include:    countrySet(cfg.AbuseIPDBCountryInclude),
+		Exclude:    countrySet(cfg.AbuseIPDBCountryExclude),
+		MaxBytes:   64 << 20,
+		Prune:      true,
 	}
 }
 

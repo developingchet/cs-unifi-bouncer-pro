@@ -7,8 +7,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
 )
 
 // TestManager_FailedFetchKeepsPreviousBans: a failed fetch, or a 200 that
@@ -39,7 +37,7 @@ func TestManager_FailedFetchKeepsPreviousBans(t *testing.T) {
 
 			mgr, store, _ := newTestManager(srv.URL)
 			mgr.fetchAndApply(context.Background())
-			source := "blocklist:" + logger.SafeURL(srv.URL)
+			source := (Feed{URL: srv.URL}).sourceKey()
 			before, _ := store.BanList()
 			firstExpiry := before["203.0.113.1"].Claims[source]
 			if firstExpiry.IsZero() {
@@ -77,7 +75,7 @@ func TestManager_FeedDownLongerThanMaxOutageStopsExtending(t *testing.T) {
 
 	mgr, store, _ := newTestManager(srv.URL)
 	mgr.fetchAndApply(context.Background())
-	source := "blocklist:" + logger.SafeURL(srv.URL)
+	source := (Feed{URL: srv.URL}).sourceKey()
 	before, _ := store.BanList()
 	firstExpiry := before["203.0.113.1"].Claims[source]
 
