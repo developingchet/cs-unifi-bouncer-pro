@@ -161,7 +161,7 @@ func TestManager_RejectsOversizedFeedBeforeApplying(t *testing.T) {
 	}))
 	defer srv.Close()
 	manager, store, fw := newTestManager(srv.URL)
-	if err := manager.fetchURL(context.Background(), srv.URL); err == nil {
+	if err := manager.fetchFeed(context.Background(), Feed{URL: srv.URL}); err == nil {
 		t.Fatal("oversized feed was accepted")
 	}
 	bans, err := store.BanList()

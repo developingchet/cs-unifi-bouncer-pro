@@ -99,13 +99,19 @@ func runDaemon() error {
 		return fmt.Errorf("build bouncer: %w", err)
 	}
 
-	if len(cfg.BlocklistURLs) > 0 {
+	if len(cfg.BlocklistURLs) > 0 || cfg.AbuseIPDBURL() != "" {
 		protected, err := decision.ParseWhitelist(cfg.BlockWhitelist)
 		if err != nil {
 			return fmt.Errorf("parse blocklist whitelist: %w", err)
 		}
-		blMgr := blocklist.NewManager(cfg.BlocklistURLs, cfg.BlocklistRefreshInterval, cfg.BanTTL, claims, protected, cfg.DryRun, log)
-		go blMgr.Run(ctx)
+		if len(cfg.BlocklistURLs) > 0 {
+			blMgr := blocklist.NewManager(cfg.BlocklistURLs, cfg.BlocklistRefreshInterval, cfg.BanTTL, claims, protected, cfg.DryRun, log)
+			go blMgr.Run(ctx)
+		}
+		if feed := abuseIPDBFeed(cfg); feed.URL != "" {
+			abMgr := blocklist.NewFeedManager([]blocklist.Feed{feed}, cfg.AbuseIPDBRefreshInterval, cfg.BanTTL, claims, protected, cfg.DryRun, log)
+			go abMgr.Run(ctx)
+		}
 	}
 	janitor := bouncer.NewJanitor(store, claims, cfg.JanitorInterval, log)
 	go func() {
@@ -240,4 +246,33 @@ func filterExcluded(sites, excluded []string) []string {
 		}
 	}
 	return result
+}
+
+// abuseIPDBFeed builds the AbuseIPDB feed from config. The large lists are
+// only usable country-filtered, so its download cap is well above the
+// default; the entry cap still applies to what the filter keeps. Pruning
+// makes a narrowed filter shrink UniFi on the first fetch after a restart.
+func abuseIPDBFeed(cfg *config.Config) blocklist.Feed {
+	url := cfg.AbuseIPDBURL()
+	if url == "" {
+		return blocklist.Feed{}
+	}
+	return blocklist.Feed{
+		URL:      url,
+		Include:  countrySet(cfg.AbuseIPDBCountryInclude),
+		Exclude:  countrySet(cfg.AbuseIPDBCountryExclude),
+		MaxBytes: 64 << 20,
+		Prune:    true,
+	}
+}
+
+func countrySet(codes []string) map[string]struct{} {
+	if len(codes) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(codes))
+	for _, code := range codes {
+		set[code] = struct{}{}
+	}
+	return set
 }

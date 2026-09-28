@@ -29,6 +29,7 @@ Automatically translates CrowdSec ban decisions into UniFi firewall rules — bl
 - **CrowdSec usage-metrics** — Pushes decision telemetry to LAPI `/v1/usage-metrics` on a configurable interval (default 30 min); spec-compliant with CrowdSec remediation component requirements
 - **Ban history audit trail** — Ring-buffer event log (up to 10,000 entries) records every ban, unban, and expiry; queryable via `status bans`, `status ip`, and `status history` CLI subcommands
 - **External blocklist import** — Fetch plain-text IP/CIDR lists from external URLs on a configurable interval; bans auto-expire if the URL becomes unreachable
+- **AbuseIPDB lists with country filters**: import a [borestad/blocklist-abuseipdb](https://github.com/borestad/blocklist-abuseipdb) list by name and include or exclude countries, so only the entries you want reach UniFi
 - **Webhook notifications** — POST JSON alerts to a webhook URL when the circuit breaker opens/closes or reconcile drift is detected
 - **Per-scenario duration overrides** — Override `BAN_TTL` for specific CrowdSec scenarios via `BLOCK_SCENARIO_DURATION_MAP`
 - **Destination IP filtering** — Scope block policies to specific destination hosts or subnets via `@ip` suffix on zone pairs (`External->Dmz@10.0.1.0/24`)
@@ -211,6 +212,17 @@ Templates are rendered at startup and must produce a non-empty name that include
 |----------|---------|-------------|
 | `BLOCKLIST_URLS` | — | Comma-separated URLs of plain-text IP/CIDR blocklists to fetch |
 | `BLOCKLIST_REFRESH_INTERVAL` | `24h` | How often to re-fetch each URL |
+
+### AbuseIPDB blocklist
+
+Imports a list from [borestad/blocklist-abuseipdb](https://github.com/borestad/blocklist-abuseipdb), optionally filtered by country. Only matching entries are stored and pushed to UniFi.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ABUSEIPDB_LIST` | none | List to import: `1d`, `3d`, `7d`, `14d`, `30d`, `60d`, `90d`, `120d`, `180d` or `365d` (days of reports). Empty disables the feed. `120d` and longer need `ABUSEIPDB_COUNTRY_INCLUDE` |
+| `ABUSEIPDB_COUNTRY_INCLUDE` | none | Comma-separated two-letter country codes. When set, only these countries are banned |
+| `ABUSEIPDB_COUNTRY_EXCLUDE` | none | Comma-separated country codes never banned from this list |
+| `ABUSEIPDB_REFRESH_INTERVAL` | `6h` | How often to re-fetch the list |
 
 ### Webhook notifications
 
