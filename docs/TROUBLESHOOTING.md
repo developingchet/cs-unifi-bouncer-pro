@@ -725,6 +725,32 @@ Common causes:
 
 Blocklist bans are applied on startup and then every `BLOCKLIST_REFRESH_INTERVAL`. To force an immediate refresh, restart the container.
 
+### AbuseIPDB list is missing or has fewer bans than expected
+
+Set `ABUSEIPDB_LIST` to one of the supported report windows; the country
+settings alone do not enable the importer. Check its startup and refresh logs:
+
+```bash
+docker logs cs-unifi-bouncer-pro | grep -E "blocklist: feed configured|blocklist: fetch complete|blocklist: partial feed|country filter"
+```
+
+`entries` counts valid addresses retained after the country filter;
+`filtered` counts valid addresses dropped by it. An include filter drops lines
+without a two-letter country tag. An exclude filter is applied after include,
+and the same code cannot appear in both. Lists `120d` and longer require an
+include filter because an unfiltered list can exceed the 250,000-entry cap.
+
+| Log message | Meaning | Action |
+|-------------|---------|--------|
+| `country filter matched no entries` | The response was valid but no country tag passed the filter; this importer's old claims are released | Check `ABUSEIPDB_COUNTRY_INCLUDE` and `ABUSEIPDB_COUNTRY_EXCLUDE` |
+| `partial feed applied; pruning skipped` | Some lines were invalid; valid matching entries were applied while existing claims were kept | Check the feed format or trusted mirror; the last complete fetch time is unchanged |
+| `no valid entries` | The response supplied no valid entries or valid filtered entries, so existing claims are preserved subject to `BAN_TTL` | Check the URL and response format |
+| `blocklist exceeds` | The response exceeded its byte or entry cap | Use a narrower country include filter or a shorter list window |
+
+`ABUSEIPDB_URL` can point to a trusted mirror. Logs deliberately show only its
+scheme and host; they do not expose URL paths or query tokens. For feed
+settings and limits, see [AbuseIPDB Blocklist](CONFIGURATION.md#abuseipdb-blocklist).
+
 ---
 
 ## Webhook Issues

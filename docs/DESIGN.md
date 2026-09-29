@@ -218,7 +218,11 @@ These are used by the `status history` and `status ip` CLI subcommands to surfac
 
 ### External Blocklists
 
-`internal/blocklist.Manager` fetches plain-text IP/CIDR URLs on startup and on a ticker. Each URL owns a separate claim for every valid entry. Refreshing a feed extends those claims to `now + 2×interval`; a failed fetch keeps extending the claims from the last good fetch for up to `BAN_TTL`, after which they expire. The firewall ban remains while any other feed or CrowdSec decision still claims the IP.
+`internal/blocklist.Manager` fetches plain-text IP/CIDR URLs on startup and on a ticker. Generic `BLOCKLIST_URLS` and the optional AbuseIPDB importer have separate claim namespaces even when they use the same URL. Each source key is a stable hash of the URL, prefixed by importer kind; the URL path and query are absent from stored claims and logs. Startup migration rekeys legacy URL-based claims while retaining their expiry.
+
+The AbuseIPDB importer selects a report window and can include or exclude entries by the two-letter country tag in each line's comment. It validates an address before counting it as filtered. A complete refresh applies valid entries and immediately releases that importer's claims for entries no longer selected. A response containing invalid lines still applies valid entries but skips pruning and does not advance the last fully successful fetch time. A response with no valid entries and no valid country-filtered entries is treated as a failed fetch. A valid feed whose entries are all excluded by the country filter may release its old claims.
+
+Refreshes set claim expiry to `now + 2×interval`. A failed or partial fetch can extend existing claims for up to `BAN_TTL` after the last complete fetch; after that, claims absent from valid entries are allowed to expire. The firewall ban remains while any other feed or CrowdSec decision still claims the IP.
 
 ### Webhook Notifications
 

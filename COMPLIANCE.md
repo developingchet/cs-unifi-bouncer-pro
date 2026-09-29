@@ -16,7 +16,7 @@ controls below are applied to every published artifact.
 ### Trivy Vulnerability Scan
 
 Job `docker-scan`, step **"Trivy vulnerability scan"**
-(`aquasecurity/trivy-action@0.34.1`):
+(`aquasecurity/trivy-action` v0.36.0, pinned by commit SHA):
 
 - Scans the `linux/amd64` candidate image before anything is pushed.
 - `exit-code: "1"` — the workflow fails and no image is published if unfixed
@@ -33,7 +33,7 @@ long-lived signing key exists. The signature is bound to the exact release
 workflow identity.
 
 ```bash
-cosign verify developingchet/cs-unifi-bouncer-pro:2.0.2 \
+cosign verify developingchet/cs-unifi-bouncer-pro:2.1.0 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 ```
@@ -67,7 +67,8 @@ sha256sum * > checksums.txt
 ### Multi-Architecture Image
 
 Job `docker-push`, step **"Build and push multi-arch image"**
-(`docker/build-push-action@v5`), `platforms: linux/amd64,linux/arm64,linux/arm/v7`.
+(`docker/build-push-action` v7.4.0, pinned by commit SHA),
+`platforms: linux/amd64,linux/arm64,linux/arm/v7`.
 
 ---
 
@@ -143,30 +144,36 @@ private reporting channel, and response timelines.
 
 ## Workflow Integrity
 
-All actions in `.github/workflows/ci.yml` and `.github/workflows/release.yml`
-use pinned versions. The table below is copied verbatim from the workflow files.
+Actions in the CI, release, image-scan, Scorecard, and Socket workflows are
+pinned to full commit SHAs. The YAML comments identify these upstream versions;
+the SHA references in the workflow files are the source of truth.
 
-| Action | Version tag used | Workflow |
-|--------|-----------------|---------|
-| `actions/checkout` | `@v4` | ci.yml, release.yml |
-| `actions/download-artifact` | `@v4` | release.yml |
-| `actions/setup-go` | `@v5` | ci.yml, release.yml |
-| `actions/upload-artifact` | `@v4` | release.yml |
-| `anchore/sbom-action` | `@v0` | release.yml |
-| `aquasecurity/trivy-action` | `@0.34.1` | release.yml |
-| `github/codeql-action/upload-sarif` | `@v4` | release.yml |
-| `docker/build-push-action` | `@v5` | ci.yml, release.yml |
-| `docker/login-action` | `@v3` | release.yml |
-| `docker/metadata-action` | `@v5` | release.yml |
-| `docker/setup-buildx-action` | `@v3` | ci.yml, release.yml |
-| `docker/setup-qemu-action` | `@v3` | release.yml |
-| `peter-evans/dockerhub-description` | `@v4` | release.yml |
-| `sigstore/cosign-installer` | `@v3` | release.yml |
-| `softprops/action-gh-release` | `@v2` | release.yml |
+| Action | Upstream version | Workflows |
+|--------|------------------|-----------|
+| `actions/checkout` | v7.0.1 | CI, release, Socket, Scorecard |
+| `actions/download-artifact` | v8 | release |
+| `actions/setup-go` | v7 | CI, release |
+| `actions/setup-python` | v7.0.0 | Socket |
+| `actions/upload-artifact` | v7.0.1 | release, Scorecard |
+| `anchore/sbom-action` | v0 | release |
+| `aquasecurity/trivy-action` | v0.36.0 | CI, release, image-scan |
+| `github/codeql-action/upload-sarif` | v4.38.2 | release, image-scan, Scorecard |
+| `docker/build-push-action` | v7.4.0 | CI, release |
+| `docker/login-action` | v4.6.0 | release |
+| `docker/metadata-action` | v6.2.0 | release |
+| `docker/setup-buildx-action` | v4.4.1 | CI, release |
+| `docker/setup-qemu-action` | v4.4.0 | release |
+| `golangci/golangci-lint-action` | v9 | CI |
+| `ossf/scorecard-action` | v2.4.4 | Scorecard |
+| `peter-evans/dockerhub-description` | v5.0.0 | release |
+| `sigstore/cosign-installer` | v4.1.2 | release |
+| `softprops/action-gh-release` | v2 | release |
 
-> **Note:** Actions are currently pinned to version tags, not commit SHAs.
-> See [GitHub Actions security hardening](https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-third-party-actions)
-> for SHA-pinning guidance. SHA pinning is tracked as a planned hardening item.
+CI runs race tests, lint, `govulncheck`, and a container scan before a release.
+The weekly image-scan workflow checks published images for newly disclosed
+fixable vulnerabilities. Scorecard uploads repository security findings, and
+Socket scans Go modules and GitHub Actions on pull requests and `main` when
+its API key is configured.
 
 ---
 
@@ -176,12 +183,12 @@ Independent verification of each supply chain claim:
 
 ```bash
 # Verify image signature
-cosign verify developingchet/cs-unifi-bouncer-pro:2.0.2 \
+cosign verify developingchet/cs-unifi-bouncer-pro:2.1.0 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 
 # Inspect SBOM attestation
-cosign verify-attestation developingchet/cs-unifi-bouncer-pro:2.0.2 \
+cosign verify-attestation developingchet/cs-unifi-bouncer-pro:2.1.0 \
   --type cyclonedx \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \

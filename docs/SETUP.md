@@ -172,6 +172,19 @@ chmod 600 .env
 
 For the full list of configuration options, see [CONFIGURATION.md](CONFIGURATION.md).
 
+To import an AbuseIPDB list, optionally add the following to `.env` before
+starting the container:
+
+```dotenv
+ABUSEIPDB_LIST=7d
+ABUSEIPDB_COUNTRY_INCLUDE=CN,RU
+```
+
+The list is fetched on startup and every six hours by default. Country filters
+use the two-letter country tag in each feed entry. See
+[AbuseIPDB Blocklist](CONFIGURATION.md#abuseipdb-blocklist) for the other list
+windows, exclusion filter, refresh interval, and trusted mirror URL option.
+
 #### Using API key authentication (recommended)
 
 UniFi Network ≥ 8.1 supports API key authentication, which is more secure than username/password:
@@ -254,7 +267,7 @@ docker logs cs-unifi-bouncer-pro
 Look for these startup log lines (exact field order may vary):
 
 ```json
-{"level":"info","version":"v2.0.2","msg":"cs-unifi-bouncer-pro starting"}
+{"level":"info","version":"v2.1.0","msg":"cs-unifi-bouncer-pro starting"}
 {"level":"info","sites":["default"],"msg":"loading firewall infrastructure"}
 {"level":"info","addr":":9090","msg":"Prometheus metrics server started"}
 {"level":"info","addr":":8081","msg":"health server started"}

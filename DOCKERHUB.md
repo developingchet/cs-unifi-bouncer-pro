@@ -2,7 +2,7 @@
 
 # cs-unifi-bouncer-pro
 
-[![Build](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml/badge.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml) [![Version](https://img.shields.io/badge/version-v2.0.2-blue)](https://github.com/developingchet/cs-unifi-bouncer-pro/releases/tag/v2.0.2) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/LICENSE) [![Docker Pulls](https://img.shields.io/docker/pulls/developingchet/cs-unifi-bouncer-pro)](https://hub.docker.com/r/developingchet/cs-unifi-bouncer-pro)
+[![Build](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml/badge.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml) [![Version](https://img.shields.io/badge/version-v2.1.0-blue)](https://github.com/developingchet/cs-unifi-bouncer-pro/releases/tag/v2.1.0) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/LICENSE) [![Docker Pulls](https://img.shields.io/docker/pulls/developingchet/cs-unifi-bouncer-pro)](https://hub.docker.com/r/developingchet/cs-unifi-bouncer-pro)
 
 ---
 
@@ -54,6 +54,7 @@ For full setup including CrowdSec registration, TLS, multi-site, and Docker Secr
 - **Cloudflare whitelist sync** — ALLOW policies for Cloudflare IP ranges, auto-refreshed on a configurable schedule; block policies created before the allow are recreated behind it so it takes effect
 - **Ban history audit trail** — ring-buffer event log (up to 10,000 entries) for every ban, unban, and expiry; queryable via `status bans`, `status ip`, `status history`, also against the running bouncer via `docker exec`
 - **External blocklist import** — fetch plain-text IP/CIDR lists from external URLs on a configurable interval; bans auto-expire if the feed goes offline
+- **AbuseIPDB lists with country filters** — import a borestad AbuseIPDB list by report window and include or exclude two-letter country codes; configure `ABUSEIPDB_LIST` and optionally `ABUSEIPDB_COUNTRY_INCLUDE`, `ABUSEIPDB_COUNTRY_EXCLUDE`, and `ABUSEIPDB_REFRESH_INTERVAL`
 - **Webhook notifications** — POST JSON alerts when the circuit breaker trips or reconcile drift is detected
 - **Per-scenario duration overrides** — set a duration for matching CrowdSec scenarios via `BLOCK_SCENARIO_DURATION_MAP`, including durations longer than `BAN_TTL`
 - **Destination IP filtering** — scope block policies to specific destination hosts or subnets via `@ip1,ip2,...` suffix on zone pairs
@@ -85,8 +86,8 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) acc
 | Tag | When to use |
 |-----|-------------|
 | `latest` | stable, always points to the newest release |
-| `2.0.2` (also `v2.0.2`) | exact version, recommended for production |
-| `2.0` | minor-pinned |
+| `2.1.0` (also `v2.1.0`) | exact version, recommended for production |
+| `2.1` | minor-pinned |
 | `2` | major-pinned |
 
 ---
@@ -96,7 +97,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) acc
 This image is signed with [Cosign](https://docs.sigstore.dev/cosign/overview/) (keyless OIDC). Verify with:
 
 ```bash
-cosign verify developingchet/cs-unifi-bouncer-pro:2.0.2 \
+cosign verify developingchet/cs-unifi-bouncer-pro:2.1.0 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 ```
