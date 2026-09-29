@@ -190,14 +190,13 @@ func TestManager_PartialFeedAppliesGoodEntriesAndKeepsOldClaims(t *testing.T) {
 			source := feed.sourceKey()
 			before, _ := store.BanList()
 			initialExpiry := before["203.0.113.1"].Claims[source]
-			lastGood := mgr.lastGood[source]
 			if initialExpiry.IsZero() {
 				t.Fatal("initial claim missing")
 			}
 			if tc.outageExceeded {
 				mgr.lastGood[source] = time.Now().Add(-25 * time.Hour)
 			}
-			lastGood = mgr.lastGood[source]
+			lastGood := mgr.lastGood[source]
 			time.Sleep(20 * time.Millisecond)
 			body = tc.body
 			mgr.fetchAndApply(context.Background())
