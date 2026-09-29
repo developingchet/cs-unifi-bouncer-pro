@@ -79,7 +79,7 @@ func TestManager_FeedDownLongerThanMaxOutageStopsExtending(t *testing.T) {
 	before, _ := store.BanList()
 	firstExpiry := before["203.0.113.1"].Claims[source]
 
-	mgr.lastGood[srv.URL] = time.Now().Add(-8 * 24 * time.Hour) // down past the 7-day cap
+	mgr.lastGood[source] = time.Now().Add(-8 * 24 * time.Hour) // down past the 7-day cap
 	failing.Store(true)
 	mgr.fetchAndApply(context.Background())
 

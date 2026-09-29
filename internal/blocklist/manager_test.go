@@ -183,6 +183,23 @@ func TestManager_PathTokenAbsentFromClaimsAndLogs(t *testing.T) {
 	}
 }
 
+func TestManager_LogsOpaqueFeedSourceAtStartup(t *testing.T) {
+	const token = "private-path-token"
+	feed := Feed{URL: "https://feed.example/" + token + "/list?key=query-secret", SourceKind: SourceKindAbuseIPDB}
+	var logs bytes.Buffer
+	mgr := NewFeedManager([]Feed{feed}, time.Hour, 24*time.Hour, nil, nil, true, zerolog.New(&logs))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	mgr.Run(ctx)
+	got := logs.String()
+	if !strings.Contains(got, `"source":"`+feed.sourceKey()+`"`) || !strings.Contains(got, `"url":"https://feed.example"`) {
+		t.Fatalf("startup log omits the opaque source and host: %s", got)
+	}
+	if strings.Contains(got, token) || strings.Contains(got, "query-secret") {
+		t.Fatalf("startup log exposed a URL credential: %s", got)
+	}
+}
+
 func TestManager_ProtectsPrivateAndWhitelistedRanges(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("10.0.0.0/8\n0.0.0.0/0\n198.51.100.0/24\n203.0.113.2\n"))

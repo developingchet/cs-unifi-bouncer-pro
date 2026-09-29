@@ -220,6 +220,7 @@ Imports a list from [borestad/blocklist-abuseipdb](https://github.com/borestad/b
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ABUSEIPDB_LIST` | none | List to import: `1d`, `3d`, `7d`, `14d`, `30d`, `60d`, `90d`, `120d`, `180d` or `365d` (days of reports). Empty disables the feed. `120d` and longer need `ABUSEIPDB_COUNTRY_INCLUDE` |
+| `ABUSEIPDB_URL` | derived from `ABUSEIPDB_LIST` | Optional absolute HTTP(S) URL for a trusted mirror or local test feed; requires `ABUSEIPDB_LIST` |
 | `ABUSEIPDB_COUNTRY_INCLUDE` | none | Comma-separated two-letter country codes. When set, only these countries are banned |
 | `ABUSEIPDB_COUNTRY_EXCLUDE` | none | Comma-separated country codes never banned from this list |
 | `ABUSEIPDB_REFRESH_INTERVAL` | `6h` | How often to re-fetch the list |

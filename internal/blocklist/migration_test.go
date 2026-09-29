@@ -104,3 +104,31 @@ func TestMigrateLegacySourceKeepsBanThroughFeedOutage(t *testing.T) {
 		t.Fatalf("migrated claim not extended on outage: %s, original %s", got, expiry)
 	}
 }
+
+func TestKeepLaterClaim(t *testing.T) {
+	early := time.Now().Add(time.Hour)
+	late := early.Add(time.Hour)
+	for _, tc := range []struct {
+		name     string
+		current  *time.Time
+		incoming time.Time
+		want     time.Time
+	}{
+		{"new claim", nil, early, early},
+		{"later expiry replaces earlier", &early, late, late},
+		{"earlier expiry does not replace later", &late, early, late},
+		{"never expiring replaces finite", &early, time.Time{}, time.Time{}},
+		{"finite does not replace never expiring", new(time.Time), late, time.Time{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claims := make(map[string]time.Time)
+			if tc.current != nil {
+				claims["source"] = *tc.current
+			}
+			keepLaterClaim(claims, "source", tc.incoming)
+			if got := claims["source"]; !got.Equal(tc.want) {
+				t.Fatalf("claim expiry = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}

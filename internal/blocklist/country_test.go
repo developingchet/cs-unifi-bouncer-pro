@@ -97,13 +97,13 @@ func TestFetchFeed_FilterMatchingNothingPrunes(t *testing.T) {
 
 func TestFetchFeed_InvalidResponseDoesNotPruneFilteredFeed(t *testing.T) {
 	for _, tc := range []struct {
-		name, body string
+		name, body, newIP string
 	}{
-		{"html error", "<html>maintenance</html>\n"},
-		{"invalid tagged address", "not-an-ip # US AS12345\n"},
-		{"excluded address and error page", "203.0.113.3 # US AS16509\n<html>maintenance</html>\n"},
-		{"included address and error page", "203.0.113.9 # CN AS45090\n<html>maintenance</html>\n"},
-		{"empty body", ""},
+		{"html error", "<html>maintenance</html>\n", ""},
+		{"invalid tagged address", "not-an-ip # US AS12345\n", ""},
+		{"excluded address and error page", "203.0.113.3 # US AS16509\n<html>maintenance</html>\n", ""},
+		{"included address and error page", "203.0.113.9 # CN AS45090\n<html>maintenance</html>\n", "203.0.113.9"},
+		{"empty body", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := abuseipdbBody
@@ -122,8 +122,76 @@ func TestFetchFeed_InvalidResponseDoesNotPruneFilteredFeed(t *testing.T) {
 				t.Fatal("malformed 200 response was accepted")
 			}
 			bans, _ := store.BanList()
-			if len(bans) != 1 || bans["203.0.113.1"].Claims[feed.sourceKey()].IsZero() {
+			wantCount := 1
+			if tc.newIP != "" {
+				wantCount++
+				if bans[tc.newIP].Claims[feed.sourceKey()].IsZero() {
+					t.Fatalf("valid new entry was not applied: %v", bans)
+				}
+			}
+			if len(bans) != wantCount || bans["203.0.113.1"].Claims[feed.sourceKey()].IsZero() {
 				t.Fatalf("invalid response pruned the previous ban: %v", bans)
+			}
+		})
+	}
+}
+
+func TestManager_PartialFeedAppliesGoodEntriesAndKeepsOldClaims(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, newIP string
+		outageExceeded    bool
+	}{
+		{"included entry and stray line", "203.0.113.9 # CN AS45090\nstray-line\n", "203.0.113.9", false},
+		{"excluded entry and stray line", "203.0.113.3 # US AS16509\nstray-line\n", "", false},
+		{"only bad lines", "stray-line\n", "", false},
+		{"included entry after outage cap", "203.0.113.9 # CN AS45090\nstray-line\n", "203.0.113.9", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "203.0.113.1 # CN AS45090\n"
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+			feed := Feed{URL: srv.URL, SourceKind: SourceKindAbuseIPDB, Include: codes("CN"), Prune: true}
+			mgr, store := newFeedTestManager(feed)
+			mgr.fetchAndApply(context.Background())
+			source := feed.sourceKey()
+			before, _ := store.BanList()
+			initialExpiry := before["203.0.113.1"].Claims[source]
+			lastGood := mgr.lastGood[source]
+			if initialExpiry.IsZero() {
+				t.Fatal("initial claim missing")
+			}
+			if tc.outageExceeded {
+				mgr.lastGood[source] = time.Now().Add(-25 * time.Hour)
+			}
+			lastGood = mgr.lastGood[source]
+			time.Sleep(20 * time.Millisecond)
+			body = tc.body
+			mgr.fetchAndApply(context.Background())
+			bans, _ := store.BanList()
+			oldExpiry := bans["203.0.113.1"].Claims[source]
+			if tc.outageExceeded {
+				if !oldExpiry.Equal(initialExpiry) {
+					t.Fatalf("old claim extended past the outage cap: %v", bans)
+				}
+			} else if !oldExpiry.After(initialExpiry) {
+				t.Fatalf("old claim was not preserved and extended: %v", bans)
+			}
+			if !mgr.lastGood[source].Equal(lastGood) {
+				t.Fatal("partial feed advanced last fully successful fetch")
+			}
+			if tc.newIP != "" && bans[tc.newIP].Claims[source].IsZero() {
+				t.Fatalf("valid new entry was not applied: %v", bans)
+			}
+			if _, banned := bans["203.0.113.3"]; banned {
+				t.Fatal("excluded entry was claimed")
+			}
+			body = "203.0.113.5 # CN AS45090\n"
+			mgr.fetchAndApply(context.Background())
+			bans, _ = store.BanList()
+			if len(bans) != 1 || bans["203.0.113.5"].Claims[source].IsZero() {
+				t.Fatalf("complete recovery feed did not prune old claims: %v", bans)
 			}
 		})
 	}

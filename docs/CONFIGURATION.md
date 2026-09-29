@@ -477,6 +477,8 @@ ABUSEIPDB_COUNTRY_EXCLUDE=US
 
 **Changing the filter.** After each successful fetch, bans this feed placed on addresses it no longer lists (because upstream dropped them, or because you narrowed the filter) are released straight away, so the first fetch after a restart shrinks UniFi to match. An address CrowdSec or another feed also blocks stays banned. A filter that matches nothing is not treated as a feed outage: it logs a warning and releases the feed's bans.
 
+If a response contains an invalid entry, valid matching entries are still imported, but no existing feed claims are pruned that round. The response does not reset the `BAN_TTL` outage timer; if incomplete responses continue, claims absent from the valid entries eventually expire. The startup log pairs each opaque claim source key with the feed's scheme and host for database troubleshooting, without logging URL paths or queries.
+
 **Size limits.** A feed may hold at most 250,000 addresses, counted after filtering, and the download is capped at 64 MB. As of this writing the `1d` list is about 51,000 addresses and `90d` about 13 MB; `120d` and longer exceed the address limit unfiltered, so they are only accepted with `ABUSEIPDB_COUNTRY_INCLUDE`. If a filtered result still exceeds the limit, the fetch fails and the previous bans are kept, as for any failing feed.
 
 The feed shares the ban database, whitelist (`BLOCK_WHITELIST`) and outage handling of [External Blocklists](#external-blocklists). Its opaque `abuseipdb:sha256:...` claim key is distinct from a generic blocklist claim even when both use the same URL. Fetch logs include `filtered` and `removed` counts.

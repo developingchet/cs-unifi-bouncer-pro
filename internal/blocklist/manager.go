@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -24,6 +25,8 @@ const (
 	// SourceKindAbuseIPDB gives the filtered importer its own claim namespace.
 	SourceKindAbuseIPDB = "abuseipdb"
 )
+
+var errPartialFeed = errors.New("feed contains invalid entries")
 
 // Feed is one blocklist source. Include and Exclude filter entries by the
 // two-letter country code a feed puts in each line's comment
@@ -94,7 +97,8 @@ type Manager struct {
 	client    *http.Client
 
 	// maxOutage bounds how long a failing feed keeps its bans, measured from
-	// its last good fetch (or from startup). lastGood is only touched by Run.
+	// its last good fetch (or from startup). Each importer tracks its own
+	// source key, even if it shares a URL with another importer.
 	maxOutage time.Duration
 	lastGood  map[string]time.Time
 }
@@ -118,7 +122,7 @@ func NewFeedManager(feeds []Feed, interval, maxOutage time.Duration, claims *ban
 	// larger than the default gets longer to download.
 	timeout := 30 * time.Second
 	for _, feed := range feeds {
-		lastGood[feed.URL] = now
+		lastGood[feed.sourceKey()] = now
 		if feed.maxBytes() > maxFeedBytes {
 			timeout = 2 * time.Minute
 		}
@@ -132,6 +136,10 @@ func NewFeedManager(feeds []Feed, interval, maxOutage time.Duration, claims *ban
 }
 
 func (m *Manager) Run(ctx context.Context) {
+	for _, feed := range m.feeds {
+		m.log.Info().Str("url", logger.SafeHost(feed.URL)).Str("source", feed.sourceKey()).
+			Msg("blocklist: feed configured")
+	}
 	m.fetchAndApply(ctx)
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
@@ -147,17 +155,21 @@ func (m *Manager) Run(ctx context.Context) {
 
 func (m *Manager) fetchAndApply(ctx context.Context) {
 	for _, feed := range m.feeds {
-		url := feed.URL
 		if err := m.fetchFeed(ctx, feed); err != nil {
-			m.log.Error().Err(err).Str("url", logger.SafeHost(url)).Msg("blocklist: fetch failed")
+			if errors.Is(err, errPartialFeed) {
+				m.log.Warn().Err(err).Str("url", logger.SafeHost(feed.URL)).
+					Msg("blocklist: partial feed applied; pruning skipped")
+			} else {
+				m.log.Error().Err(err).Str("url", logger.SafeHost(feed.URL)).Msg("blocklist: fetch failed")
+			}
 			m.keepClaims(feed)
 			continue
 		}
-		m.lastGood[url] = time.Now()
+		m.lastGood[feed.sourceKey()] = time.Now()
 	}
 }
 
-// keepClaims extends the bans from url's last successful fetch through
+// keepClaims extends the bans from a feed's last successful fetch through
 // another two refresh intervals. A feed's bans lapse when a successful fetch
 // no longer lists them, not because the feed was unreachable: otherwise one
 // failed fetch let the whole list expire at the moment the next fetch was
@@ -168,7 +180,7 @@ func (m *Manager) keepClaims(feed Feed) {
 		return
 	}
 	display := logger.SafeHost(feed.URL)
-	down := time.Since(m.lastGood[feed.URL])
+	down := time.Since(m.lastGood[feed.sourceKey()])
 	if m.maxOutage > 0 && down >= m.maxOutage {
 		m.log.Error().Str("url", display).Stringer("unreachable_for", down.Round(time.Minute)).
 			Msg("blocklist: feed failing for longer than BAN_TTL; its bans are no longer extended and will expire")
@@ -253,12 +265,8 @@ func (m *Manager) fetchFeed(ctx context.Context, feed Feed) error {
 		// count as "the feed now lists nothing".
 		return fmt.Errorf("no valid entries (%d lines skipped)", skipped)
 	}
-	if feed.Prune && invalid > 0 {
-		// Even a partially valid error page must not be treated as a complete
-		// replacement list: releasing absent claims could unban active IPs.
-		return fmt.Errorf("feed contains %d invalid entries", invalid)
-	}
-	if len(entries) == 0 {
+	partial := feed.Prune && invalid > 0
+	if len(entries) == 0 && !partial {
 		// The feed is fine; the country filter matched nothing in it.
 		m.log.Warn().Str("url", display).Int("filtered", filtered).
 			Msg("blocklist: country filter matched no entries in this feed")
@@ -266,6 +274,9 @@ func (m *Manager) fetchFeed(ctx context.Context, feed Feed) error {
 	if m.dryRun {
 		m.log.Info().Str("url", display).Int("entries", len(entries)).Int("filtered", filtered).
 			Msg("[DRY-RUN] would import blocklist")
+		if partial {
+			return fmt.Errorf("%w: %d invalid lines; valid entries would be applied without pruning", errPartialFeed, invalid)
+		}
 		return nil
 	}
 	source := feed.sourceKey()
@@ -278,7 +289,7 @@ func (m *Manager) fetchFeed(ctx context.Context, feed Feed) error {
 		}
 	}
 	removed := 0
-	if feed.Prune {
+	if feed.Prune && !partial {
 		removed, err = m.claims.ReleaseSourceExcept(ctx, source, seen)
 		if err != nil {
 			m.log.Warn().Err(err).Str("url", display).Msg("blocklist: could not release bans the feed no longer lists")
@@ -290,9 +301,14 @@ func (m *Manager) fetchFeed(ctx context.Context, feed Feed) error {
 		event = event.Int("filtered", filtered)
 	}
 	if feed.Prune {
-		event = event.Int("removed", removed)
+		event = event.Int("removed", removed).Bool("pruning_skipped", partial)
 	}
 	event.Msg("blocklist: fetch complete")
+	if partial {
+		// The response is incomplete. Keep the last fully successful fetch
+		// time so repeated partial feeds cannot extend stale claims forever.
+		return fmt.Errorf("%w: %d invalid lines; valid entries applied without pruning", errPartialFeed, invalid)
+	}
 	return nil
 }
 

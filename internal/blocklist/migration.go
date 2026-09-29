@@ -68,7 +68,7 @@ func MigrateLegacySources(store storage.Store, feeds []Feed) error {
 
 func keepLaterClaim(claims map[string]time.Time, source string, expiry time.Time) {
 	current, exists := claims[source]
-	if !exists || current.Before(expiry) && !current.IsZero() {
+	if !exists || !current.IsZero() && (expiry.IsZero() || current.Before(expiry)) {
 		claims[source] = expiry
 	}
 }
