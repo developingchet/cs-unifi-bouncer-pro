@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1029,6 +1030,78 @@ func TestValidateRuntimeLimits(t *testing.T) {
 			tc.modify(cfg)
 			if err := cfg.Validate(); err == nil {
 				t.Error("expected validation error")
+			}
+		})
+	}
+}
+
+func TestLoadAbuseIPDB(t *testing.T) {
+	tests := []struct {
+		name     string
+		env      map[string]string
+		wantErr  string
+		wantURL  string
+		wantIncl []string
+		wantExcl []string
+	}{
+		{name: "off by default"},
+		{
+			name:    "list only",
+			env:     map[string]string{"ABUSEIPDB_LIST": "7D"},
+			wantURL: "https://raw.githubusercontent.com/borestad/blocklist-abuseipdb/main/abuseipdb-s100-7d.ipv4",
+		},
+		{
+			name:     "codes normalised",
+			env:      map[string]string{"ABUSEIPDB_LIST": "1d", "ABUSEIPDB_COUNTRY_INCLUDE": "cn, ru,CN", "ABUSEIPDB_COUNTRY_EXCLUDE": "us"},
+			wantURL:  "https://raw.githubusercontent.com/borestad/blocklist-abuseipdb/main/abuseipdb-s100-1d.ipv4",
+			wantIncl: []string{"CN", "RU"},
+			wantExcl: []string{"US"},
+		},
+		{name: "unknown list", env: map[string]string{"ABUSEIPDB_LIST": "2d"}, wantErr: "ABUSEIPDB_LIST"},
+		{name: "local mirror", env: map[string]string{"ABUSEIPDB_LIST": "7d", "ABUSEIPDB_URL": "http://mock:8080/abuseipdb.txt"}, wantURL: "http://mock:8080/abuseipdb.txt"},
+		{name: "mirror without list", env: map[string]string{"ABUSEIPDB_URL": "http://mock:8080/abuseipdb.txt"}, wantErr: "ABUSEIPDB_LIST"},
+		{name: "invalid mirror URL", env: map[string]string{"ABUSEIPDB_LIST": "7d", "ABUSEIPDB_URL": "ftp://mock/list"}, wantErr: "ABUSEIPDB_URL"},
+		{name: "bad code", env: map[string]string{"ABUSEIPDB_LIST": "1d", "ABUSEIPDB_COUNTRY_INCLUDE": "CHN"}, wantErr: "ABUSEIPDB_COUNTRY_INCLUDE"},
+		{name: "overlap", env: map[string]string{"ABUSEIPDB_LIST": "1d", "ABUSEIPDB_COUNTRY_INCLUDE": "CN", "ABUSEIPDB_COUNTRY_EXCLUDE": "cn"}, wantErr: "both"},
+		{name: "filter without list", env: map[string]string{"ABUSEIPDB_COUNTRY_EXCLUDE": "US"}, wantErr: "ABUSEIPDB_LIST"},
+		{name: "large list unfiltered", env: map[string]string{"ABUSEIPDB_LIST": "365d", "ABUSEIPDB_COUNTRY_EXCLUDE": "US"}, wantErr: "250000"},
+		{
+			name:     "large list filtered",
+			env:      map[string]string{"ABUSEIPDB_LIST": "365d", "ABUSEIPDB_COUNTRY_INCLUDE": "KP"},
+			wantURL:  "https://raw.githubusercontent.com/borestad/blocklist-abuseipdb/main/abuseipdb-s100-365d.ipv4",
+			wantIncl: []string{"KP"},
+		},
+		{name: "zero refresh", env: map[string]string{"ABUSEIPDB_LIST": "1d", "ABUSEIPDB_REFRESH_INTERVAL": "0s"}, wantErr: "ABUSEIPDB_REFRESH_INTERVAL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("UNIFI_URL", "https://192.168.1.1")
+			t.Setenv("UNIFI_API_KEY", "key")
+			t.Setenv("CROWDSEC_LAPI_KEY", "lapi-key")
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := Load()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Load() = %v, want error containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.AbuseIPDBURL(); got != tt.wantURL {
+				t.Errorf("AbuseIPDBURL() = %q, want %q", got, tt.wantURL)
+			}
+			if !slices.Equal(cfg.AbuseIPDBCountryInclude, tt.wantIncl) {
+				t.Errorf("include = %v, want %v", cfg.AbuseIPDBCountryInclude, tt.wantIncl)
+			}
+			if !slices.Equal(cfg.AbuseIPDBCountryExclude, tt.wantExcl) {
+				t.Errorf("exclude = %v, want %v", cfg.AbuseIPDBCountryExclude, tt.wantExcl)
+			}
+			if tt.wantURL != "" && tt.env["ABUSEIPDB_REFRESH_INTERVAL"] == "" && cfg.AbuseIPDBRefreshInterval != 6*time.Hour {
+				t.Errorf("refresh interval = %s, want 6h default", cfg.AbuseIPDBRefreshInterval)
 			}
 		})
 	}

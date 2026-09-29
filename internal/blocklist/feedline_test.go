@@ -20,3 +20,21 @@ func TestFeedLineValue(t *testing.T) {
 		}
 	}
 }
+
+func TestFeedLineCountry(t *testing.T) {
+	tests := map[string]string{
+		"1.12.48.131      # CN  AS45090   Shenzhen Tencent": "CN",
+		"1.9.164.197 # my AS4788":                           "MY",
+		"192.0.2.0/24 ; SBL123":                             "",
+		"203.0.113.101 # scanner":                           "",
+		"203.0.113.102 # 12 AS1":                            "",
+		"203.0.113.103 #":                                   "",
+		"203.0.113.104":                                     "",
+		"# Number of ips: 51294":                            "",
+	}
+	for in, want := range tests {
+		if got := feedLineCountry(in); got != want {
+			t.Errorf("feedLineCountry(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

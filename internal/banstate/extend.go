@@ -1,6 +1,7 @@
 package banstate
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -48,4 +49,48 @@ func (m *Manager) ExtendSource(source string, expiry time.Time) (int, error) {
 		return 0, fmt.Errorf("extend %s claims: %w", source, err)
 	}
 	return len(updates), nil
+}
+
+// ReleaseSourceExcept drops source's claim from every ban whose address is
+// not in keep, unbanning addresses no other source still holds. A filtered
+// feed uses it after a successful fetch so entries it stopped listing, or
+// that a narrowed filter now excludes, leave UniFi at the next sync instead
+// of two refresh intervals later. It returns how many addresses were
+// unbanned.
+func (m *Manager) ReleaseSourceExcept(ctx context.Context, source string, keep map[string]struct{}) (int, error) {
+	if source == "" {
+		return 0, fmt.Errorf("ban source is required")
+	}
+	if m.dryRun {
+		return 0, nil
+	}
+	m.mu.Lock()
+	bans, err := m.store.BanList()
+	m.mu.Unlock()
+	if err != nil {
+		return 0, fmt.Errorf("list bans: %w", err)
+	}
+	var stale []string
+	for ip, entry := range bans {
+		if _, held := entry.Claims[source]; !held {
+			continue
+		}
+		if _, listed := keep[ip]; !listed {
+			stale = append(stale, ip)
+		}
+	}
+	removed := 0
+	for _, ip := range stale {
+		if err := ctx.Err(); err != nil {
+			return removed, err
+		}
+		unbanned, err := m.Release(ctx, ip, source)
+		if err != nil {
+			return removed, fmt.Errorf("release %s: %w", ip, err)
+		}
+		if unbanned {
+			removed++
+		}
+	}
+	return removed, nil
 }

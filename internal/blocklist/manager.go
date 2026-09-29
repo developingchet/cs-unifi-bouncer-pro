@@ -2,8 +2,9 @@ package blocklist
 
 import (
 	"bufio"
-	"bytes"
 	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,10 +22,73 @@ import (
 const (
 	maxFeedBytes   = 16 << 20
 	maxFeedEntries = 250_000
+	// SourceKindAbuseIPDB gives the filtered importer its own claim namespace.
+	SourceKindAbuseIPDB = "abuseipdb"
 )
 
+var errPartialFeed = errors.New("feed contains invalid entries")
+
+// Feed is one blocklist source. Include and Exclude filter entries by the
+// two-letter country code a feed puts in each line's comment
+// ("192.0.2.1 # CN AS4134 ..."); entries that do not pass are dropped while
+// the body is read, so they are never stored or pushed to UniFi.
+type Feed struct {
+	URL string
+	// SourceKind separates independent importers that use the same URL.
+	// Empty selects the generic blocklist importer.
+	SourceKind string
+	Include    map[string]struct{} // non-empty: keep only these countries
+	Exclude    map[string]struct{} // never keep these countries
+	MaxBytes   int64               // download cap; 0 means maxFeedBytes
+	// Prune releases this feed's bans that a successful fetch no longer
+	// lists, instead of letting them lapse after two refresh intervals. A
+	// narrowed country filter then shrinks UniFi on the first fetch.
+	Prune bool
+}
+
+// PlainFeeds wraps URLs as unfiltered feeds.
+func PlainFeeds(urls []string) []Feed {
+	feeds := make([]Feed, len(urls))
+	for i, url := range urls {
+		feeds[i] = Feed{URL: url}
+	}
+	return feeds
+}
+
+func (f Feed) filtered() bool { return len(f.Include) > 0 || len(f.Exclude) > 0 }
+
+// sourceKey is stable across restarts without copying URL credentials into
+// logs or the ban database. The importer kind keeps a filtered feed from
+// pruning claims owned by an unfiltered importer at the same URL.
+func (f Feed) sourceKey() string {
+	kind := f.SourceKind
+	if kind == "" {
+		kind = "blocklist"
+	}
+	return fmt.Sprintf("%s:sha256:%x", kind, sha256.Sum256([]byte(f.URL)))
+}
+
+// allows reports whether an entry tagged with country passes the filter.
+// An untagged entry passes only when no include list is set.
+func (f Feed) allows(country string) bool {
+	if len(f.Include) > 0 {
+		if _, ok := f.Include[country]; !ok {
+			return false
+		}
+	}
+	_, excluded := f.Exclude[country]
+	return !excluded
+}
+
+func (f Feed) maxBytes() int64 {
+	if f.MaxBytes > 0 {
+		return f.MaxBytes
+	}
+	return maxFeedBytes
+}
+
 type Manager struct {
-	urls      []string
+	feeds     []Feed
 	interval  time.Duration
 	claims    *banstate.Manager
 	protected []*net.IPNet
@@ -33,30 +97,49 @@ type Manager struct {
 	client    *http.Client
 
 	// maxOutage bounds how long a failing feed keeps its bans, measured from
-	// its last good fetch (or from startup). lastGood is only touched by Run.
+	// its last good fetch (or from startup). Each importer tracks its own
+	// source key, even if it shares a URL with another importer.
 	maxOutage time.Duration
 	lastGood  map[string]time.Time
 }
 
-// NewManager builds a feed manager. maxOutage is how long an unreachable
-// feed keeps the bans from its last good fetch; the daemon passes BAN_TTL.
+// NewManager builds a manager for unfiltered feed URLs. maxOutage is how
+// long an unreachable feed keeps the bans from its last good fetch; the
+// daemon passes BAN_TTL.
 func NewManager(urls []string, interval, maxOutage time.Duration, claims *banstate.Manager,
 	protected []*net.IPNet, dryRun bool, log zerolog.Logger,
 ) *Manager {
-	lastGood := make(map[string]time.Time, len(urls))
+	return NewFeedManager(PlainFeeds(urls), interval, maxOutage, claims, protected, dryRun, log)
+}
+
+// NewFeedManager builds a manager for feeds that may carry country filters.
+func NewFeedManager(feeds []Feed, interval, maxOutage time.Duration, claims *banstate.Manager,
+	protected []*net.IPNet, dryRun bool, log zerolog.Logger,
+) *Manager {
+	lastGood := make(map[string]time.Time, len(feeds))
 	now := time.Now()
-	for _, url := range urls {
-		lastGood[url] = now
+	// The client timeout covers reading the body, so a feed allowed to be
+	// larger than the default gets longer to download.
+	timeout := 30 * time.Second
+	for _, feed := range feeds {
+		lastGood[feed.sourceKey()] = now
+		if feed.maxBytes() > maxFeedBytes {
+			timeout = 2 * time.Minute
+		}
 	}
 	return &Manager{
-		urls: urls, interval: interval, claims: claims,
+		feeds: feeds, interval: interval, claims: claims,
 		protected: protected, dryRun: dryRun, log: log,
-		client:    &http.Client{Timeout: 30 * time.Second, CheckRedirect: feedhttp.CheckRedirect},
+		client:    &http.Client{Timeout: timeout, CheckRedirect: feedhttp.CheckRedirect},
 		maxOutage: maxOutage, lastGood: lastGood,
 	}
 }
 
 func (m *Manager) Run(ctx context.Context) {
+	for _, feed := range m.feeds {
+		m.log.Info().Str("url", logger.SafeHost(feed.URL)).Str("source", feed.sourceKey()).
+			Msg("blocklist: feed configured")
+	}
 	m.fetchAndApply(ctx)
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
@@ -71,34 +154,46 @@ func (m *Manager) Run(ctx context.Context) {
 }
 
 func (m *Manager) fetchAndApply(ctx context.Context) {
-	for _, url := range m.urls {
-		if err := m.fetchURL(ctx, url); err != nil {
-			m.log.Error().Err(err).Str("url", logger.SafeURL(url)).Msg("blocklist: fetch failed")
-			m.keepClaims(url)
+	for _, feed := range m.feeds {
+		if err := m.fetchFeed(ctx, feed); err != nil {
+			partial := errors.Is(err, errPartialFeed)
+			if partial {
+				m.log.Warn().Err(err).Str("url", logger.SafeHost(feed.URL)).
+					Msg("blocklist: partial feed applied; pruning skipped")
+			} else {
+				m.log.Error().Err(err).Str("url", logger.SafeHost(feed.URL)).Msg("blocklist: fetch failed")
+			}
+			m.keepClaims(feed, partial)
 			continue
 		}
-		m.lastGood[url] = time.Now()
+		m.lastGood[feed.sourceKey()] = time.Now()
 	}
 }
 
-// keepClaims extends the bans from url's last successful fetch through
+// keepClaims extends the bans from a feed's last successful fetch through
 // another two refresh intervals. A feed's bans lapse when a successful fetch
 // no longer lists them, not because the feed was unreachable: otherwise one
 // failed fetch let the whole list expire at the moment the next fetch was
-// due, and a longer outage unbanned all of it. A feed that has failed for
-// longer than maxOutage is treated as gone and its bans run out.
-func (m *Manager) keepClaims(url string) {
+// due, and a longer outage unbanned all of it. A feed without a complete
+// response for longer than maxOutage stops extending claims absent from the
+// valid entries, so those claims eventually expire.
+func (m *Manager) keepClaims(feed Feed, partial bool) {
 	if m.dryRun {
 		return
 	}
-	display := logger.SafeURL(url)
-	down := time.Since(m.lastGood[url])
+	display := logger.SafeHost(feed.URL)
+	down := time.Since(m.lastGood[feed.sourceKey()])
 	if m.maxOutage > 0 && down >= m.maxOutage {
-		m.log.Error().Str("url", display).Stringer("unreachable_for", down.Round(time.Minute)).
-			Msg("blocklist: feed failing for longer than BAN_TTL; its bans are no longer extended and will expire")
+		if partial {
+			m.log.Warn().Str("url", display).Stringer("incomplete_for", down.Round(time.Minute)).
+				Msg("blocklist: feed remains incomplete after BAN_TTL; claims absent from valid entries are no longer extended and will expire")
+		} else {
+			m.log.Error().Str("url", display).Stringer("unreachable_for", down.Round(time.Minute)).
+				Msg("blocklist: feed failing for longer than BAN_TTL; its bans are no longer extended and will expire")
+		}
 		return
 	}
-	n, err := m.claims.ExtendSource("blocklist:"+display, time.Now().Add(m.interval*2))
+	n, err := m.claims.ExtendSource(feed.sourceKey(), time.Now().Add(m.interval*2))
 	if err != nil {
 		m.log.Error().Err(err).Str("url", display).Msg("blocklist: could not extend bans from the last successful fetch")
 		return
@@ -108,10 +203,14 @@ func (m *Manager) keepClaims(url string) {
 	}
 }
 
-// fetchURL downloads one feed and claims its addresses. Feed URLs often carry
-// an access token, so logs and claim sources use the redacted form.
-func (m *Manager) fetchURL(ctx context.Context, url string) error {
-	display := logger.SafeURL(url)
+// fetchFeed downloads one feed and claims its addresses. Feed URLs often
+// carry an access token, so logs use the host and claim sources are opaque.
+// The body is read line by line and filtered as it arrives, so a large
+// country-filtered list costs memory only for the entries it keeps.
+func (m *Manager) fetchFeed(ctx context.Context, feed Feed) error {
+	url := feed.URL
+	display := logger.SafeHost(url)
+	limit := feed.maxBytes()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", logger.SafeURLError(err, display))
@@ -124,28 +223,32 @@ func (m *Manager) fetchURL(ctx context.Context, url string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("server returned %d", resp.StatusCode)
 	}
-	if resp.ContentLength > maxFeedBytes {
-		return fmt.Errorf("blocklist exceeds %d bytes", maxFeedBytes)
+	if resp.ContentLength > limit {
+		return fmt.Errorf("blocklist exceeds %d bytes", limit)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFeedBytes+1))
-	if err != nil {
-		return fmt.Errorf("read body: %w", err)
-	}
-	if len(body) > maxFeedBytes {
-		return fmt.Errorf("blocklist exceeds %d bytes", maxFeedBytes)
-	}
+	body := &countingReader{r: io.LimitReader(resp.Body, limit+1)}
 
 	var entries []banstate.ClaimRequest
 	seen := make(map[string]struct{})
-	var skipped int
-	scanner := bufio.NewScanner(bytes.NewReader(body))
+	var skipped, filtered, invalid int
+	scanner := bufio.NewScanner(body)
 	for scanner.Scan() {
-		line := feedLineValue(scanner.Text())
+		raw := scanner.Text()
+		line := feedLineValue(raw)
 		if line == "" {
 			continue
 		}
 		ip, ipv6, ok := parseEntry(line)
-		if !ok || decision.Unbannable(ip, ipv6, m.protected) {
+		if !ok {
+			skipped++
+			invalid++
+			continue
+		}
+		if feed.filtered() && !feed.allows(feedLineCountry(raw)) {
+			filtered++
+			continue
+		}
+		if decision.Unbannable(ip, ipv6, m.protected) {
 			skipped++
 			continue
 		}
@@ -161,23 +264,91 @@ func (m *Manager) fetchURL(ctx context.Context, url string) error {
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("scan blocklist: %w", err)
 	}
-	if len(entries) == 0 {
+	if body.n > limit {
+		return fmt.Errorf("blocklist exceeds %d bytes", limit)
+	}
+	if len(entries) == 0 && filtered == 0 {
 		// An error page or truncated response served with 200 must not
 		// count as "the feed now lists nothing".
 		return fmt.Errorf("no valid entries (%d lines skipped)", skipped)
 	}
+	partial := feed.Prune && invalid > 0
+	if len(entries) == 0 && !partial {
+		// The feed is fine; the country filter matched nothing in it.
+		m.log.Warn().Str("url", display).Int("filtered", filtered).
+			Msg("blocklist: country filter matched no entries in this feed")
+	}
 	if m.dryRun {
-		m.log.Info().Str("url", display).Int("entries", len(entries)).Msg("[DRY-RUN] would import blocklist")
+		m.log.Info().Str("url", display).Int("entries", len(entries)).Int("filtered", filtered).
+			Msg("[DRY-RUN] would import blocklist")
+		if partial {
+			return fmt.Errorf("%w: %d invalid lines; valid entries would be applied without pruning", errPartialFeed, invalid)
+		}
 		return nil
 	}
-	expiresAt := time.Now().Add(m.interval * 2)
-	added, err := m.claims.ClaimMany(ctx, entries, "blocklist:"+display, expiresAt)
-	if err != nil {
-		m.log.Warn().Err(err).Str("url", display).Msg("blocklist: some bans could not be applied yet; reconcile will retry")
+	source := feed.sourceKey()
+	added := 0
+	if len(entries) > 0 {
+		expiresAt := time.Now().Add(m.interval * 2)
+		added, err = m.claims.ClaimMany(ctx, entries, source, expiresAt)
+		if err != nil {
+			m.log.Warn().Err(err).Str("url", display).Msg("blocklist: some bans could not be applied yet; reconcile will retry")
+		}
 	}
-	m.log.Info().Str("url", display).Int("entries", len(entries)).Int("new", added).
-		Int("skipped", skipped).Msg("blocklist: fetch complete")
+	removed := 0
+	if feed.Prune && !partial {
+		removed, err = m.claims.ReleaseSourceExcept(ctx, source, seen)
+		if err != nil {
+			m.log.Warn().Err(err).Str("url", display).Msg("blocklist: could not release bans the feed no longer lists")
+		}
+	}
+	event := m.log.Info().Str("url", display).Int("entries", len(entries)).Int("new", added).
+		Int("skipped", skipped)
+	if feed.filtered() {
+		event = event.Int("filtered", filtered)
+	}
+	if feed.Prune {
+		event = event.Int("removed", removed).Bool("pruning_skipped", partial)
+	}
+	event.Msg("blocklist: fetch complete")
+	if partial {
+		// The response is incomplete. Keep the last fully successful fetch
+		// time so repeated partial feeds cannot extend stale claims forever.
+		return fmt.Errorf("%w: %d invalid lines; valid entries applied without pruning", errPartialFeed, invalid)
+	}
 	return nil
+}
+
+// countingReader counts the bytes read through it, so a body longer than
+// the feed's cap is rejected instead of silently truncated.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// feedLineCountry returns the two-letter country code a feed puts first in
+// a line's "#" comment ("192.0.2.1  # CN  AS4134 ..."), upper-cased, or ""
+// when the line carries none.
+func feedLineCountry(line string) string {
+	i := strings.IndexByte(line, '#')
+	if i < 0 {
+		return ""
+	}
+	fields := strings.Fields(line[i+1:])
+	if len(fields) == 0 || len(fields[0]) != 2 {
+		return ""
+	}
+	code := strings.ToUpper(fields[0])
+	if code[0] < 'A' || code[0] > 'Z' || code[1] < 'A' || code[1] > 'Z' {
+		return ""
+	}
+	return code
 }
 
 // feedLineValue returns the address field of a feed line: the text before

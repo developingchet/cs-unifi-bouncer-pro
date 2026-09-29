@@ -1,6 +1,7 @@
 package blocklist
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -130,6 +131,75 @@ func TestManager_ServerError(t *testing.T) {
 	}
 }
 
+func TestManager_PathTokenAbsentFromClaimsAndLogs(t *testing.T) {
+	const token = "private-path-token"
+	for _, tc := range []struct {
+		name   string
+		status int
+		closed bool
+	}{
+		{"successful fetch", http.StatusOK, false},
+		{"failed fetch", http.StatusInternalServerError, false},
+		{"transport failure", http.StatusOK, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte("203.0.113.9\n"))
+			}))
+			defer srv.Close()
+			feed := Feed{URL: srv.URL + "/" + token + "/list?key=query-secret"}
+			mgr, store := newFeedTestManager(feed)
+			var logs bytes.Buffer
+			mgr.log = zerolog.New(&logs)
+			if tc.closed {
+				srv.Close()
+			}
+			fetchErr := mgr.fetchFeed(context.Background(), feed)
+			if tc.status == http.StatusOK && !tc.closed && fetchErr != nil {
+				t.Fatal(fetchErr)
+			}
+			if tc.status != http.StatusOK || tc.closed {
+				if fetchErr == nil || strings.Contains(fetchErr.Error(), token) || strings.Contains(fetchErr.Error(), "query-secret") {
+					t.Fatalf("unsafe feed error: %v", fetchErr)
+				}
+			}
+			mgr.fetchAndApply(context.Background())
+			if strings.Contains(logs.String(), token) || strings.Contains(logs.String(), "query-secret") {
+				t.Fatalf("feed URL secret in logs: %s", logs.String())
+			}
+			bans, err := store.BanList()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range bans {
+				for source := range entry.Claims {
+					if strings.Contains(source, token) || strings.Contains(source, "query-secret") {
+						t.Fatalf("feed URL secret in claim source: %s", source)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestManager_LogsOpaqueFeedSourceAtStartup(t *testing.T) {
+	const token = "private-path-token"
+	feed := Feed{URL: "https://feed.example/" + token + "/list?key=query-secret", SourceKind: SourceKindAbuseIPDB}
+	var logs bytes.Buffer
+	mgr := NewFeedManager([]Feed{feed}, time.Hour, 24*time.Hour, nil, nil, true, zerolog.New(&logs))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	mgr.Run(ctx)
+	got := logs.String()
+	if !strings.Contains(got, `"source":"`+feed.sourceKey()+`"`) || !strings.Contains(got, `"url":"https://feed.example"`) {
+		t.Fatalf("startup log omits the opaque source and host: %s", got)
+	}
+	if strings.Contains(got, token) || strings.Contains(got, "query-secret") {
+		t.Fatalf("startup log exposed a URL credential: %s", got)
+	}
+}
+
 func TestManager_ProtectsPrivateAndWhitelistedRanges(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("10.0.0.0/8\n0.0.0.0/0\n198.51.100.0/24\n203.0.113.2\n"))
@@ -161,7 +231,7 @@ func TestManager_RejectsOversizedFeedBeforeApplying(t *testing.T) {
 	}))
 	defer srv.Close()
 	manager, store, fw := newTestManager(srv.URL)
-	if err := manager.fetchURL(context.Background(), srv.URL); err == nil {
+	if err := manager.fetchFeed(context.Background(), Feed{URL: srv.URL}); err == nil {
 		t.Fatal("oversized feed was accepted")
 	}
 	bans, err := store.BanList()

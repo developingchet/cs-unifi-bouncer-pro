@@ -1,14 +1,16 @@
 package blocklist
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
+	"github.com/rs/zerolog"
 )
 
 // TestManager_FailedFetchKeepsPreviousBans: a failed fetch, or a 200 that
@@ -39,7 +41,7 @@ func TestManager_FailedFetchKeepsPreviousBans(t *testing.T) {
 
 			mgr, store, _ := newTestManager(srv.URL)
 			mgr.fetchAndApply(context.Background())
-			source := "blocklist:" + logger.SafeURL(srv.URL)
+			source := (Feed{URL: srv.URL}).sourceKey()
 			before, _ := store.BanList()
 			firstExpiry := before["203.0.113.1"].Claims[source]
 			if firstExpiry.IsZero() {
@@ -64,6 +66,53 @@ func TestManager_FailedFetchKeepsPreviousBans(t *testing.T) {
 	}
 }
 
+func TestManager_OutageCapLogDistinguishesPartialFeed(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, wantLog, unwantedLog string
+		status                           int
+		wantNewBan                       bool
+	}{
+		{"partial response", "203.0.113.9 # CN\nstray-line\n", "feed remains incomplete after BAN_TTL", "feed failing for longer than BAN_TTL", http.StatusOK, true},
+		{"failed response", "unavailable\n", "feed failing for longer than BAN_TTL", "feed remains incomplete after BAN_TTL", http.StatusServiceUnavailable, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status := http.StatusOK
+			body := "203.0.113.1 # CN\n"
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+			feed := Feed{URL: srv.URL, SourceKind: SourceKindAbuseIPDB, Include: codes("CN"), Prune: true}
+			mgr, store := newFeedTestManager(feed)
+			var logs bytes.Buffer
+			mgr.log = zerolog.New(&logs)
+			mgr.fetchAndApply(context.Background())
+			source := feed.sourceKey()
+			before, _ := store.BanList()
+			oldExpiry := before["203.0.113.1"].Claims[source]
+			if oldExpiry.IsZero() {
+				t.Fatal("initial claim missing")
+			}
+			logs.Reset()
+			mgr.lastGood[source] = time.Now().Add(-25 * time.Hour)
+			status, body = tc.status, tc.body
+			mgr.fetchAndApply(context.Background())
+			got := logs.String()
+			if !strings.Contains(got, tc.wantLog) || strings.Contains(got, tc.unwantedLog) {
+				t.Fatalf("outage log does not match response type: %s", got)
+			}
+			bans, _ := store.BanList()
+			if !bans["203.0.113.1"].Claims[source].Equal(oldExpiry) {
+				t.Fatalf("stale claim was extended past BAN_TTL: %v", bans)
+			}
+			if gotNewBan := !bans["203.0.113.9"].Claims[source].IsZero(); gotNewBan != tc.wantNewBan {
+				t.Fatalf("new valid address claimed = %t, want %t: %v", gotNewBan, tc.wantNewBan, bans)
+			}
+		})
+	}
+}
+
 func TestManager_FeedDownLongerThanMaxOutageStopsExtending(t *testing.T) {
 	var failing atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -77,11 +126,11 @@ func TestManager_FeedDownLongerThanMaxOutageStopsExtending(t *testing.T) {
 
 	mgr, store, _ := newTestManager(srv.URL)
 	mgr.fetchAndApply(context.Background())
-	source := "blocklist:" + logger.SafeURL(srv.URL)
+	source := (Feed{URL: srv.URL}).sourceKey()
 	before, _ := store.BanList()
 	firstExpiry := before["203.0.113.1"].Claims[source]
 
-	mgr.lastGood[srv.URL] = time.Now().Add(-8 * 24 * time.Hour) // down past the 7-day cap
+	mgr.lastGood[source] = time.Now().Add(-8 * 24 * time.Hour) // down past the 7-day cap
 	failing.Store(true)
 	mgr.fetchAndApply(context.Background())
 
