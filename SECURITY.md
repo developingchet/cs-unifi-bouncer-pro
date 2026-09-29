@@ -42,7 +42,8 @@ The Docker image is hardened by default:
 ### Secret Protection
 
 - All credentials (passwords, API keys, LAPI key) are loaded exclusively from environment variables or `_FILE` variants (Docker/Kubernetes secrets)
-- A `RedactWriter` wraps every log output path and replaces sensitive values with `[REDACTED]` before they are written — API keys, passwords, and Bearer tokens never appear in logs even if accidentally referenced
+- A `RedactWriter` wraps every log output path and replaces sensitive values with `[REDACTED]` before they are written — API keys, passwords, and Bearer tokens (including base64-encoded tokens) are redacted if accidentally referenced
+- Feed logs show only URL scheme and host. Ban claims use stable, importer-specific opaque keys instead of storing feed URL paths or query strings; older URL-based claims are migrated on startup
 - Credentials are never written to disk
 
 ### Network Security

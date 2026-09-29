@@ -1,5 +1,28 @@
 # Upgrading
 
+## From 2.0 to 2.1
+
+Building from source now requires Go 1.27.1 or newer.
+
+AbuseIPDB list importing is opt-in. Set `ABUSEIPDB_LIST` to a report window to
+enable it, then optionally set `ABUSEIPDB_COUNTRY_INCLUDE` or
+`ABUSEIPDB_COUNTRY_EXCLUDE`. See the
+[configuration reference](CONFIGURATION.md#abuseipdb-blocklist) for the
+available windows, limits, and refresh behavior. Existing `BLOCKLIST_URLS`
+continue to work independently, including when a generic feed and AbuseIPDB
+use the same URL.
+
+On startup, existing URL-based blocklist claim sources are migrated to opaque
+keys while preserving their expiry. A complete AbuseIPDB refresh removes only
+its own claims for entries no longer selected. If a response contains invalid
+lines, valid entries are still applied, but old claims are not pruned that
+round. Once `BAN_TTL` has elapsed since the last complete fetch, stale claims
+are no longer extended and expire at their existing deadlines.
+
+Feed logs now show only scheme and host, and new persisted claim keys contain
+no URL path or query string. Log redaction also covers base64-encoded Bearer
+tokens.
+
 ## From 1.x to 2.0
 
 2.0 turns on secure defaults and rejects settings that 1.x ignored or accepted

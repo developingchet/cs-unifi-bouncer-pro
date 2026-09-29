@@ -64,6 +64,7 @@ Relevant documentation and specifications referenced during development.
 
 ## Related Projects
 
+- **borestad/blocklist-abuseipdb** — https://github.com/borestad/blocklist-abuseipdb (source of the optional AbuseIPDB country-tagged lists)
 - **Teifun2/cs-unifi-bouncer** — https://github.com/Teifun2/cs-unifi-bouncer (the original bouncer this project improves upon)
 - **crowdsecurity/cs-firewall-bouncer** — https://github.com/crowdsecurity/cs-firewall-bouncer (iptables/nftables reference implementation)
 - **cs-abuseipdb-bouncer** — https://github.com/developingchet/cs-abuseipdb-bouncer (sister project — AbuseIPDB reporting bouncer)
