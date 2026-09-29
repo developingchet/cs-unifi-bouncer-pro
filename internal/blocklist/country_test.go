@@ -2,6 +2,7 @@ package blocklist
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -28,6 +29,37 @@ func codes(cs ...string) map[string]struct{} {
 		set[c] = struct{}{}
 	}
 	return set
+}
+
+func TestFetchFeed_DryRunWithInvalidLines(t *testing.T) {
+	for _, tc := range []struct {
+		name, body  string
+		wantPartial bool
+		wantError   bool
+	}{
+		{"complete response", "203.0.113.9 # CN\n", false, false},
+		{"valid entry and stray line", "203.0.113.9 # CN\nstray-line\n", true, true},
+		{"excluded entry and stray line", "203.0.113.3 # US\nstray-line\n", true, true},
+		{"only invalid lines", "stray-line\n", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			feed := Feed{URL: srv.URL, SourceKind: SourceKindAbuseIPDB, Include: codes("CN"), Prune: true}
+			mgr, store := newFeedTestManager(feed)
+			mgr.dryRun = true
+			err := mgr.fetchFeed(context.Background(), feed)
+			if (err != nil) != tc.wantError || errors.Is(err, errPartialFeed) != tc.wantPartial {
+				t.Fatalf("dry-run error = %v, want error %t and partial %t", err, tc.wantError, tc.wantPartial)
+			}
+			bans, err := store.BanList()
+			if err != nil || len(bans) != 0 {
+				t.Fatalf("dry run wrote bans: %v, %v", bans, err)
+			}
+		})
+	}
 }
 
 func newFeedTestManager(feed Feed) (*Manager, *testutil.MockStore) {

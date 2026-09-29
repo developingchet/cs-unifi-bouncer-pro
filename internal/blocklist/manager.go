@@ -156,13 +156,14 @@ func (m *Manager) Run(ctx context.Context) {
 func (m *Manager) fetchAndApply(ctx context.Context) {
 	for _, feed := range m.feeds {
 		if err := m.fetchFeed(ctx, feed); err != nil {
-			if errors.Is(err, errPartialFeed) {
+			partial := errors.Is(err, errPartialFeed)
+			if partial {
 				m.log.Warn().Err(err).Str("url", logger.SafeHost(feed.URL)).
 					Msg("blocklist: partial feed applied; pruning skipped")
 			} else {
 				m.log.Error().Err(err).Str("url", logger.SafeHost(feed.URL)).Msg("blocklist: fetch failed")
 			}
-			m.keepClaims(feed)
+			m.keepClaims(feed, partial)
 			continue
 		}
 		m.lastGood[feed.sourceKey()] = time.Now()
@@ -173,17 +174,23 @@ func (m *Manager) fetchAndApply(ctx context.Context) {
 // another two refresh intervals. A feed's bans lapse when a successful fetch
 // no longer lists them, not because the feed was unreachable: otherwise one
 // failed fetch let the whole list expire at the moment the next fetch was
-// due, and a longer outage unbanned all of it. A feed that has failed for
-// longer than maxOutage is treated as gone and its bans run out.
-func (m *Manager) keepClaims(feed Feed) {
+// due, and a longer outage unbanned all of it. A feed without a complete
+// response for longer than maxOutage stops extending claims absent from the
+// valid entries, so those claims eventually expire.
+func (m *Manager) keepClaims(feed Feed, partial bool) {
 	if m.dryRun {
 		return
 	}
 	display := logger.SafeHost(feed.URL)
 	down := time.Since(m.lastGood[feed.sourceKey()])
 	if m.maxOutage > 0 && down >= m.maxOutage {
-		m.log.Error().Str("url", display).Stringer("unreachable_for", down.Round(time.Minute)).
-			Msg("blocklist: feed failing for longer than BAN_TTL; its bans are no longer extended and will expire")
+		if partial {
+			m.log.Warn().Str("url", display).Stringer("incomplete_for", down.Round(time.Minute)).
+				Msg("blocklist: feed remains incomplete after BAN_TTL; claims absent from valid entries are no longer extended and will expire")
+		} else {
+			m.log.Error().Str("url", display).Stringer("unreachable_for", down.Round(time.Minute)).
+				Msg("blocklist: feed failing for longer than BAN_TTL; its bans are no longer extended and will expire")
+		}
 		return
 	}
 	n, err := m.claims.ExtendSource(feed.sourceKey(), time.Now().Add(m.interval*2))
