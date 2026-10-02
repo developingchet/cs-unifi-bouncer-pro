@@ -237,6 +237,34 @@ func TestFilter_NonPositiveBanDurationIsDropped(t *testing.T) {
 	}
 }
 
+func TestTooBroadFor(t *testing.T) {
+	tests := []struct {
+		value      string
+		ipv6       bool
+		minV4      int
+		minV6      int
+		wantBroad  bool
+		descriptor string
+	}{
+		{"198.51.100.0/24", false, 8, 32, false, "default minimum"},
+		{"64.0.0.0/8", false, 8, 32, false, "at the IPv4 minimum"},
+		{"64.0.0.0/7", false, 8, 32, true, "below the IPv4 minimum"},
+		{"64.0.0.0/8", false, 16, 32, true, "raised IPv4 minimum"},
+		{"198.51.0.0/16", false, 16, 32, false, "at a raised IPv4 minimum"},
+		{"198.51.100.7", false, 24, 48, false, "single address"},
+		{"2001:db8::/32", true, 8, 32, false, "at the IPv6 minimum"},
+		{"2001:db8::/32", true, 8, 48, true, "raised IPv6 minimum"},
+		{"2001:db8:1::/48", true, 8, 48, false, "at a raised IPv6 minimum"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.descriptor, func(t *testing.T) {
+			if got := TooBroadFor(tt.value, tt.ipv6, tt.minV4, tt.minV6); got != tt.wantBroad {
+				t.Fatalf("TooBroadFor(%q, %v, %d, %d) = %v, want %v", tt.value, tt.ipv6, tt.minV4, tt.minV6, got, tt.wantBroad)
+			}
+		})
+	}
+}
+
 func TestFilterDeleted_NonPositiveDurationStillPasses(t *testing.T) {
 	d := makeDecision("ban", "ip", "198.51.100.1", "ssh-bf", "crowdsec", "-5m")
 	if !FilterDeleted(d, NewFilterConfig(), zerolog.Nop()).Passed {

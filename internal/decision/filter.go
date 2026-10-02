@@ -234,21 +234,27 @@ func excludedBy(scenario string, excludes []string) string {
 // almost certainly a mistake or a hostile feed, and would cut off a large
 // share of the internet. Smaller private ranges are caught by stage 6.
 const (
-	minRangePrefixV4 = 8
-	minRangePrefixV6 = 32
+	DefaultMinRangePrefixV4 = 8
+	DefaultMinRangePrefixV6 = 32
 )
 
 // TooBroad reports whether value is a range broader than /8 (IPv4) or /32
 // (IPv6). A single address is never too broad.
 func TooBroad(value string, ipv6 bool) bool {
+	return TooBroadFor(value, ipv6, DefaultMinRangePrefixV4, DefaultMinRangePrefixV6)
+}
+
+// TooBroadFor is TooBroad with the shortest accepted prefix length chosen by
+// the caller for each address family.
+func TooBroadFor(value string, ipv6 bool, minV4, minV6 int) bool {
 	prefix, err := netip.ParsePrefix(value)
 	if err != nil {
 		return false // a single address
 	}
 	if ipv6 {
-		return prefix.Bits() < minRangePrefixV6
+		return prefix.Bits() < minV6
 	}
-	return prefix.Bits() < minRangePrefixV4
+	return prefix.Bits() < minV4
 }
 
 // longerOrFirst reports whether key should replace matched as the scenario

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/webhook"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/v2"
@@ -134,6 +135,12 @@ type Config struct {
 	// Blocklist import
 	BlocklistURLs            []string      `koanf:"-"` // parsed from BLOCKLIST_URLS CSV
 	BlocklistRefreshInterval time.Duration `koanf:"blocklist_refresh_interval"`
+	// BlocklistMinPrefixV4 and V6 are the shortest prefix lengths a feed
+	// entry may have. Shorter ranges are skipped like any other unbannable
+	// entry. They apply to BLOCKLIST_URLS and the AbuseIPDB feed, not to
+	// CrowdSec decisions.
+	BlocklistMinPrefixV4 int `koanf:"blocklist_min_prefix_v4"`
+	BlocklistMinPrefixV6 int `koanf:"blocklist_min_prefix_v6"`
 
 	// AbuseIPDB feed (github.com/borestad/blocklist-abuseipdb)
 	AbuseIPDBList            string        `koanf:"abuseipdb_list"`
@@ -386,6 +393,8 @@ func defaults() map[string]interface{} {
 		"health_check_lapi":              true,
 		"history_max_events":             10000,
 		"blocklist_refresh_interval":     "24h",
+		"blocklist_min_prefix_v4":        decision.DefaultMinRangePrefixV4,
+		"blocklist_min_prefix_v6":        decision.DefaultMinRangePrefixV6,
 		"abuseipdb_refresh_interval":     "6h",
 		"decision_rate_limit":            0,
 		"decision_burst_size":            1000,
@@ -738,6 +747,12 @@ func (c *Config) validateFeeds() error {
 		if !isHTTPURL(raw) {
 			return fmt.Errorf("BLOCKLIST_URLS entry %d must be an absolute http:// or https:// URL", i+1)
 		}
+	}
+	if c.BlocklistMinPrefixV4 < decision.DefaultMinRangePrefixV4 || c.BlocklistMinPrefixV4 > 32 {
+		return fmt.Errorf("BLOCKLIST_MIN_PREFIX_V4 must be between %d and 32; got %d", decision.DefaultMinRangePrefixV4, c.BlocklistMinPrefixV4)
+	}
+	if c.BlocklistMinPrefixV6 < decision.DefaultMinRangePrefixV6 || c.BlocklistMinPrefixV6 > 128 {
+		return fmt.Errorf("BLOCKLIST_MIN_PREFIX_V6 must be between %d and 128; got %d", decision.DefaultMinRangePrefixV6, c.BlocklistMinPrefixV6)
 	}
 	if err := c.validateAbuseIPDB(); err != nil {
 		return err

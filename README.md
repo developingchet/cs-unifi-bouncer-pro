@@ -212,6 +212,8 @@ Templates are rendered at startup and must produce a non-empty name that include
 |----------|---------|-------------|
 | `BLOCKLIST_URLS` | — | Comma-separated URLs of plain-text IP/CIDR blocklists to fetch |
 | `BLOCKLIST_REFRESH_INTERVAL` | `24h` | How often to re-fetch each URL |
+| `BLOCKLIST_MIN_PREFIX_V4` | `8` | Shortest IPv4 prefix accepted for a feed entry (8-32) |
+| `BLOCKLIST_MIN_PREFIX_V6` | `32` | Shortest IPv6 prefix accepted for a feed entry (32-128) |
 
 ### AbuseIPDB blocklist
 

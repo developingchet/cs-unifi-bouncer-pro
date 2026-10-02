@@ -439,6 +439,9 @@ The bouncer can periodically fetch plain-text IP/CIDR blocklists from external U
 | `BLOCKLIST_URLS` | — | Comma-separated list of URLs to fetch. Each URL must return a plain-text list with one IP address or CIDR per line. Anything after `#` or `;` is a comment, so annotated feeds such as Spamhaus DROP (`192.0.2.0/24 ; SBL123`) work; only the first field of a line is read. A `/32` or `/128` entry is stored as the bare address. Blank and comment-only lines are ignored. |
 | `BLOCKLIST_REFRESH_INTERVAL` | `24h` | How often to re-fetch and re-apply each URL. Each successful fetch sets its bans to expire at `now + 2×BLOCKLIST_REFRESH_INTERVAL`, so an entry the feed drops lapses within two intervals. A failed fetch (error, non-200, or a 200 with no valid entries) extends the bans from the last good fetch instead, for up to `BAN_TTL` since that fetch. |
 
+| `BLOCKLIST_MIN_PREFIX_V4` | `8` | Shortest IPv4 prefix length accepted for a feed entry, from `8` to `32`. A broader range is skipped and counted as skipped in the fetch log. Applies to `BLOCKLIST_URLS` and the AbuseIPDB list, not to CrowdSec decisions. |
+| `BLOCKLIST_MIN_PREFIX_V6` | `32` | Shortest IPv6 prefix length accepted for a feed entry, from `32` to `128`. Same scope as the IPv4 setting. |
+
 ```bash
 # Fetch two external threat intelligence feeds every 12 hours
 BLOCKLIST_URLS=https://example.com/badips.txt,https://example.net/threatlist.txt
@@ -446,6 +449,8 @@ BLOCKLIST_REFRESH_INTERVAL=12h
 ```
 
 Each feed URL owns a separate ban claim. If CrowdSec or another feed still claims an IP, expiry of one feed's claim does not remove the firewall ban. Feed refreshes extend claim expiry to twice the refresh interval. A failed fetch keeps the feed's current bans (logged as "keeping bans from the last successful fetch"); once a feed has failed for longer than `BAN_TTL`, its bans are no longer extended and expire. Feed imports are logged with entry, new and skipped counts. Logs show only the feed scheme and host. Stored claim sources use an opaque SHA-256 key derived from the full URL and importer kind, so URL path tokens and query credentials are not stored in new claims. On startup, old URL-based claims migrate while preserving their expiry. If multiple configured importers matched the same old claim, its original expiry is retained under an opaque legacy key until a fresh fetch establishes ownership.
+
+A fetch that looks damaged never prunes. A feed with a country filter whose entries are all rejected by that filter (a mistyped code, or a feed that stopped tagging its lines) is treated as a failed fetch and keeps its previous bans. A feed that lists fewer than half the entries it listed on its last full fetch, when that was at least 50, has its entries applied but nothing pruned, and its previous bans are kept as for a failed fetch. After a feed has stayed in either state for `BAN_TTL`, its old bans expire and the smaller list is accepted. The comparison uses the feed's size before the country filter, so narrowing a filter still releases the entries it now excludes.
 
 Addresses are recorded and applied in batches of 500, so a large feed does not hold up CrowdSec decisions while it imports. Addresses the controller rejects stay recorded as pending and are retried by the next reconcile.
 
