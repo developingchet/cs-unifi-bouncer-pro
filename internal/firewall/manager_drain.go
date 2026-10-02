@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 )
 
 // PrepareDrain discovers existing shards without provisioning policies or rules.
@@ -95,6 +93,9 @@ func (m *managerImpl) Drain(ctx context.Context, sites []string) error {
 					Msg("[DRY-RUN] would delete shard group")
 				drainedShards++
 			}
+			if err := m.drainZoneExtras(ctx, site); err != nil {
+				drainErrors = append(drainErrors, err)
+			}
 			continue
 		}
 
@@ -104,9 +105,18 @@ func (m *managerImpl) Drain(ctx context.Context, sites []string) error {
 			drainErrors = append(drainErrors, fmt.Errorf("delete policies for site %s: %w", site, policyErr))
 			continue
 		}
+		if err := m.drainZoneExtras(ctx, site); err != nil {
+			drainErrors = append(drainErrors, err)
+			continue
+		}
+		objects, err := m.listShardObjectIDs(ctx, site)
+		if err != nil {
+			drainErrors = append(drainErrors, err)
+			continue
+		}
 		groupFailed := false
 		for groupID := range groupIDs {
-			if err := m.deleteDrainGroup(ctx, site, groupID); err != nil {
+			if err := m.deleteDrainGroup(ctx, site, groupID, objects); err != nil {
 				groupFailed = true
 				drainErrors = append(drainErrors, fmt.Errorf("delete group %s for site %s: %w", groupID, site, err))
 				continue
@@ -140,25 +150,73 @@ func (m *managerImpl) Drain(ctx context.Context, sites []string) error {
 	return errors.Join(drainErrors...)
 }
 
-func (m *managerImpl) deleteDrainGroup(ctx context.Context, site, id string) error {
+// drainZoneExtras removes, or with dry-run previews, the zone-mode objects
+// that the policy cache does not track: staged policy copies and the per-pair
+// filter lists. Legacy sites have none.
+func (m *managerImpl) drainZoneExtras(ctx context.Context, site string) error {
+	if m.cachedMode(site) != "zone" {
+		return nil
+	}
+	var errs []error
+	if _, err := m.zoneMgr.DeleteStagedPolicies(ctx, site, m.cfg.DryRun); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := m.zoneMgr.DeleteFilterTMLs(ctx, site, m.cfg.DryRun); err != nil {
+		errs = append(errs, err)
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("drain zone objects for site %s: %w", site, err)
+	}
+	return nil
+}
+
+// shardObjectIDs holds the controller IDs of a site's address groups and
+// traffic matching lists.
+type shardObjectIDs struct {
+	groups map[string]bool
+	tmls   map[string]bool
+}
+
+// listShardObjectIDs lists the site's address groups and traffic matching
+// lists. The listing of the configured mode must succeed. The other kind may
+// be unavailable on the controller, in which case nothing of it can exist.
+func (m *managerImpl) listShardObjectIDs(ctx context.Context, site string) (shardObjectIDs, error) {
+	ids := shardObjectIDs{groups: map[string]bool{}, tmls: map[string]bool{}}
 	zone := m.cachedMode(site) == "zone"
-	deleteGroup := m.ctrl.DeleteFirewallGroup
-	deleteOther := m.ctrl.DeleteTrafficMatchingList
-	if zone {
-		deleteGroup, deleteOther = deleteOther, deleteGroup
+
+	groups, groupsErr := m.ctrl.ListFirewallGroups(ctx, site)
+	if groupsErr == nil {
+		for _, g := range groups {
+			ids.groups[g.ID] = true
+		}
 	}
-	err := deleteGroup(ctx, site, id)
-	if err == nil {
-		return nil
+	tmls, tmlsErr := m.ctrl.ListTrafficMatchingLists(ctx, site)
+	if tmlsErr == nil {
+		for _, t := range tmls {
+			ids.tmls[t.ID] = true
+		}
 	}
-	var missing *controller.ErrNotFound
-	if !errors.As(err, &missing) {
-		return err
+	if zone && tmlsErr != nil {
+		return ids, fmt.Errorf("list traffic matching lists for site %s: %w", site, tmlsErr)
 	}
-	// The mode may have changed since this shard was created.
-	err = deleteOther(ctx, site, id)
-	if errors.As(err, &missing) {
-		return nil
+	if !zone && groupsErr != nil {
+		return ids, fmt.Errorf("list firewall groups for site %s: %w", site, groupsErr)
 	}
-	return err
+	return ids, nil
+}
+
+// deleteDrainGroup deletes the shard object with the given ID through the API
+// of the kind that holds it. The cached ID may belong to the other kind than
+// the configured mode's when the mode changed since the shard was created, and
+// the controller answers a delete of an unknown ID as success, so the kind
+// has to be looked up rather than discovered by a failed delete. An ID that is
+// listed under neither kind is already gone.
+func (m *managerImpl) deleteDrainGroup(ctx context.Context, site, id string, objects shardObjectIDs) error {
+	switch {
+	case objects.tmls[id]:
+		return m.ctrl.DeleteTrafficMatchingList(ctx, site, id)
+	case objects.groups[id]:
+		return m.ctrl.DeleteFirewallGroup(ctx, site, id)
+	}
+	return nil
 }
