@@ -18,6 +18,7 @@ Common issues and solutions for cs-unifi-bouncer-pro.
   - [My own address is banned](#my-own-address-is-banned)
 - [Authentication Errors](#authentication-errors)
   - [UniFi controller returns 401](#unifi-controller-returns-401)
+  - [UniFi login is rate limited](#unifi-login-is-rate-limited)
   - [CrowdSec LAPI returns 401 or 403](#crowdsec-lapi-returns-401-or-403)
 - [Cloudflare Whitelist Issues](#cloudflare-whitelist-issues)
   - [Cloudflare ALLOW policies not created](#cloudflare-allow-policies-not-created)
@@ -387,6 +388,34 @@ A site name that does not exist also draws a 401 from site-scoped requests.
 Startup checks `UNIFI_SITES` against the controller first and stops with
 `UNIFI_SITES: site "..." is not on the controller; available sites: ...`. Use
 the short name from the controller URL (`/manage/<name>/...`), not the display name.
+
+---
+
+### UniFi login is rate limited
+
+**Symptom:**
+
+```json
+{"level":"warn","error":"rate limited (retry after 1m0s)","consecutive_failures":1,"next_attempt_in":"1m0s","message":"UniFi login failed"}
+```
+
+**Cause:** UniFi OS answers a login with HTTP 429 in two cases. More than five
+successful logins in a minute (the bouncer and every CLI command it runs share
+that allowance) clears within the minute. A few failed logins lock every
+login out, the right password included, until the console has seen no login
+attempts for well over ten minutes.
+
+The bouncer cannot tell the two apart, so after consecutive 429s it waits 1,
+2, 4, 8 and then 16 minutes before the next login. Syncs pause meanwhile and
+resume on their own. A command that logs in, such as `unban` or `drain`, waits out one short
+limit before giving up.
+
+**Fix:**
+
+1. If the warning follows `login ... returned HTTP 403`, the credentials are
+   wrong: correct them and restart, then expect the first login to wait out
+   the lockout.
+2. Otherwise wait; avoid running several CLI commands in quick succession.
 
 ---
 
