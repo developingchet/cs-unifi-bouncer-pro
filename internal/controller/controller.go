@@ -171,12 +171,31 @@ func (e *ErrConflict) Error() string {
 	return fmt.Sprintf("conflict: %s", e.Msg)
 }
 
-// ignoreNotFound returns nil if err wraps *ErrNotFound, otherwise returns err.
-// Makes DELETE operations idempotent: "not found" means the object is already absent.
-func ignoreNotFound(err error) error {
+// confirmDeleted keeps DELETE idempotent without trusting a bare 404. A 404
+// means the object is gone, but it is also what a wrong site, a stale site
+// UUID or a mistyped path returns, and treating that as success would make
+// the caller forget an object that still exists. So when delErr wraps
+// *ErrNotFound, the collection is listed through stillListed and the delete
+// counts as done only if the listing succeeds and the object is not in it.
+// Every other delErr, including nil, is returned as it is, so a delete that
+// succeeds costs no extra request. The errors returned for an unconfirmed
+// 404 deliberately do not wrap *ErrNotFound: callers read that type as
+// "already gone".
+func confirmDeleted(delErr error, what string, stillListed func() (bool, error)) error {
 	var nf *ErrNotFound
-	if errors.As(err, &nf) {
-		return nil
+	if !errors.As(delErr, &nf) {
+		return delErr
 	}
-	return err
+	listed, err := stillListed()
+	if err != nil {
+		var collectionMissing *ErrNotFound
+		if errors.As(err, &collectionMissing) {
+			return fmt.Errorf("delete %s returned not found and so did its collection (%s); the site or path may be wrong", what, collectionMissing.URL)
+		}
+		return fmt.Errorf("delete %s returned not found and the collection could not be listed to confirm it is gone: %w", what, err)
+	}
+	if listed {
+		return fmt.Errorf("delete %s returned not found but the object is still listed", what)
+	}
+	return nil
 }

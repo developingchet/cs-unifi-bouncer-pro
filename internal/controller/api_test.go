@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -815,35 +816,38 @@ func TestV1PolicyRoundTrip_DstIPAndPort(t *testing.T) {
 	}
 }
 
-// --- ignoreNotFound -----------------------------------------------------------
+// --- confirmDeleted -----------------------------------------------------------
 
-func TestIgnoreNotFound(t *testing.T) {
+func TestConfirmDeletedPassesThroughOtherOutcomes(t *testing.T) {
 	tests := []struct {
-		name    string
-		input   error
-		wantNil bool
+		name  string
+		input error
 	}{
-		{"nil input", nil, true},
-		{"ErrNotFound direct", &ErrNotFound{URL: "/api/foo"}, true},
-		{"ErrNotFound no URL", &ErrNotFound{}, true},
-		{"wrapped ErrNotFound", fmt.Errorf("wrap: %w", &ErrNotFound{URL: "/bar"}), true},
-		{"other error", fmt.Errorf("something else"), false},
-		{"ErrConflict", &ErrConflict{Msg: "409"}, false},
-		{"ErrRateLimit", &ErrRateLimit{RetryAfter: 0}, false},
+		{"nil input", nil},
+		{"other error", fmt.Errorf("something else")},
+		{"ErrConflict", &ErrConflict{Msg: "409"}},
+		{"ErrRateLimit", &ErrRateLimit{RetryAfter: 0}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ignoreNotFound(tt.input)
-			if tt.wantNil && got != nil {
-				t.Errorf("ignoreNotFound(%v) = %v, want nil", tt.input, got)
-			}
-			if !tt.wantNil && got == nil {
-				t.Errorf("ignoreNotFound(%v) = nil, want non-nil error", tt.input)
-			}
-			if !tt.wantNil && got != nil && got != tt.input {
-				t.Errorf("ignoreNotFound(%v) = %v, want same error back", tt.input, got)
+			got := confirmDeleted(tt.input, "thing", func() (bool, error) {
+				t.Error("collection listed for an outcome other than not found")
+				return false, nil
+			})
+			if got != tt.input {
+				t.Errorf("confirmDeleted(%v) = %v, want the same error back", tt.input, got)
 			}
 		})
+	}
+}
+
+func TestConfirmDeletedTreatsWrappedNotFoundAsUnconfirmed(t *testing.T) {
+	notFound := fmt.Errorf("wrap: %w", &ErrNotFound{URL: "/bar"})
+	if err := confirmDeleted(notFound, "thing", func() (bool, error) { return false, nil }); err != nil {
+		t.Errorf("object absent from the listing: got %v, want nil", err)
+	}
+	if err := confirmDeleted(notFound, "thing", func() (bool, error) { return true, nil }); err == nil {
+		t.Error("object still listed: got nil, want error")
 	}
 }
 
@@ -1211,6 +1215,111 @@ func makeV1PageOf(n, totalCount int) []byte {
 		items[i] = "{}"
 	}
 	return []byte(fmt.Sprintf(`{"data":[%s],"count":%d,"totalCount":%d}`, strings.Join(items, ","), n, totalCount))
+}
+
+func TestDeleteConfirmsAbsenceBeforeTreatingNotFoundAsDeleted(t *testing.T) {
+	ctx := context.Background()
+	const site = "default"
+	const id = "obj-1"
+	legacyList := func(ids ...string) []byte {
+		items := make([]interface{}, 0, len(ids))
+		for _, i := range ids {
+			items = append(items, map[string]string{"_id": i})
+		}
+		return makeAPIResp(items...)
+	}
+	v1List := func(ids ...string) []byte {
+		items := make([]interface{}, 0, len(ids))
+		for _, i := range ids {
+			items = append(items, map[string]string{"id": i})
+		}
+		return makeV1Page(items...)
+	}
+	kinds := []struct {
+		name       string
+		collection string
+		del        func(c *unifiClient) error
+		list       func(ids ...string) []byte
+	}{
+		{"firewall group", "/proxy/network/api/s/default/rest/firewallgroup",
+			func(c *unifiClient) error { return deleteFirewallGroup(ctx, c, site, id) }, legacyList},
+		{"firewall rule", "/proxy/network/api/s/default/rest/firewallrule",
+			func(c *unifiClient) error { return deleteFirewallRule(ctx, c, site, id) }, legacyList},
+		{"traffic matching list", "/proxy/network/integration/v1/sites/" + testSiteUUID + "/traffic-matching-lists",
+			func(c *unifiClient) error { return deleteTML(ctx, c, testSiteUUID, id) }, v1List},
+		{"zone policy", "/proxy/network/integration/v1/sites/" + testSiteUUID + "/firewall/policies",
+			func(c *unifiClient) error { return deleteZonePolicyV1(ctx, c, testSiteUUID, id) }, v1List},
+	}
+	// collection describes how the collection endpoint answers the check.
+	collections := []struct {
+		name    string
+		status  int
+		ids     []string
+		wantErr string // empty means the delete is treated as done
+	}{
+		{"object absent from the collection", http.StatusOK, []string{"other"}, ""},
+		{"collection empty", http.StatusOK, nil, ""},
+		{"object still listed", http.StatusOK, []string{"other", id}, "still listed"},
+		{"collection also not found", http.StatusNotFound, nil, "collection"},
+		{"collection unreachable", http.StatusInternalServerError, nil, "could not be listed"},
+	}
+	for _, kind := range kinds {
+		for _, col := range collections {
+			t.Run(kind.name+": "+col.name, func(t *testing.T) {
+				var methods []string
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					methods = append(methods, r.Method)
+					if r.Method == http.MethodDelete {
+						http.NotFound(w, r)
+						return
+					}
+					if r.URL.Path != kind.collection {
+						http.Error(w, "unexpected path "+r.URL.Path, http.StatusBadRequest)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(col.status)
+					if col.status == http.StatusOK {
+						_, _ = w.Write(kind.list(col.ids...))
+					}
+				}))
+				defer srv.Close()
+
+				err := kind.del(newTestClient(srv.URL, "key"))
+				var notFound *ErrNotFound
+				if errors.As(err, &notFound) {
+					t.Fatalf("error must not report the object as not found: %v", err)
+				}
+				if col.wantErr == "" {
+					if err != nil {
+						t.Fatalf("unexpected error: %v", err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), col.wantErr) {
+					t.Fatalf("got %v, want error containing %q", err, col.wantErr)
+				}
+				if len(methods) != 2 || methods[0] != http.MethodDelete || methods[1] != http.MethodGet {
+					t.Errorf("requests = %v, want DELETE then GET", methods)
+				}
+			})
+		}
+	}
+}
+
+func TestDeleteSuccessMakesNoVerificationRequest(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(makeAPIResp())
+	}))
+	defer srv.Close()
+
+	if err := deleteFirewallGroup(context.Background(), newTestClient(srv.URL, "key"), "default", "grp-1"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if requests != 1 {
+		t.Errorf("requests: got %d, want 1", requests)
+	}
 }
 
 func TestRequestsRejectUnusablePathSegments(t *testing.T) {

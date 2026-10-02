@@ -382,7 +382,10 @@ func deleteFirewallGroup(ctx context.Context, c *unifiClient, site, id string) e
 		return err
 	}
 	u := c.groupEndpoint(site) + "/" + url.PathEscape(id)
-	return ignoreNotFound(doDELETE(ctx, c, u, "delete-group"))
+	return confirmDeleted(doDELETE(ctx, c, u, "delete-group"), "firewall group "+id, func() (bool, error) {
+		groups, err := listFirewallGroups(ctx, c, site)
+		return slices.ContainsFunc(groups, func(g FirewallGroup) bool { return g.ID == id }), err
+	})
 }
 
 // --- Firewall Rules (legacy REST) -------------------------------------------
@@ -452,7 +455,10 @@ func deleteFirewallRule(ctx context.Context, c *unifiClient, site, id string) er
 		return err
 	}
 	u := c.ruleEndpoint(site) + "/" + url.PathEscape(id)
-	return ignoreNotFound(doDELETE(ctx, c, u, "delete-rule"))
+	return confirmDeleted(doDELETE(ctx, c, u, "delete-rule"), "firewall rule "+id, func() (bool, error) {
+		rules, err := listFirewallRules(ctx, c, site)
+		return slices.ContainsFunc(rules, func(r FirewallRule) bool { return r.ID == id }), err
+	})
 }
 
 // --- Integration v1 helpers -------------------------------------------------
@@ -515,6 +521,24 @@ func listAllV1Pages(ctx context.Context, c *unifiClient, endpointURL, metricEndp
 		offset += page.Count
 	}
 	return all, nil
+}
+
+// v1CollectionHasID reports whether any object in the integration v1
+// collection at endpointURL has the given id.
+func v1CollectionHasID(ctx context.Context, c *unifiClient, endpointURL, metricEndpoint, id string) (bool, error) {
+	data, err := listAllV1Pages(ctx, c, endpointURL, metricEndpoint)
+	if err != nil {
+		return false, err
+	}
+	for _, raw := range data {
+		var obj struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(raw, &obj) == nil && obj.ID == id {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // getSiteID resolves a site name to its integration v1 UUID. The name is
@@ -707,7 +731,9 @@ func deleteTML(ctx context.Context, c *unifiClient, siteID, id string) error {
 		return err
 	}
 	endpointURL := c.networkURL("/integration/v1/sites/%s/traffic-matching-lists/%s", siteID, id)
-	return ignoreNotFound(doDELETE(ctx, c, endpointURL, "delete-tml"))
+	return confirmDeleted(doDELETE(ctx, c, endpointURL, "delete-tml"), "traffic matching list "+id, func() (bool, error) {
+		return v1CollectionHasID(ctx, c, c.networkURL("/integration/v1/sites/%s/traffic-matching-lists", siteID), "list-tmls", id)
+	})
 }
 
 func tmlItemToWire(item TrafficMatchingListItem) apiTMLItemV1 {
@@ -815,7 +841,9 @@ func deleteZonePolicyV1(ctx context.Context, c *unifiClient, siteID, id string) 
 		return err
 	}
 	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/policies/%s", siteID, id)
-	return ignoreNotFound(doDELETE(ctx, c, endpointURL, "delete-policy"))
+	return confirmDeleted(doDELETE(ctx, c, endpointURL, "delete-policy"), "zone policy "+id, func() (bool, error) {
+		return v1CollectionHasID(ctx, c, c.networkURL("/integration/v1/sites/%s/firewall/policies", siteID), "list-policies", id)
+	})
 }
 
 func v1PolicyToModel(p apiV1Policy) ZonePolicy {
