@@ -275,6 +275,9 @@ func (zm *ZoneManager) cleanupOrphanedBlockPolicies(ctx context.Context, site st
 		if p.Description != zm.cfg.Description {
 			continue
 		}
+		if strings.HasPrefix(p.Name, stagedPolicyPrefix) {
+			continue // a staged replacement may be the shard's only block; cleanupStagedPolicies decides
+		}
 		if prefix := zm.namer.PolicyPrefix(); prefix == "" || !strings.HasPrefix(p.Name, prefix) {
 			continue // without a bbolt record, description alone does not prove ownership
 		}
