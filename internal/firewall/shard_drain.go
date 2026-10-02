@@ -34,6 +34,11 @@ func (sm *ShardManager) PrunableTail() (unifiID string, shardIdx int, ok bool) {
 
 // RemoveTail removes the last shard from in-memory slice and bbolt.
 // Call only after the API group has been successfully deleted.
+//
+// Bans are applied without waiting for a prune, so one can still land in the
+// tail between PrunableTail and the group deletion. Such members are placed
+// again in the remaining shards, or in a new pending shard, and are written
+// to the controller by the next flush.
 func (sm *ShardManager) RemoveTail() error {
 	sm.mu.Lock()
 	family := sm.fam
@@ -44,12 +49,20 @@ func (sm *ShardManager) RemoveTail() error {
 	}
 	last := family.Shards[n-1]
 	name, nameErr := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: last.Index, Site: sm.site})
+	stranded := last.IPs.Members()
 	for ip, owner := range family.ipOwner {
 		if owner == last.Index {
 			delete(family.ipOwner, ip)
 		}
 	}
 	family.Shards = family.Shards[:n-1]
+	for _, ip := range stranded {
+		sm.addIPLocked(ip)
+	}
+	if len(stranded) > 0 {
+		sm.log.Warn().Str("site", sm.site).Int("shard", last.Index).Int("members", len(stranded)).
+			Msg("bans were added to a shard while it was pruned; placing them in other shards")
+	}
 	sm.mu.Unlock()
 
 	if nameErr != nil {
