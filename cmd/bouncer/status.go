@@ -251,7 +251,7 @@ func statusBansCmd(dataDir *string) *cobra.Command {
 				w := newTable()
 				fmt.Fprintln(w, "IP\tIPv6\tRECORDED_AT\tEXPIRES_AT\tEXPIRED")
 				for _, r := range f.apply(bans, now) {
-					fmt.Fprintf(w, "%s\t%v\t%s\t%s\t%v\n", r.ip, r.entry.IPv6,
+					fmt.Fprintf(w, "%s\t%v\t%s\t%s\t%v\n", printable(r.ip), r.entry.IPv6,
 						formatTime(r.entry.RecordedAt, "-"), formatTime(r.entry.ExpiresAt, "-"), isExpired(r.entry, now))
 				}
 				return w.Flush()
@@ -295,7 +295,7 @@ func statusIPCmd(dataDir *string) *cobra.Command {
 				w := newTable()
 				fmt.Fprintln(w, "TIME\tACTION\tORIGIN\tSCENARIO")
 				for _, e := range events {
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", formatTime(e.RecordedAt, "-"), e.Action, e.Origin, e.Scenario)
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", formatTime(e.RecordedAt, "-"), printable(e.Action), printable(e.Origin), printable(e.Scenario))
 				}
 				return w.Flush()
 			})
@@ -307,12 +307,12 @@ func statusIPCmd(dataDir *string) *cobra.Command {
 
 func printBan(w *tabwriter.Writer, ip string, entry *storage.BanEntry) error {
 	if entry == nil {
-		fmt.Fprintf(w, "ip\t%s\n", ip)
+		fmt.Fprintf(w, "ip\t%s\n", printable(ip))
 		fmt.Fprintf(w, "status\tnot banned\n")
 		return w.Flush()
 	}
 	fmt.Fprintln(w, "FIELD\tVALUE")
-	fmt.Fprintf(w, "ip\t%s\n", ip)
+	fmt.Fprintf(w, "ip\t%s\n", printable(ip))
 	fmt.Fprintf(w, "ipv6\t%v\n", entry.IPv6)
 	fmt.Fprintf(w, "recorded_at\t%s\n", formatTime(entry.RecordedAt, "-"))
 	fmt.Fprintf(w, "expires_at\t%s\n", formatTime(entry.ExpiresAt, "never"))
@@ -335,7 +335,7 @@ func statusHistoryCmd(dataDir *string) *cobra.Command {
 				w := newTable()
 				fmt.Fprintln(w, "TIME\tACTION\tIP\tORIGIN\tSCENARIO")
 				for _, e := range events {
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", formatTime(e.RecordedAt, "-"), e.Action, e.IP, e.Origin, e.Scenario)
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", formatTime(e.RecordedAt, "-"), printable(e.Action), printable(e.IP), printable(e.Origin), printable(e.Scenario))
 				}
 				return w.Flush()
 			})
