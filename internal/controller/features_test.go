@@ -171,7 +171,7 @@ func TestHasFeature_SiteLookupFailure(t *testing.T) {
 		status  int
 		wantErr bool
 	}{
-		{name: "integration unavailable", status: http.StatusNotFound},
+		{name: "integration not answering yet", status: http.StatusNotFound, wantErr: true},
 		{name: "controller failure", status: http.StatusInternalServerError, wantErr: true},
 		{name: "unauthorized", status: http.StatusUnauthorized, wantErr: true},
 	} {

@@ -61,12 +61,12 @@ func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool,
 	if c.cfg.APIKey == "" {
 		return detectZoneFirewallWithSession(ctx, c, site)
 	}
+	// Every controller that issues API keys serves the integration site
+	// list, so a 404 there means UniFi OS is still starting or UNIFI_URL
+	// points at the wrong place. Neither says the site is legacy, and the
+	// answer is cached for the life of the process.
 	siteID, err := getSiteID(ctx, c, site)
 	if err != nil {
-		var notFound *ErrNotFound
-		if errors.As(err, &notFound) {
-			return false, nil
-		}
 		return false, fmt.Errorf("resolve integration site %s: %w", site, err)
 	}
 
