@@ -87,7 +87,7 @@ func TestEnsureAuthSpacesOutFailedLogins(t *testing.T) {
 		if accept.Load() {
 			return http.StatusOK, nil
 		}
-		return http.StatusForbidden, nil
+		return http.StatusServiceUnavailable, nil
 	})
 	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
 	sm := newBackoffSession(t, srv, clock)
@@ -111,8 +111,8 @@ func TestEnsureAuthSpacesOutFailedLogins(t *testing.T) {
 		clock.advance(s.advance)
 		err := sm.EnsureAuth(ctx)
 		var unauthorized *ErrUnauthorized
-		if !errors.As(err, &unauthorized) {
-			t.Fatalf("step %d: error = %v, want ErrUnauthorized", i, err)
+		if err == nil || errors.As(err, &unauthorized) {
+			t.Fatalf("step %d: error = %v, want a non-credential failure", i, err)
 		}
 		if got := atomic.LoadInt32(logins); got != s.wantLogins {
 			t.Fatalf("step %d: logins = %d, want %d", i, got, s.wantLogins)
@@ -132,6 +132,136 @@ func TestEnsureAuthSpacesOutFailedLogins(t *testing.T) {
 	_ = sm.EnsureAuth(ctx)
 	if got := atomic.LoadInt32(logins) - before; got != 1 {
 		t.Fatalf("logins after a success and a new failure = %d, want 1 (backoff restarts at %s)", got, loginBackoffInitial)
+	}
+}
+
+func TestEnsureAuthBacksOffRejectedCredentials(t *testing.T) {
+	srv, logins := loginServer(t, func(*http.Request) (int, http.Header) {
+		return http.StatusUnauthorized, nil
+	})
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	sm := newBackoffSession(t, srv, clock)
+	ctx := context.Background()
+
+	waits := []time.Duration{15 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute,
+		4 * time.Minute, 8 * time.Minute, 16 * time.Minute, loginRejectedWaitMax, loginRejectedWaitMax}
+	for i, want := range waits {
+		var unauthorized *ErrUnauthorized
+		if err := sm.EnsureAuth(ctx); !errors.As(err, &unauthorized) {
+			t.Fatalf("attempt %d: error = %v, want ErrUnauthorized", i+1, err)
+		}
+		clock.advance(want - time.Second)
+		if err := sm.EnsureAuth(ctx); !errors.As(err, &unauthorized) {
+			t.Fatalf("attempt %d: deferred error = %v, want the ErrUnauthorized kept", i+1, err)
+		}
+		if got := atomic.LoadInt32(logins); got != int32(i+1) {
+			t.Fatalf("attempt %d: logins inside the %s wait = %d, want %d", i+1, want, got, i+1)
+		}
+		clock.advance(time.Second)
+	}
+}
+
+func TestLoginStatusError(t *testing.T) {
+	tests := []struct {
+		status       int
+		wantNil      bool
+		wantRejected bool
+		wantLimited  bool
+	}{
+		{http.StatusOK, true, false, false},
+		{http.StatusCreated, true, false, false},
+		{http.StatusBadRequest, false, true, false},
+		{http.StatusUnauthorized, false, true, false},
+		{http.StatusForbidden, false, true, false},
+		{http.StatusTooManyRequests, false, false, true},
+		{http.StatusNotFound, false, false, false},
+		{http.StatusBadGateway, false, false, false},
+		{http.StatusServiceUnavailable, false, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(http.StatusText(tt.status), func(t *testing.T) {
+			err := loginStatusError(&http.Response{StatusCode: tt.status, Header: http.Header{}},
+				"/api/auth/login", time.Unix(1_700_000_000, 0))
+			if (err == nil) != tt.wantNil {
+				t.Fatalf("error = %v, want nil %v", err, tt.wantNil)
+			}
+			var rejected *ErrUnauthorized
+			if got := errors.As(err, &rejected); got != tt.wantRejected {
+				t.Errorf("ErrUnauthorized = %v, want %v (error %v)", got, tt.wantRejected, err)
+			}
+			var limited *ErrRateLimit
+			if got := errors.As(err, &limited); got != tt.wantLimited {
+				t.Errorf("ErrRateLimit = %v, want %v (error %v)", got, tt.wantLimited, err)
+			}
+		})
+	}
+}
+
+// A caller that gives up mid-login has learnt nothing about the credentials,
+// so the next caller logs in at once rather than waiting out a backoff.
+func TestEnsureAuthCancelledLoginIsNotAFailure(t *testing.T) {
+	release := make(chan struct{})
+	var hang atomic.Bool
+	hang.Store(true)
+	srv, logins := loginServer(t, func(r *http.Request) (int, http.Header) {
+		if hang.Load() {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		}
+		return http.StatusOK, nil
+	})
+	t.Cleanup(func() { close(release) })
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	sm := newBackoffSession(t, srv, clock)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := sm.EnsureAuth(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancelled login error = %v, want context.DeadlineExceeded", err)
+	}
+
+	hang.Store(false)
+	if err := sm.EnsureAuth(context.Background()); err != nil {
+		t.Fatalf("login after a cancelled one: %v", err)
+	}
+	if got := atomic.LoadInt32(logins); got != 2 {
+		t.Fatalf("logins = %d, want 2", got)
+	}
+}
+
+// Requests keep setting their headers while a login waits on a slow
+// controller.
+func TestSetAuthHeaderDoesNotWaitForLogin(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	srv, _ := loginServer(t, func(*http.Request) (int, http.Header) {
+		close(entered)
+		<-release
+		return http.StatusOK, nil
+	})
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	sm := newBackoffSession(t, srv, clock)
+
+	done := make(chan error, 1)
+	go func() { done <- sm.EnsureAuth(context.Background()) }()
+	<-entered
+
+	headerSet := make(chan struct{})
+	go func() {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+		sm.SetAuthHeader(req)
+		close(headerSet)
+	}()
+	select {
+	case <-headerSet:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SetAuthHeader blocked behind an in-flight login")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("login: %v", err)
 	}
 }
 
