@@ -273,9 +273,11 @@ When enabled, the bouncer periodically fetches current Cloudflare IP ranges and 
 |----------|---------|----------|-------------|
 | `CLOUDFLARE_WHITELIST_ENABLED` | `false` | No | Enable the Cloudflare IP whitelist sync. Requires zone mode and `UNIFI_API_KEY`; startup fails with `FIREWALL_MODE=legacy` or without an API key. |
 | `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | No | How often to re-fetch Cloudflare IP ranges and update the IP TMLs (default: weekly). |
-| `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | No | URL to fetch the current Cloudflare IPv4 CIDR list. |
-| `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | No | URL to fetch the current Cloudflare IPv6 CIDR list. |
+| `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | No | `https://` URL to fetch the current Cloudflare IPv4 CIDR list. |
+| `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | No | `https://` URL to fetch the current Cloudflare IPv6 CIDR list. |
 | `CLOUDFLARE_ZONE_PAIRS` | — | If enabled | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]` format. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. Use semicolons between pairs when a pair contains comma-separated ports or IPs. Zones are resolved separately for each site. Filter creation failure prevents a broader ALLOW policy from being created. |
+
+A fetched list is applied only if every entry passes validation: IPv4 ranges no broader than a /12, IPv6 ranges no broader than a /29, no private, loopback, link-local, multicast or other non-public ranges, and at most 1000 entries per list. A list that fails validation, or an empty one, is rejected with an error and the ranges from the last successful sync stay in place.
 
 ```bash
 # Minimal — ALLOW Cloudflare traffic from External to Internal on any port

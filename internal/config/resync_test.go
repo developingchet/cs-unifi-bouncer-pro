@@ -45,16 +45,18 @@ func TestCrowdSecResyncInterval(t *testing.T) {
 
 func TestCloudflareURLsValidated(t *testing.T) {
 	for _, key := range []string{"CLOUDFLARE_IPV4_URL", "CLOUDFLARE_IPV6_URL"} {
-		t.Run(key, func(t *testing.T) {
-			setEnv(t, "UNIFI_URL", "https://192.168.1.1")
-			setEnv(t, "UNIFI_API_KEY", "key")
-			setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
-			setEnv(t, "CLOUDFLARE_WHITELIST_ENABLED", "true")
-			setEnv(t, "CLOUDFLARE_ZONE_PAIRS", "External->Internal")
-			setEnv(t, key, "file:///etc/passwd")
-			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CLOUDFLARE_IPV") {
-				t.Fatalf("err = %v, want Cloudflare URL error", err)
-			}
-		})
+		for _, value := range []string{"file:///etc/passwd", "http://www.cloudflare.com/ips-v4"} {
+			t.Run(key+"="+value, func(t *testing.T) {
+				setEnv(t, "UNIFI_URL", "https://192.168.1.1")
+				setEnv(t, "UNIFI_API_KEY", "key")
+				setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
+				setEnv(t, "CLOUDFLARE_WHITELIST_ENABLED", "true")
+				setEnv(t, "CLOUDFLARE_ZONE_PAIRS", "External->Internal")
+				setEnv(t, key, value)
+				if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CLOUDFLARE_IPV") {
+					t.Fatalf("err = %v, want Cloudflare URL error", err)
+				}
+			})
+		}
 	}
 }

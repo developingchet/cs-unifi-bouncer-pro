@@ -852,8 +852,8 @@ func (c *Config) validateCloudflare() error {
 	if _, err := c.ParseCloudflareZonePairs(); err != nil {
 		return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: %w", err)
 	}
-	if !isHTTPURL(c.CloudflareIPv4URL) || !isHTTPURL(c.CloudflareIPv6URL) {
-		return fmt.Errorf("CLOUDFLARE_IPV4_URL and CLOUDFLARE_IPV6_URL must be absolute http:// or https:// URLs")
+	if !isHTTPSURL(c.CloudflareIPv4URL) || !isHTTPSURL(c.CloudflareIPv6URL) {
+		return fmt.Errorf("CLOUDFLARE_IPV4_URL and CLOUDFLARE_IPV6_URL must be absolute https:// URLs")
 	}
 	return nil
 }
@@ -893,6 +893,11 @@ func (c *Config) InsecureLAPIURLWarning() string {
 func isHTTPURL(raw string) bool {
 	u, err := url.Parse(raw)
 	return err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https")
+}
+
+func isHTTPSURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Host != "" && u.Scheme == "https"
 }
 
 // isLoopbackHost reports whether host is the loopback address or "localhost".

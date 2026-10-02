@@ -21,6 +21,12 @@ report unhealthy during startup. The example Kubernetes Deployment adds a
 
 An empty `HEALTH_ADDR` is now rejected at startup.
 
+`CLOUDFLARE_IPV4_URL` and `CLOUDFLARE_IPV6_URL` must now be `https://` URLs; an
+`http://` URL fails startup. A fetched list is rejected, keeping the ranges
+from the last successful sync, when it is empty, has more than 1000 entries,
+or contains a range that is private, non-public, broader than a /12 (IPv4) or
+broader than a /29 (IPv6).
+
 ## From 2.0 to 2.1
 
 Building from source now requires Go 1.27.1 or newer.
