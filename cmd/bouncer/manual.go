@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -188,15 +190,39 @@ func unbanCmd() *cobra.Command {
 	}
 }
 
-func runManualBan(ip string, dur time.Duration) error {
-	var parseErr error
-	ip, _, parseErr = decision.ParseAndSanitize(ip)
-	if parseErr != nil {
-		return parseErr
+// checkManualBan parses value and applies the guards the daemon applies to
+// CrowdSec decisions: a manual ban must not cut off the gateway, a private
+// network, a whitelisted address or most of the internet. It returns the
+// sanitized address or range.
+func checkManualBan(value string, whitelist []*net.IPNet) (string, error) {
+	ip, _, err := decision.ParseAndSanitize(value)
+	if err != nil {
+		return "", err
 	}
+	ipv6 := decision.IsIPv6(ip)
+	switch {
+	case decision.TooBroad(ip, ipv6):
+		return "", fmt.Errorf("refusing to ban %s: range is too broad (broader than /8 for IPv4 or /32 for IPv6)", ip)
+	case decision.IsPrivate(ip):
+		return "", fmt.Errorf("refusing to ban %s: private, loopback or link-local addresses are never banned", ip)
+	case decision.IsWhitelisted(ip, whitelist):
+		return "", fmt.Errorf("refusing to ban %s: it is covered by BLOCK_WHITELIST", ip)
+	}
+	return ip, nil
+}
+
+func runManualBan(value string, dur time.Duration) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+	whitelist, err := decision.ParseWhitelist(cfg.BlockWhitelist)
+	if err != nil {
+		return fmt.Errorf("BLOCK_WHITELIST: %w", err)
+	}
+	ip, err := checkManualBan(value, whitelist)
+	if err != nil {
+		return err
 	}
 	log := buildLogger(cfg)
 	if dur < 0 {
@@ -277,7 +303,21 @@ func runManualUnban(ip string) error {
 		return fmt.Errorf("flush manual unban to UniFi: %w", err)
 	}
 	fmt.Println(unbanMessage(ip, len(cfg.UnifiSites), cfg.DryRun))
+	fmt.Fprintln(os.Stderr, crowdSecUnbanWarning(ip))
 	return nil
+}
+
+// crowdSecUnbanWarning explains that an unban only lasts until CrowdSec
+// distributes the decision again. The bouncer re-applies every active
+// decision on the next stream pull or resync, so a decision CrowdSec still
+// holds brings the ban back.
+func crowdSecUnbanWarning(ip string) string {
+	flag := "--ip"
+	if strings.Contains(ip, "/") {
+		flag = "--range"
+	}
+	return fmt.Sprintf("warning: if CrowdSec still holds a decision for %s the ban returns on the next "+
+		"decision pull or resync; remove it there too: cscli decisions delete %s %s", ip, flag, ip)
 }
 
 // openManualSession prepares the store, controller, and firewall state used by
