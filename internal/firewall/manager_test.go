@@ -94,8 +94,13 @@ func TestDrainDeletesGroupFromPreviousMode(t *testing.T) {
 	impl := mgr.(*managerImpl)
 	impl.siteMode[testSite] = "zone"
 	ctrl.SetGroups(testSite, []controller.FirewallGroup{{ID: "legacy-group", Name: "crowdsec-block-v4-0"}})
-	ctrl.SetError("DeleteTrafficMatchingList", &controller.ErrNotFound{})
-	if err := impl.deleteDrainGroup(ctx, testSite, "legacy-group"); err != nil {
+	// The real client reports a delete of an unknown ID as success, so the
+	// legacy group must be found by listing rather than by a failed TML delete.
+	objects, err := impl.listShardObjectIDs(ctx, testSite)
+	if err != nil {
+		t.Fatalf("listShardObjectIDs: %v", err)
+	}
+	if err := impl.deleteDrainGroup(ctx, testSite, "legacy-group", objects); err != nil {
 		t.Fatalf("delete prior-mode group: %v", err)
 	}
 	groups, err := ctrl.ListFirewallGroups(ctx, testSite)
