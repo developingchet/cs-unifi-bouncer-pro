@@ -497,6 +497,99 @@ func TestGetSiteID_NotFound(t *testing.T) {
 	}
 }
 
+func TestGetSiteID_Resolution(t *testing.T) {
+	sites := []interface{}{
+		apiSiteV1{ID: "uuid-a", InternalReference: "default", Name: "branch"},
+		apiSiteV1{ID: "uuid-b", InternalReference: "branch", Name: "Branch Office"},
+		apiSiteV1{ID: "uuid-c", InternalReference: "lab", Name: "Lab"},
+		apiSiteV1{ID: "uuid-d", InternalReference: "uuid-c", Name: "Annex"},
+	}
+	tests := []struct {
+		name    string
+		sites   []interface{}
+		query   string
+		want    string
+		wantErr string
+	}{
+		{"internalReference wins over another site's display name", sites, "branch", "uuid-b", ""},
+		{"internalReference of the site whose name is reused", sites, "default", "uuid-a", ""},
+		{"internalReference wins over another site's ID", sites, "uuid-c", "uuid-d", ""},
+		{"exact ID", sites, "uuid-a", "uuid-a", ""},
+		{"display name when no reference or ID matches", sites, "Branch Office", "uuid-b", ""},
+		{"display name match is exact", sites, "branch office", "", "not found"},
+		{"unknown site", sites, "missing", "", "not found"},
+		{"empty name", sites, "", "", "empty"},
+		{
+			"duplicate internalReference",
+			[]interface{}{
+				apiSiteV1{ID: "uuid-a", InternalReference: "dup", Name: "One"},
+				apiSiteV1{ID: "uuid-b", InternalReference: "dup", Name: "Two"},
+			},
+			"dup", "", "ambiguous",
+		},
+		{
+			"duplicate display name",
+			[]interface{}{
+				apiSiteV1{ID: "uuid-a", InternalReference: "one", Name: "Same"},
+				apiSiteV1{ID: "uuid-b", InternalReference: "two", Name: "Same"},
+			},
+			"Same", "", "ambiguous",
+		},
+		{
+			"site without an ID is never chosen",
+			[]interface{}{apiSiteV1{InternalReference: "broken", Name: "Broken"}},
+			"broken", "", "not found",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(makeV1Page(tt.sites...))
+			}))
+			defer srv.Close()
+
+			got, err := getSiteID(context.Background(), newTestClient(srv.URL, "api-key"), tt.query)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("got (%q, %v), want error containing %q", got, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("got (%q, %v), want %q", got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetSiteID_CachesOnlyTheRequestedName(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(makeV1Page(
+			apiSiteV1{ID: "uuid-a", InternalReference: "default", Name: "branch"},
+			apiSiteV1{ID: "uuid-b", InternalReference: "branch", Name: "Branch Office"},
+		))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	for _, query := range []string{"default", "branch", "branch"} {
+		if _, err := getSiteID(context.Background(), c, query); err != nil {
+			t.Fatalf("getSiteID(%q): %v", query, err)
+		}
+	}
+	if requests != 2 {
+		t.Errorf("requests: got %d, want 2 (one per distinct name)", requests)
+	}
+	got, err := getSiteID(context.Background(), c, "branch")
+	if err != nil || got != "uuid-b" {
+		t.Errorf("getSiteID(branch) = (%q, %v), want uuid-b", got, err)
+	}
+}
+
 // ---- Traffic Matching Lists (integration v1) --------------------------------
 
 func TestListTMLs(t *testing.T) {

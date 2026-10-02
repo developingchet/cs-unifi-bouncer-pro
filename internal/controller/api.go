@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -467,9 +469,13 @@ func listAllV1Pages(ctx context.Context, c *unifiClient, endpointURL, metricEndp
 	return all, nil
 }
 
-// getSiteID resolves a site internalReference to its integration v1 UUID.
-// Results are cached on the client.
+// getSiteID resolves a site name to its integration v1 UUID. The name is
+// normally the site's internalReference; an ID or display name also resolves.
+// Results are cached on the client under the name that was asked for.
 func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, error) {
+	if siteName == "" {
+		return "", errors.New("site name is empty")
+	}
 	c.cacheMu.RLock()
 	if id, ok := c.siteIDCache[siteName]; ok {
 		c.cacheMu.RUnlock()
@@ -483,22 +489,54 @@ func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, er
 		return "", fmt.Errorf("fetch integration v1 sites: %w", err)
 	}
 
-	c.cacheMu.Lock()
-	defer c.cacheMu.Unlock()
+	sites := make([]apiSiteV1, 0, len(data))
 	for _, raw := range data {
 		var s apiSiteV1
-		if err := json.Unmarshal(raw, &s); err != nil {
+		if err := json.Unmarshal(raw, &s); err != nil || s.ID == "" {
 			continue
 		}
-		// Cache by both internalReference and display name for convenience.
-		c.siteIDCache[s.InternalReference] = s.ID
-		c.siteIDCache[s.Name] = s.ID
-		c.siteIDCache[s.ID] = s.ID // also cache UUID → UUID
+		sites = append(sites, s)
 	}
-	if id, ok := c.siteIDCache[siteName]; ok {
-		return id, nil
+	id, err := matchSite(sites, siteName)
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("site %q not found in integration v1 sites list", siteName)
+	c.cacheMu.Lock()
+	c.siteIDCache[siteName] = id
+	c.cacheMu.Unlock()
+	return id, nil
+}
+
+// matchSite picks the site that name refers to. The three identifiers share
+// one namespace as far as callers are concerned, but one site's display name
+// can equal another site's internalReference, so they are tried in order of
+// stability: internalReference, then ID, then display name. A level that
+// matches more than one site is an error rather than a guess.
+func matchSite(sites []apiSiteV1, name string) (string, error) {
+	levels := []struct {
+		label string
+		field func(apiSiteV1) string
+	}{
+		{"internalReference", func(s apiSiteV1) string { return s.InternalReference }},
+		{"ID", func(s apiSiteV1) string { return s.ID }},
+		{"name", func(s apiSiteV1) string { return s.Name }},
+	}
+	for _, level := range levels {
+		var ids []string
+		for _, s := range sites {
+			if level.field(s) == name && !slices.Contains(ids, s.ID) {
+				ids = append(ids, s.ID)
+			}
+		}
+		switch len(ids) {
+		case 0:
+		case 1:
+			return ids[0], nil
+		default:
+			return "", fmt.Errorf("site %q is ambiguous: %d sites share that %s", name, len(ids), level.label)
+		}
+	}
+	return "", fmt.Errorf("site %q not found in integration v1 sites list", name)
 }
 
 // discoverSites returns the short site names (internalReference) visible to
