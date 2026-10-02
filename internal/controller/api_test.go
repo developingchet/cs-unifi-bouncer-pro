@@ -1055,6 +1055,71 @@ func TestListAllV1PagesRejectsMissingCount(t *testing.T) {
 	}
 }
 
+func TestListAllV1PagesBounds(t *testing.T) {
+	tests := []struct {
+		name         string
+		itemsPerPage int
+		totalCount   int
+		wantErr      string
+		maxRequests  int
+	}{
+		{"endless pages without totalCount", 1, 0, "pages", maxV1Pages + 1},
+		{"endless pages under a huge totalCount", 1, 1 << 30, "pages", maxV1Pages + 1},
+		{"oversized pages exhaust the item budget", 1000, 1 << 30, "items", maxV1Items/1000 + 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			page := makeV1PageOf(tt.itemsPerPage, tt.totalCount)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(page)
+			}))
+			defer srv.Close()
+
+			_, err := listAllV1Pages(context.Background(), newTestClient(srv.URL, "key"), srv.URL+"/pages", "test-pages")
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("got %v, want error mentioning %q", err, tt.wantErr)
+			}
+			if requests > tt.maxRequests {
+				t.Errorf("requests: got %d, want at most %d", requests, tt.maxRequests)
+			}
+		})
+	}
+}
+
+func TestListAllV1PagesStopsOnEmptyPage(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("offset") == "0" {
+			_, _ = w.Write(makeV1PageOf(2, 10))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[],"count":0,"totalCount":10}`))
+	}))
+	defer srv.Close()
+
+	got, err := listAllV1Pages(context.Background(), newTestClient(srv.URL, "key"), srv.URL+"/pages", "test-pages")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 || requests != 2 {
+		t.Errorf("got %d items in %d requests, want 2 items in 2 requests", len(got), requests)
+	}
+}
+
+// makeV1PageOf encodes a page of n empty objects that reports totalCount.
+func makeV1PageOf(n, totalCount int) []byte {
+	items := make([]string, n)
+	for i := range items {
+		items[i] = "{}"
+	}
+	return []byte(fmt.Sprintf(`{"data":[%s],"count":%d,"totalCount":%d}`, strings.Join(items, ","), n, totalCount))
+}
+
 func TestLegacyEnvelopeError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
