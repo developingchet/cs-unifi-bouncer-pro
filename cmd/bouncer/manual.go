@@ -15,6 +15,7 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/whitelist"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 )
@@ -135,12 +136,29 @@ Requires either --force or --dry-run for safety.`,
 		if err := fwMgr.Drain(ctx, cfg.UnifiSites); err != nil {
 			return fmt.Errorf("drain: %w", err)
 		}
+		if err := drainWhitelist(ctx, cfg, ctrl, log); err != nil {
+			return fmt.Errorf("drain Cloudflare whitelist: %w", err)
+		}
 
-		fmt.Printf("drain complete (dry_run=%v)\n", dryRun)
+		fmt.Printf("drain complete (dry_run=%v)\n", cfg.DryRun)
 		return nil
 	}
 
 	return cmd
+}
+
+// drainWhitelist removes, or with dry-run previews the removal of, the
+// Cloudflare whitelist policies and lists. They exist only when an API key
+// created them, as zone mode requires one.
+func drainWhitelist(ctx context.Context, cfg *config.Config, ctrl controller.Controller, log zerolog.Logger) error {
+	if cfg.UnifiAPIKey == "" {
+		return nil
+	}
+	mgr := whitelist.NewManager(ctrl, cfg.UnifiSites, nil, log)
+	if cfg.DryRun {
+		return mgr.PreviewDrain(ctx)
+	}
+	return mgr.Drain(ctx)
 }
 
 // banCmd manually bans an IP across all configured UniFi sites.
@@ -208,8 +226,25 @@ func runManualBan(ip string, dur time.Duration) error {
 	if err := fwMgr.SyncDirty(ctx, cfg.UnifiSites); err != nil {
 		return fmt.Errorf("flush manual ban to UniFi: %w", err)
 	}
-	fmt.Printf("banned %s across %d site(s) (expires: %s)\n", ip, len(cfg.UnifiSites), expiresAt.Format(time.RFC3339))
+	fmt.Println(banMessage(ip, len(cfg.UnifiSites), expiresAt, cfg.DryRun))
 	return nil
+}
+
+// banMessage reports a manual ban; a dry run changes nothing, so it says what
+// would have happened.
+func banMessage(ip string, sites int, expiresAt time.Time, dryRun bool) string {
+	if dryRun {
+		return fmt.Sprintf("[DRY-RUN] would ban %s across %d site(s) (expires: %s)", ip, sites, expiresAt.Format(time.RFC3339))
+	}
+	return fmt.Sprintf("banned %s across %d site(s) (expires: %s)", ip, sites, expiresAt.Format(time.RFC3339))
+}
+
+// unbanMessage reports a manual unban, worded like banMessage.
+func unbanMessage(ip string, sites int, dryRun bool) string {
+	if dryRun {
+		return fmt.Sprintf("[DRY-RUN] would unban %s from %d site(s)", ip, sites)
+	}
+	return fmt.Sprintf("unbanned %s from %d site(s)", ip, sites)
 }
 
 func runManualUnban(ip string) error {
@@ -241,7 +276,7 @@ func runManualUnban(ip string) error {
 	if err := fwMgr.SyncDirty(ctx, cfg.UnifiSites); err != nil {
 		return fmt.Errorf("flush manual unban to UniFi: %w", err)
 	}
-	fmt.Printf("unbanned %s from %d site(s)\n", ip, len(cfg.UnifiSites))
+	fmt.Println(unbanMessage(ip, len(cfg.UnifiSites), cfg.DryRun))
 	return nil
 }
 
