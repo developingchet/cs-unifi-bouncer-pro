@@ -549,8 +549,8 @@ WEBHOOK_EVENTS=circuit_breaker_open,circuit_breaker_close,reconcile_drift
 | `LOG_LEVEL` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error`. Messages from the CrowdSec stream client carry `"component":"crowdsec-client"`; its per-poll debug messages appear only at `trace`. |
 | `LOG_FORMAT` | `json` | Log format: `json` (structured, for Loki/Splunk) or `text` (human-readable) |
 | `METRICS_ENABLED` | `true` | Enable the Prometheus metrics HTTP server |
-| `METRICS_ADDR` | `:9090` | Address for the Prometheus metrics endpoint. Must differ from `HEALTH_ADDR` while metrics are enabled. |
-| `HEALTH_ADDR` | `:8081` | Address for health endpoints (`/healthz`, `/readyz`) |
+| `METRICS_ADDR` | `:9090` | Address for the Prometheus metrics endpoint. Must differ from `HEALTH_ADDR` while metrics are enabled. The default listens on every interface, which a container needs for published ports and scraping; when running on a host (for example under systemd) set `127.0.0.1:9090` unless a remote Prometheus must reach it. The shipped systemd unit does this. |
+| `HEALTH_ADDR` | `:8081` | Address for health endpoints (`/healthz`, `/readyz`). The default listens on every interface; on a host set `127.0.0.1:8081`. The `healthcheck` subcommand reads this variable too. |
 | `JANITOR_INTERVAL` | `1h` | How often the background janitor lifts expired ban claims, records `expire` history events, and updates the `crowdsec_unifi_db_size_bytes` metric |
 | `SHUTDOWN_GRACE_PERIOD` | `30s` | Time given to in-flight goroutines to finish cleanly after a shutdown signal before the process exits forcefully. |
 | `HEALTH_CHECK_LAPI` | `true` | When `true`, `/readyz` checks both the UniFi controller and CrowdSec LAPI. Set to `false` to check only the controller. Either way `/readyz` returns 503 `starting` until the first LAPI decision batch has been processed, so it stays unready while the LAPI is unreachable at startup. |
