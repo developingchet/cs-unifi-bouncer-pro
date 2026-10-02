@@ -554,7 +554,7 @@ Exits 0 when all checks pass, 1 if any fail. The zone list output is useful for 
 
 ### `ban` subcommand
 
-Manually bans a single IP address across all sites listed in `UNIFI_SITES`. The ban is written to the relevant firewall group shards and recorded in bbolt for expiry tracking.
+Manually bans a single IP address across all sites listed in `UNIFI_SITES`. The ban is written to the relevant firewall group shards and recorded in bbolt for expiry tracking. The same guards as for CrowdSec decisions apply: the command refuses private, loopback and link-local addresses, anything covered by `BLOCK_WHITELIST`, and ranges broader than /8 (IPv4) or /32 (IPv6).
 
 ```bash
 cs-unifi-bouncer-pro ban 203.0.113.42               # Ban for 24h (default)
@@ -574,6 +574,8 @@ Removes a manually or automatically applied ban from all configured sites and de
 cs-unifi-bouncer-pro unban 203.0.113.42
 cs-unifi-bouncer-pro unban 2001:db8::1
 ```
+
+An unban does not change CrowdSec. If CrowdSec still holds a decision for the address, the ban is applied again at the next stream pull or resync, so the command prints a reminder to remove the decision there too (`cscli decisions delete --ip <IP>`).
 
 ---
 
