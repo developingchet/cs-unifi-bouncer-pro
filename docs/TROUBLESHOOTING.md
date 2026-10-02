@@ -424,9 +424,10 @@ limit before giving up.
 
 **Fix:**
 
-1. If the warning follows `login ... returned HTTP 403`, the credentials are
-   wrong: correct them and restart, then expect the first login to wait out
-   the lockout.
+1. If it follows an error-level `UniFi login failed` with `login ... returned
+   HTTP 400`, `401` or `403`, the credentials are wrong. The bouncer backs off
+   up to 30 minutes between such attempts. Correct the credentials and
+   restart, then expect the first login to wait out the lockout.
 2. Otherwise wait; avoid running several CLI commands in quick succession.
 
 ---

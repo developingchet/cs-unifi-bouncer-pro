@@ -1,6 +1,6 @@
 # Upgrading
 
-## From 2.1.0 to 2.1.1
+## From 2.1 to 2.2
 
 The health server now starts before the firewall infrastructure is loaded, so
 `/healthz` answers within seconds of startup even on a large ban list.
@@ -21,6 +21,25 @@ report unhealthy during startup. The example Kubernetes Deployment adds a
 
 An empty `HEALTH_ADDR` is now rejected at startup.
 
+A login the controller refuses (HTTP 400, 401 or 403) is retried after a
+backoff that grows to 30 minutes and is logged at error level, because every
+attempt with a wrong password counts toward the UniFi OS login lockout. After
+correcting `UNIFI_USERNAME` or `UNIFI_PASSWORD`, restart the bouncer rather
+than waiting for the next attempt. A 429 on login is waited out for 1 to 16
+minutes; see
+[UniFi login is rate limited](TROUBLESHOOTING.md#unifi-login-is-rate-limited).
+
+With `FIREWALL_MODE=zone`, an empty `ZONE_PAIRS` now fails startup, and a
+SIGHUP reload that would leave it empty is rejected and the running pairs are
+kept. Before, it deleted every block policy the bouncer managed.
+
+The `ban` subcommand refuses the addresses the daemon would never ban: private
+and loopback addresses, `BLOCK_WHITELIST` entries and ranges broader than /8
+(IPv4) or /32 (IPv6).
+`unban` reminds you to delete the CrowdSec decision as well, since the daemon
+otherwise applies it again. `drain` now also removes staged zone policies, the
+per-pair filter lists and, with an API key, the Cloudflare whitelist objects.
+
 `CLOUDFLARE_IPV4_URL` and `CLOUDFLARE_IPV6_URL` must now be `https://` URLs; an
 `http://` URL fails startup. A fetched list is rejected, keeping the ranges
 from the last successful sync, when it is empty, has more than 1000 entries,
@@ -29,7 +48,9 @@ broader than a /29 (IPv6).
 
 A blocklist feed whose country filter rejects every entry now keeps its
 previous bans and logs an error; before, it released all of them. A feed that
-lists fewer than half of its previous entries is applied without pruning. See
+lists fewer than half of its previous entries is applied without pruning. Both
+cases, and a partially malformed response, log `blocklist: feed applied without
+pruning`, which replaces `blocklist: partial feed applied; pruning skipped`. See
 [Blocklist import](CONFIGURATION.md#external-blocklists). New settings
 `BLOCKLIST_MIN_PREFIX_V4` (default `8`) and `BLOCKLIST_MIN_PREFIX_V6` (default
 `32`) set the shortest prefix accepted for a feed entry.
