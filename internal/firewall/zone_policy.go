@@ -91,6 +91,9 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	if err := zm.cleanupOrphanedBlockPolicies(ctx, site, expectedNames, existingByID); err != nil {
 		return err
 	}
+	if err := zm.cleanupStagedPolicies(ctx, site, ownedGroupIDs(v4Shards, v6Shards), existingByID); err != nil {
+		return fmt.Errorf("clean up staged zone policies for site %s: %w", site, err)
+	}
 	zm.mu.RLock()
 	portIDs := zm.portTMLCache[site]
 	zm.mu.RUnlock()
