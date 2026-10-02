@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -24,6 +25,18 @@ type AuthConfig struct {
 	ReauthMinGap  time.Duration
 }
 
+// UniFi OS refuses every login, the right password included, for several
+// minutes after five failed attempts. A controller that is still starting
+// fails logins it would otherwise accept, so failed attempts are spaced out
+// rather than repeated on every request that gets a 401.
+const (
+	loginBackoffInitial = 15 * time.Second
+	loginBackoffMax     = 5 * time.Minute
+	// loginLockoutWait applies when a login is refused with 429 and no
+	// Retry-After header, which is how UniFi OS reports the lockout.
+	loginLockoutWait = 5 * time.Minute
+)
+
 // sessionManager guards re-authentication with a mutex to prevent thundering herd.
 type sessionManager struct {
 	mu         sync.Mutex
@@ -31,7 +44,13 @@ type sessionManager struct {
 	http       *http.Client
 	csrfToken  string // cached from X-Csrf-Token response header
 	lastReauth time.Time
-	log        zerolog.Logger
+	// loginFailures counts consecutive failed logins; no login is attempted
+	// before retryLoginAt, and EnsureAuth returns lastLoginErr instead.
+	loginFailures int
+	retryLoginAt  time.Time
+	lastLoginErr  error
+	now           func() time.Time
+	log           zerolog.Logger
 }
 
 func newSessionManager(cfg AuthConfig, httpClient *http.Client, log zerolog.Logger) *sessionManager {
@@ -41,6 +60,7 @@ func newSessionManager(cfg AuthConfig, httpClient *http.Client, log zerolog.Logg
 	return &sessionManager{
 		cfg:  cfg,
 		http: httpClient,
+		now:  time.Now,
 		log:  log,
 	}
 }
@@ -57,8 +77,12 @@ func (s *sessionManager) EnsureAuth(ctx context.Context) error {
 	defer s.mu.Unlock()
 
 	// Thundering-herd guard: if another worker already re-authed recently, skip.
-	if time.Since(s.lastReauth) < s.cfg.ReauthMinGap {
+	if s.now().Sub(s.lastReauth) < s.cfg.ReauthMinGap {
 		return nil
+	}
+	if s.loginFailures > 0 && s.now().Before(s.retryLoginAt) {
+		return fmt.Errorf("re-auth deferred until %s after a failed login: %w",
+			s.retryLoginAt.Format(time.RFC3339), s.lastLoginErr)
 	}
 
 	timeout := s.cfg.ReauthTimeout
@@ -70,12 +94,36 @@ func (s *sessionManager) EnsureAuth(ctx context.Context) error {
 
 	if err := s.login(tctx); err != nil {
 		metrics.AuthErrors.Inc()
+		wait := s.recordLoginFailure(err)
+		s.log.Warn().Err(err).Int("consecutive_failures", s.loginFailures).Stringer("next_attempt_in", wait).
+			Msg("UniFi login failed")
 		return fmt.Errorf("re-auth failed: %w", err)
 	}
 	metrics.ReauthTotal.Inc()
-	s.lastReauth = time.Now()
+	s.lastReauth = s.now()
+	s.loginFailures = 0
+	s.lastLoginErr = nil
 	s.log.Debug().Msg("re-authenticated with UniFi controller")
 	return nil
+}
+
+// recordLoginFailure must be called with s.mu held. It schedules the next
+// login attempt and returns how long until then: doubling from
+// loginBackoffInitial up to loginBackoffMax, or longer when the controller
+// asked for it with a 429.
+func (s *sessionManager) recordLoginFailure(err error) time.Duration {
+	s.loginFailures++
+	wait := loginBackoffMax
+	if shift := s.loginFailures - 1; shift < 8 {
+		wait = min(loginBackoffInitial<<shift, loginBackoffMax)
+	}
+	var rateLimited *ErrRateLimit
+	if errors.As(err, &rateLimited) {
+		wait = max(wait, rateLimited.RetryAfter)
+	}
+	s.retryLoginAt = s.now().Add(wait)
+	s.lastLoginErr = err
+	return wait
 }
 
 // SetAuthHeader applies auth credentials to an outgoing request.
@@ -135,18 +183,34 @@ func (s *sessionManager) login(ctx context.Context) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := s.http.Do(req)
+	// UniFi OS answers 403 to a login that carries a session cookie it still
+	// accepts but no CSRF token, and counts it toward the failed-login limit.
+	// Sessions survive a controller restart, so the login is sent without
+	// cookies and the new ones are stored in the jar afterwards.
+	noCookies := *s.http
+	noCookies.Jar = nil
+	resp, err := noCookies.Do(req)
 	if err != nil {
 		return fmt.Errorf("login request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+	switch {
+	case resp.StatusCode == http.StatusTooManyRequests:
+		wait := loginLockoutWait
+		if h := resp.Header.Get("Retry-After"); h != "" {
+			wait = parseRetryAfter(h, s.now())
+		}
+		return &ErrRateLimit{RetryAfter: wait}
+	case resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated:
 		return &ErrUnauthorized{Msg: fmt.Sprintf("login at %s returned HTTP %d; check UNIFI_USERNAME and UNIFI_PASSWORD", s.cfg.LoginPath, resp.StatusCode)}
 	}
 
-	// The cookie jar keeps the session cookie; write requests also need the
-	// CSRF token issued with it. A token from the previous session is invalid.
+	if s.http.Jar != nil {
+		s.http.Jar.SetCookies(req.URL, resp.Cookies())
+	}
+	// Write requests also need the CSRF token issued with the session. A
+	// token from the previous session is invalid.
 	s.csrfToken = ""
 	s.storeCSRFToken(resp.Header)
 	return nil
