@@ -637,6 +637,9 @@ func (c *Config) validateOperational() error {
 	if lapiURL.Scheme == "http" && !isLoopbackHost(lapiURL.Hostname()) && !c.CrowdSecLAPIAllowHTTP {
 		return fmt.Errorf("CROWDSEC_LAPI_URL uses plaintext HTTP outside loopback; set CROWDSEC_LAPI_ALLOW_HTTP=true only on a trusted local network")
 	}
+	if c.HealthAddr == "" {
+		return fmt.Errorf("HEALTH_ADDR must not be empty; the healthcheck subcommand probes %s when it is unset", defaultHealthAddr)
+	}
 	if c.MetricsEnabled && c.MetricsAddr == c.HealthAddr {
 		return fmt.Errorf("METRICS_ADDR and HEALTH_ADDR must differ; both are %q", c.MetricsAddr)
 	}

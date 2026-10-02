@@ -47,7 +47,7 @@ COPY --from=builder --chown=65532:65532 /out/data-init /data
 
 USER 65532:65532
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD ["/cs-unifi-bouncer-pro", "healthcheck"]
 
 # Expose Prometheus metrics and health endpoints

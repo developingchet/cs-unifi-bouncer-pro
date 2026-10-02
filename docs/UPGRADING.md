@@ -1,5 +1,26 @@
 # Upgrading
 
+## From 2.1.0 to 2.1.1
+
+The health server now starts before the firewall infrastructure is loaded, so
+`/healthz` answers within seconds of startup even on a large ban list.
+
+`/readyz` returns 503 with the body `starting` until the first decision batch
+from the LAPI has been processed. On a ban list of ~100k decisions that takes
+several minutes, and while the LAPI is unreachable at startup it does not end.
+`HEALTH_CHECK_LAPI=false` does not skip this wait; it still only controls
+whether `/readyz` checks the LAPI afterwards. Anything that waits for `/readyz`
+to return 200 after a restart needs a timeout that covers the first pull.
+
+The Docker image and both compose files raise the healthcheck `start_period`
+from 15s to 120s. A compose file or orchestrator that sets its own healthcheck
+keeps its own values; copy the new one if you see the container restart or
+report unhealthy during startup. The example Kubernetes Deployment adds a
+`startupProbe` on `/healthz` and sets `progressDeadlineSeconds: 1200`; see
+[Kubernetes](kubernetes/README.md#health-endpoints).
+
+An empty `HEALTH_ADDR` is now rejected at startup.
+
 ## From 2.0 to 2.1
 
 Building from source now requires Go 1.27.1 or newer.
