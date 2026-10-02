@@ -531,7 +531,7 @@ The bouncer can POST a JSON notification to a webhook URL when significant event
 
 The payload always has `event` and `timestamp` (UTC, RFC 3339). `detail` is present only for `reconcile_drift`.
 
-Notifications are delivered in the background, so a slow endpoint never delays syncing. Up to 64 events can be queued; further events are dropped with a `webhook: queue full` warning. On shutdown, queued events get up to 5 seconds to send. Webhook errors are logged at `warn` level and never cause the bouncer to exit or retry. The HTTP timeout for webhook POSTs is 5 seconds. Logs show only the webhook host, because Slack- and Discord-style URLs carry a token in the path.
+Notifications are delivered in the background, so a slow endpoint never delays syncing. Up to 64 events can be queued; further events are dropped with a `webhook: queue full` warning. On shutdown, queued events get up to 5 seconds to send. Webhook errors are logged at `warn` level and never cause the bouncer to exit or retry. The HTTP timeout for webhook POSTs is 5 seconds. Redirects are not followed, so the payload is only ever sent to `WEBHOOK_URL` itself, and an `http://` URL logs a startup warning because the payload then travels unencrypted. Logs show only the webhook host, because Slack- and Discord-style URLs carry a token in the path.
 
 ```bash
 # Fire a notification when the circuit breaker trips or resets
