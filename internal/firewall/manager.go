@@ -208,6 +208,10 @@ func (m *managerImpl) LoadInfrastructure(ctx context.Context, sites []string) er
 			return fmt.Errorf("resolve mode for site %s: %w", site, err)
 		}
 
+		if mode == "zone" && len(m.cfg.ZoneCfg.ZonePairs) == 0 {
+			return fmt.Errorf("site %s: %w", site, errNoZonePairs)
+		}
+
 		// Cache resolved mode for use in ensureNewShardInfrastructure and pruneEmptyTailShards.
 		m.siteMu.Lock()
 		m.siteMode[site] = mode
