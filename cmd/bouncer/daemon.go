@@ -52,6 +52,28 @@ func runDaemon() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// Loading the firewall infrastructure and the first LAPI pull can take
+	// minutes on a large ban list. The health server starts first so
+	// container and Kubernetes probes see a live process meanwhile.
+	health, err := bouncer.NewHealth(cfg, ctrl, store, log)
+	if err != nil {
+		return fmt.Errorf("build health server: %w", err)
+	}
+	healthLn, err := health.Listen()
+	if err != nil {
+		return err
+	}
+	// The health server, the infrastructure repair and the bouncer can each
+	// end the daemon, so done has room for all three. Only failures are sent:
+	// a nil from a component stopped by the signal would end the shutdown
+	// wait before the bouncer has stopped.
+	done := make(chan error, 3)
+	go func() {
+		if err := health.Serve(ctx, healthLn); err != nil {
+			done <- err
+		}
+	}()
+
 	cfPairs, err := cloudflarePairs(cfg)
 	if err != nil {
 		return err
@@ -135,6 +157,7 @@ func runDaemon() error {
 		bans, err := store.BanList()
 		return len(bans), err
 	}
+	bnc.OnStartupSynced(health.MarkSynced)
 	gateReconciles(ctx, bnc.OnStartupSynced, banCount, startupReconcileFallback, func() {
 		go func() {
 			if cfg.FirewallReconcileOnStart {
@@ -149,9 +172,6 @@ func runDaemon() error {
 	// take minutes on a large ban list. They run alongside the decision stream
 	// and the health server, so new bans are applied and the health check
 	// answers meanwhile.
-	// A repair failure and the bouncer's own exit both end the daemon, so
-	// done has room for both.
-	done := make(chan error, 2)
 	go repairAndSyncWhitelist(ctx, cfg, ctrl, fwMgr, cfPairs, done, log)
 	go func() { done <- bnc.Run(ctx) }()
 	return awaitShutdown(ctx, cfg, done, log, webhookDone, recorderDone)

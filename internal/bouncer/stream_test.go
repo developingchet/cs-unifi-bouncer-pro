@@ -3,6 +3,7 @@ package bouncer
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +47,27 @@ func TestConsumeStream_OnStartupSyncedFiresOnceAfterFirstBatch(t *testing.T) {
 	}
 	if jobsAtSync != 1 {
 		t.Fatalf("OnStartupSynced fired with %d jobs applied, want 1 (after the first batch)", jobsAtSync)
+	}
+}
+
+func TestConsumeStream_OnStartupSyncedRunsEveryCallbackInOrder(t *testing.T) {
+	b := newTestBouncer(t, &config.Config{UnifiSites: []string{"default"}, BanTTL: time.Hour})
+	var order []string
+	b.OnStartupSynced(func() { order = append(order, "readiness") })
+	b.OnStartupSynced(func() { order = append(order, "reconcile") })
+
+	stream := make(chan *models.DecisionsStreamResponse)
+	runErr := make(chan error, 1)
+	done := make(chan error, 1)
+	go func() { done <- b.consumeStream(context.Background(), stream, runErr) }()
+	stream <- &models.DecisionsStreamResponse{}
+	stream <- &models.DecisionsStreamResponse{}
+	runErr <- context.Canceled
+	if err := <-done; err != nil {
+		t.Fatalf("consumeStream = %v, want nil on cancellation", err)
+	}
+	if got := strings.Join(order, ","); got != "readiness,reconcile" {
+		t.Fatalf("callbacks ran as %q, want %q", got, "readiness,reconcile")
 	}
 }
 

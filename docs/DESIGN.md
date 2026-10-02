@@ -305,10 +305,10 @@ last window's data is not lost.
 Three HTTP endpoints run on `HEALTH_ADDR` (default `:8081`):
 
 - `GET /healthz` — liveness probe; returns 200 if the process is running
-- `GET /readyz` — readiness probe; pings the UniFi controller and returns 200 only if the connection succeeds
+- `GET /readyz` — readiness probe; returns 503 `starting` until the first CrowdSec decision batch has been applied to UniFi, then pings the UniFi controller (and the LAPI when `HEALTH_CHECK_LAPI=true`) and returns 200 only if they answer
 - `GET /status/db` — a consistent copy of the ban database for the `status` command, which cannot open the file while the daemon holds its lock. It answers only requests from the same host that carry the token the daemon writes to `status.token` in `DATA_DIR`, and serves one copy at a time.
 
-`/healthz` and `/readyz` are used by the Docker `HEALTHCHECK` directive and Kubernetes probes.
+The health server starts before the firewall infrastructure is loaded, so `/healthz` answers while a large ban list is set up and pulled from the LAPI, which can take several minutes. The Docker `HEALTHCHECK` (through the `healthcheck` subcommand) and the Kubernetes liveness probe use `/healthz`; the Kubernetes readiness probe uses `/readyz`.
 
 ### Structured logging
 

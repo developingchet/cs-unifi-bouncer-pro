@@ -66,6 +66,6 @@ If you use the Prometheus Operator, create a `ServiceMonitor` targeting port `90
 | Path     | Port | Description                                     |
 |----------|------|-------------------------------------------------|
 | /healthz | 8081 | Liveness: process is running                    |
-| /readyz  | 8081 | Readiness: UniFi controller is reachable (Ping) |
+| /readyz  | 8081 | Readiness: first LAPI batch applied, UniFi controller reachable (Ping) |
 
 `/status/db` on the same port serves the ban database to `kubectl exec … status` inside the pod; it refuses requests without the token in `DATA_DIR/status.token`, so it does not need a Service port.

@@ -255,7 +255,8 @@ The bouncer will:
 
 ```bash
 docker ps --filter name=cs-unifi-bouncer-pro
-# Status should show "healthy" after the start_period (15 s)
+# Status should show "healthy" within the first check interval (30 s);
+# failed checks during the 120 s start_period are not counted
 ```
 
 #### Check startup logs
@@ -297,7 +298,7 @@ The `last_pull` column for `unifi-bouncer` should show a recent timestamp. It up
 
 ```bash
 curl -s http://localhost:8081/healthz    # Liveness — should return 200 OK
-curl -s http://localhost:8081/readyz    # Readiness — should return 200 OK
+curl -s http://localhost:8081/readyz    # Readiness — 200 OK once the first LAPI batch is applied ("starting" until then)
 ```
 
 #### Check Prometheus metrics
