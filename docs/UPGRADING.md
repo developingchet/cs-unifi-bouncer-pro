@@ -40,6 +40,18 @@ Kubernetes manifests, re-apply all of them:
   resync response. The pod also gets the `RuntimeDefault` seccomp profile and
   no service account token.
 
+systemd: copy the new `docs/systemd/cs-unifi-bouncer-pro.service` over the
+installed unit and run `systemctl daemon-reload`.
+
+- The unit now sets `HEALTH_ADDR=127.0.0.1:8081` and
+  `METRICS_ADDR=127.0.0.1:9090`. A remote Prometheus that scraped the host
+  stops reaching the metrics port; set `METRICS_ADDR` in the environment file
+  to an address it can reach. The environment file overrides the unit.
+- Added `UMask=0077`, `ProtectProc=invisible`, `ProcSubset=pid`,
+  `ProtectKernelLogs=yes`, `ProtectClock=yes`, `ProtectHostname=yes` and
+  `SystemCallArchitectures=native`. `ProtectProc` and `ProcSubset` need
+  systemd 247; remove them on an older release.
+
 ## From 2.0 to 2.1
 
 Building from source now requires Go 1.27.1 or newer.

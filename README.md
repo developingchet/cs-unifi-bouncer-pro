@@ -247,8 +247,8 @@ Imports a list from [borestad/blocklist-abuseipdb](https://github.com/borestad/b
 | `LOG_FORMAT` | `json` | `json` or `text` |
 | `DRY_RUN` | `false` | Safe testing mode. The bouncer connects to both the UniFi controller and CrowdSec LAPI, reads all existing state, and logs every action it *would* take — but makes zero write requests (no `POST`, `PUT`, or `DELETE` to UniFi) and does not mutate bbolt state. Reads (`GET`) are still performed so the diff output is meaningful. Turning off dry run after a dry run session starts cleanly with no phantom bbolt entries. |
 | `METRICS_ENABLED` | `true` | Expose Prometheus metrics endpoint |
-| `METRICS_ADDR` | `:9090` | Listen address for `/metrics` |
-| `HEALTH_ADDR` | `:8081` | Listen address for `/healthz` and `/readyz` |
+| `METRICS_ADDR` | `:9090` | Listen address for `/metrics`. The default binds all interfaces, which a container needs; on a host use `127.0.0.1:9090` |
+| `HEALTH_ADDR` | `:8081` | Listen address for `/healthz` and `/readyz`. The default binds all interfaces; on a host use `127.0.0.1:8081` |
 
 ---
 
@@ -663,7 +663,13 @@ The unit file enables a comprehensive set of systemd hardening directives:
 | `LockPersonality=yes` | ABI personality locked |
 | `MemoryDenyWriteExecute=yes` | No writable+executable memory mappings |
 | `RestrictRealtime=yes` | Real-time scheduling blocked |
+| `UMask=0077` | Created files are readable by the service user only |
+| `ProtectProc=invisible`, `ProcSubset=pid` | Other processes and non-process `/proc` entries hidden (systemd 247+) |
+| `ProtectKernelLogs=yes`, `ProtectClock=yes`, `ProtectHostname=yes` | No kernel log, clock or hostname access |
+| `SystemCallArchitectures=native` | Only the native syscall ABI is accepted |
 | `SystemCallFilter=@system-service` | Syscall allowlist (service profile) |
+
+The unit also sets `HEALTH_ADDR=127.0.0.1:8081` and `METRICS_ADDR=127.0.0.1:9090` so both endpoints are reachable from the host only; see [docs/systemd/README.md](docs/systemd/README.md#listen-addresses) to expose metrics to a remote Prometheus.
 
 State is stored in `/var/lib/cs-unifi-bouncer-pro/` (created automatically by `StateDirectory=`). Send `SIGHUP` via `systemctl reload cs-unifi-bouncer-pro` to hot-reload zone pairs.
 
