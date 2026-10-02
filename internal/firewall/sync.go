@@ -366,6 +366,16 @@ func (m *managerImpl) pruneEmptyTailShards(ctx context.Context, site string, v4,
 				}
 			}
 
+			// A ban may have been applied to the tail while its rule or policy
+			// was being deleted. Deleting the group would drop it, so keep the
+			// shard and have its rule or policy provisioned again.
+			if id, idx, ok := e.sm.PrunableTail(); !ok || id != unifiID || idx != shardIdx {
+				e.sm.MarkUnprovisioned(shardIdx)
+				m.log.Warn().Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
+					Msg("shard received a ban while being pruned; keeping it")
+				break pruneLoop
+			}
+
 			// Delete backing shard object from UniFi.
 			if err := e.sm.DeleteShardObject(ctx, unifiID); err != nil {
 				m.log.Error().Err(err).Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
