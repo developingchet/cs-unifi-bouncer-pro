@@ -782,6 +782,7 @@ Common causes:
 |-------------|-------|-----|
 | `webhook: delivery failed` (warn) | Network error or timeout | Verify the URL is reachable from the container; webhook errors are non-fatal |
 | `webhook: server returned error status` (warn) | The endpoint answered 4xx or 5xx | Check the endpoint's own logs |
+| `webhook: redirect not followed` (warn) | The endpoint answered with a 3xx; the bouncer never re-sends the payload to a redirect target | Set `WEBHOOK_URL` to the final URL, for example the `https://` form of an `http://` URL |
 | `webhook: queue full, event dropped` (warn) | The endpoint is too slow; more than 64 events are waiting | Check the endpoint's response time |
 | No log entries | `WEBHOOK_URL` is empty, the event is not listed in `WEBHOOK_EVENTS`, or the event has not happened | Set `WEBHOOK_URL`; add the event to `WEBHOOK_EVENTS` (or leave it empty for all events). `reconcile_drift` fires only when a periodic reconcile adds and removes 100 or more IPs in total |
 

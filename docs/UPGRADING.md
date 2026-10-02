@@ -52,6 +52,18 @@ installed unit and run `systemctl daemon-reload`.
   `SystemCallArchitectures=native`. `ProtectProc` and `ProcSubset` need
   systemd 247; remove them on an older release.
 
+Seccomp: if you run with a downloaded copy of `security/seccomp-unifi.json`,
+download it again. `clone` is now allowed only without namespace flags and
+`clone3` returns `ENOSYS`, so the runtime creates threads through `clone`. A
+profile of your own that allows `clone3` keeps working.
+
+`/readyz` caches its result for 5 seconds. A dependency that recovers is
+reported ready up to 5 seconds later.
+
+A webhook endpoint that answers with a redirect no longer receives the event:
+the redirect is logged and not followed, so point `WEBHOOK_URL` at the final
+URL. An `http://` `WEBHOOK_URL` logs a warning at startup.
+
 ## From 2.0 to 2.1
 
 Building from source now requires Go 1.27.1 or newer.
