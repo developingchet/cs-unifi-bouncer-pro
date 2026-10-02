@@ -188,11 +188,59 @@ func TestStage8_DeleteIgnoresMinDuration(t *testing.T) {
 	cfg := NewFilterConfig()
 	cfg.MinBanDuration = 24 * time.Hour
 
-	// delete actions are always allowed regardless of duration
-	d := makeDecision("delete", "ip", "1.2.3.4", "ssh-bf", "crowdsec", "1m")
-	r := Filter(d, cfg, zerolog.Nop())
+	// deletions are applied regardless of duration
+	d := makeDecision("ban", "ip", "1.2.3.4", "ssh-bf", "crowdsec", "1m")
+	r := FilterDeleted(d, cfg, zerolog.Nop())
 	if !r.Passed {
-		t.Error("delete action should pass regardless of min duration")
+		t.Error("deletion should pass regardless of min duration")
+	}
+}
+
+// A decision in the stream's new list is a ban. One of another type, such as
+// "delete", must not slip past the ban-only stages and be applied as a ban.
+func TestFilter_NewDecisionOfOtherTypeIsDropped(t *testing.T) {
+	cfg := NewFilterConfig()
+	cfg.AllowedOrigins = []string{"crowdsec"}
+	for _, tt := range []struct {
+		name, action, value, origin string
+	}{
+		{"delete type", "delete", "198.51.100.1", "crowdsec"},
+		{"delete type on private address", "delete", "10.1.2.3", "crowdsec"},
+		{"delete type from unlisted origin", "delete", "198.51.100.1", "cscli"},
+		{"upper-case delete type", "DELETE", "198.51.100.1", "crowdsec"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := makeDecision(tt.action, "ip", tt.value, "ssh-bf", tt.origin, "4h")
+			if r := Filter(d, cfg, zerolog.Nop()); r.Passed {
+				t.Fatalf("new %q decision passed: %+v", tt.action, r)
+			}
+		})
+	}
+}
+
+func TestFilter_NonPositiveBanDurationIsDropped(t *testing.T) {
+	for _, tt := range []struct {
+		duration string
+		want     bool
+	}{
+		{"4h", true},
+		{"0s", false},
+		{"-5m", false},
+		{"-3h59m59.5s", false},
+	} {
+		t.Run(tt.duration, func(t *testing.T) {
+			d := makeDecision("ban", "ip", "198.51.100.1", "ssh-bf", "crowdsec", tt.duration)
+			if got := Filter(d, NewFilterConfig(), zerolog.Nop()).Passed; got != tt.want {
+				t.Fatalf("Passed = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFilterDeleted_NonPositiveDurationStillPasses(t *testing.T) {
+	d := makeDecision("ban", "ip", "198.51.100.1", "ssh-bf", "crowdsec", "-5m")
+	if !FilterDeleted(d, NewFilterConfig(), zerolog.Nop()).Passed {
+		t.Fatal("a deletion must be applied whatever duration the stream reports")
 	}
 }
 
