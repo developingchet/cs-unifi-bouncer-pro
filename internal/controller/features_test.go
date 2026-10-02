@@ -65,6 +65,46 @@ func TestHasFeature_ZoneFirewall_ZoneCount(t *testing.T) {
 	}
 }
 
+// TestHasFeature_ZoneFirewall_LegacySiteWithAPIKey covers the integration
+// API's answer for a site that still runs the legacy firewall (no gateway, or
+// not migrated): a 400 with a specific code, which means legacy mode. Any
+// other 400 is still an error.
+func TestHasFeature_ZoneFirewall_LegacySiteWithAPIKey(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{"zone firewall not configured means legacy",
+			`{"statusCode":400,"statusName":"BAD_REQUEST","code":"api.firewall.zone-based-firewall-not-configured","message":"Zone Based Firewall is not configured"}`,
+			false},
+		{"other bad request is reported",
+			`{"statusCode":400,"statusName":"BAD_REQUEST","code":"api.request.invalid","message":"Invalid request"}`,
+			true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = fmt.Fprint(w, tt.body)
+			}))
+			defer srv.Close()
+
+			c := newTestClient(srv.URL, "api-key")
+			setSiteIDCache(c, "default", testSiteUUID)
+
+			got, err := hasFeature(context.Background(), c, "default", FeatureZoneBasedFirewall)
+			if got {
+				t.Error("hasFeature = true, want false")
+			}
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, want error %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // TestHasFeature_ZoneFirewall_Session covers username/password logins, which
 // cannot use the integration API and read the classic zone list instead.
 func TestHasFeature_ZoneFirewall_Session(t *testing.T) {

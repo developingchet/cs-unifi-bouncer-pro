@@ -81,7 +81,7 @@ func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool,
 		resp, err := c.apiDo(ctx, req, "feature/zone-detect")
 		if err != nil {
 			var notFound *ErrNotFound
-			if errors.As(err, &notFound) {
+			if errors.As(err, &notFound) || zoneFirewallNotConfigured(err) {
 				supported = false
 				return nil
 			}
@@ -107,6 +107,21 @@ func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool,
 		return nil
 	})
 	return supported, callErr
+}
+
+// zoneFirewallNotConfigured reports whether err is the integration API's 400
+// for a site that still runs the legacy firewall, which is what a controller
+// without a gateway, or one not yet migrated to zones, answers.
+func zoneFirewallNotConfigured(err error) bool {
+	var bad *ErrBadRequest
+	if !errors.As(err, &bad) {
+		return false
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	return json.Unmarshal([]byte(bad.Body), &body) == nil &&
+		body.Code == "api.firewall.zone-based-firewall-not-configured"
 }
 
 // detectZoneFirewallWithSession uses the session-accessible zone list. No
