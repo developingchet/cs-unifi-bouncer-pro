@@ -25,16 +25,18 @@ type AuthConfig struct {
 	ReauthMinGap  time.Duration
 }
 
-// UniFi OS refuses every login, the right password included, for several
-// minutes after five failed attempts. A controller that is still starting
-// fails logins it would otherwise accept, so failed attempts are spaced out
-// rather than repeated on every request that gets a 401.
+// UniFi OS refuses every login, the right password included, after a handful
+// of failed attempts, and keeps refusing until it has seen no attempts for
+// well over ten minutes. A controller that is still starting fails logins it
+// would otherwise accept, so failed attempts are spaced out rather than
+// repeated on every request that gets a 401.
 const (
 	loginBackoffInitial = 15 * time.Second
 	loginBackoffMax     = 5 * time.Minute
 	// loginLockoutWait applies when a login is refused with 429 and no
-	// Retry-After header, which is how UniFi OS reports the lockout.
-	loginLockoutWait = 5 * time.Minute
+	// Retry-After header, which is how UniFi OS reports the lockout. Retrying
+	// sooner keeps the lockout in place.
+	loginLockoutWait = 15 * time.Minute
 )
 
 // sessionManager guards re-authentication with a mutex to prevent thundering herd.
