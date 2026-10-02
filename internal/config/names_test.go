@@ -25,6 +25,7 @@ func TestValidateRejectsUnusableSettings(t *testing.T) {
 		{"negative reconcile interval", func(c *Config) { c.FirewallReconcileInterval = -time.Second }, "FIREWALL_RECONCILE_INTERVAL must not be negative"},
 		{"negative re-auth gap", func(c *Config) { c.SessionReauthMinGap = -time.Second }, "SESSION_REAUTH_MIN_GAP must not be negative"},
 		{"metrics and health on one port", func(c *Config) { c.MetricsAddr = ":8081" }, `METRICS_ADDR and HEALTH_ADDR must differ`},
+		{"empty health address", func(c *Config) { c.HealthAddr = "" }, "HEALTH_ADDR must not be empty"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
