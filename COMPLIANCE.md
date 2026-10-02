@@ -13,6 +13,13 @@ hardening of deployed containers. It describes the current
 Every release tag (`v*.*.*`) triggers `.github/workflows/release.yml`. The
 controls below are applied to every published artifact.
 
+### Release Source Checks
+
+Job `verify` fails the release unless the tagged commit is reachable from
+`origin/main` (`git merge-base --is-ancestor`). Release jobs do not restore
+the Go or Docker build caches, so a cache entry written by an earlier workflow
+run cannot reach a released artifact.
+
 ### Trivy Vulnerability Scan
 
 Job `docker-scan`, step **"Trivy vulnerability scan"**
@@ -23,6 +30,11 @@ Job `docker-scan`, step **"Trivy vulnerability scan"**
   vulnerabilities at `HIGH` or `CRITICAL` severity are found.
 - `ignore-unfixed: true` — vulnerabilities with no available fix do not block
   the release.
+
+Job `docker-push` then scans the pushed multi-arch image by digest, once per
+platform (`linux/amd64`, `linux/arm64`, `linux/arm/v7`), with the same
+settings. The scans run before signing and before the version tags are
+published.
 
 ### Cosign Keyless Image Signing
 
@@ -36,6 +48,21 @@ workflow identity.
 cosign verify developingchet/cs-unifi-bouncer-pro:2.1.0 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
+```
+
+### Build Provenance
+
+Job `docker-push`, step **"Attest image build provenance"**, and job
+`release`, step **"Attest binary build provenance"**
+(`actions/attest-build-provenance` v4.2.2, pinned by commit SHA), record SLSA
+provenance for the image digest and for the release binaries, signed through
+GitHub Actions OIDC. The image attestation is also pushed to the registry.
+
+```bash
+gh attestation verify oci://developingchet/cs-unifi-bouncer-pro:2.1.0 \
+  --repo developingchet/cs-unifi-bouncer-pro
+gh attestation verify cs-unifi-bouncer-pro-linux-amd64 \
+  --repo developingchet/cs-unifi-bouncer-pro
 ```
 
 ### CycloneDX SBOM
@@ -155,6 +182,7 @@ the SHA references in the workflow files are the source of truth.
 
 | Action | Upstream version | Workflows |
 |--------|------------------|-----------|
+| `actions/attest-build-provenance` | v4.2.2 | release |
 | `actions/checkout` | v7.0.1 | CI, release, Socket, Scorecard |
 | `actions/download-artifact` | v8 | release |
 | `actions/setup-go` | v7 | CI, release |
