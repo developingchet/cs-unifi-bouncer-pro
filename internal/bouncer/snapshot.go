@@ -16,8 +16,11 @@ import (
 )
 
 // snapshotWriteTimeout replaces the health server's short write timeout for a
-// snapshot, which grows with the ban list.
-const snapshotWriteTimeout = 5 * time.Minute
+// snapshot, which grows with the ban list. It also bounds how long the
+// snapshot's database read transaction stays open: a client that reads
+// slowly is cut off rather than holding the transaction, and with it the
+// database file's free pages, for longer.
+const snapshotWriteTimeout = 30 * time.Second
 
 const (
 	// DBSnapshotPath serves a consistent copy of the ban database to the
@@ -40,10 +43,11 @@ type snapshotWriter interface {
 
 // snapshotServer answers DBSnapshotPath, one request at a time.
 type snapshotServer struct {
-	store snapshotWriter
-	token string
-	busy  chan struct{}
-	log   zerolog.Logger
+	store        snapshotWriter
+	token        string
+	busy         chan struct{}
+	writeTimeout time.Duration
+	log          zerolog.Logger
 }
 
 // newSnapshotServer writes a fresh token to dataDir. It returns nil when the
@@ -61,7 +65,8 @@ func newSnapshotServer(store any, dataDir string, log zerolog.Logger) (*snapshot
 	if err := writeTokenFile(filepath.Join(dataDir, SnapshotTokenFile), token); err != nil {
 		return nil, err
 	}
-	return &snapshotServer{store: sw, token: token, busy: make(chan struct{}, 1), log: log}, nil
+	RemoveStaleSnapshots(dataDir, log)
+	return &snapshotServer{store: sw, token: token, busy: make(chan struct{}, 1), writeTimeout: snapshotWriteTimeout, log: log}, nil
 }
 
 // writeTokenFile writes token to path, readable by its owner only. Opening
@@ -106,11 +111,12 @@ func (s *snapshotServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "a snapshot is already being written", http.StatusTooManyRequests)
 		return
 	}
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(snapshotWriteTimeout)); err != nil {
-		s.log.Warn().Err(err).Msg("cannot extend the write deadline for a database snapshot; a large one may be cut off")
+	deadline := time.Now().Add(s.writeTimeout)
+	if err := http.NewResponseController(w).SetWriteDeadline(deadline); err != nil {
+		s.log.Warn().Err(err).Msg("cannot set the write deadline for a database snapshot; a slow client is cut off between writes only")
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	if _, err := s.store.WriteSnapshot(w); err != nil {
+	if _, err := s.store.WriteSnapshot(&deadlineWriter{w: w, deadline: deadline}); err != nil {
 		s.log.Warn().Err(err).Msg("database snapshot for status failed")
 	}
 }

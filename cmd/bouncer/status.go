@@ -19,6 +19,7 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/bouncer"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
+	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 )
 
@@ -56,6 +57,7 @@ snapshot from the bouncer's health server instead.`,
 // its health server instead; that works from inside the bouncer's container
 // (docker exec) or network namespace.
 func withReadOnlyStore(dataDir string, fn func(storage.Store) error) error {
+	bouncer.RemoveStaleSnapshots(dataDir, zerolog.Nop())
 	store, err := storage.NewBboltStoreReadOnly(dataDir)
 	if errors.Is(err, storage.ErrDatabaseLocked) {
 		return withSnapshotStore(dataDir, fn)
@@ -104,7 +106,7 @@ func fetchDBSnapshot(ctx context.Context, dataDir string) (string, error) {
 		return "", fmt.Errorf("read status token: %w", err)
 	}
 	snapshotURL := strings.TrimSuffix(healthURL, "/healthz") + bouncer.DBSnapshotPath
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, snapshotURL, nil)
 	if err != nil {
@@ -119,7 +121,7 @@ func fetchDBSnapshot(ctx context.Context, dataDir string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("%s returned HTTP %d", bouncer.DBSnapshotPath, resp.StatusCode)
 	}
-	f, err := os.CreateTemp(dataDir, "bouncer.db.status-*")
+	f, err := os.CreateTemp(dataDir, bouncer.SnapshotTempPrefix+"*")
 	if err != nil {
 		return "", err
 	}
