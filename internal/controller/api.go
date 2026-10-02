@@ -303,9 +303,36 @@ func doDELETE(ctx context.Context, c *unifiClient, url, endpoint string) error {
 	})
 }
 
+// requireSegment rejects a value that cannot name a single object in a URL
+// path. An empty ID turns an object URL into its collection URL, so a DELETE
+// or PUT would hit the whole collection, and "." or ".." lets a path climb
+// out of the endpoint.
+func requireSegment(label, value string) error {
+	switch value {
+	case "":
+		return fmt.Errorf("%s is empty", label)
+	case ".", "..":
+		return fmt.Errorf("%s %q is not a valid path segment", label, value)
+	}
+	return nil
+}
+
+// requireSegments applies requireSegment to label, value pairs in order.
+func requireSegments(labelValuePairs ...string) error {
+	for i := 0; i+1 < len(labelValuePairs); i += 2 {
+		if err := requireSegment(labelValuePairs[i], labelValuePairs[i+1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // --- Firewall Groups (legacy REST) ------------------------------------------
 
 func listFirewallGroups(ctx context.Context, c *unifiClient, site string) ([]FirewallGroup, error) {
+	if err := requireSegment("site", site); err != nil {
+		return nil, err
+	}
 	data, err := doGET(ctx, c, c.groupEndpoint(site), "list-groups")
 	if err != nil {
 		return nil, err
@@ -322,6 +349,9 @@ func listFirewallGroups(ctx context.Context, c *unifiClient, site string) ([]Fir
 }
 
 func createFirewallGroup(ctx context.Context, c *unifiClient, site string, g FirewallGroup) (FirewallGroup, error) {
+	if err := requireSegment("site", site); err != nil {
+		return FirewallGroup{}, err
+	}
 	payload := apiGroup{
 		Name:         g.Name,
 		GroupType:    g.GroupType,
@@ -339,19 +369,28 @@ func createFirewallGroup(ctx context.Context, c *unifiClient, site string, g Fir
 }
 
 func updateFirewallGroup(ctx context.Context, c *unifiClient, site string, g FirewallGroup) error {
+	if err := requireSegments("site", site, "firewall group ID", g.ID); err != nil {
+		return err
+	}
 	payload := apiGroup(g)
-	u := c.groupEndpoint(site) + "/" + g.ID
+	u := c.groupEndpoint(site) + "/" + url.PathEscape(g.ID)
 	return doPUT(ctx, c, u, "update-group", payload)
 }
 
 func deleteFirewallGroup(ctx context.Context, c *unifiClient, site, id string) error {
-	u := c.groupEndpoint(site) + "/" + id
+	if err := requireSegments("site", site, "firewall group ID", id); err != nil {
+		return err
+	}
+	u := c.groupEndpoint(site) + "/" + url.PathEscape(id)
 	return ignoreNotFound(doDELETE(ctx, c, u, "delete-group"))
 }
 
 // --- Firewall Rules (legacy REST) -------------------------------------------
 
 func listFirewallRules(ctx context.Context, c *unifiClient, site string) ([]FirewallRule, error) {
+	if err := requireSegment("site", site); err != nil {
+		return nil, err
+	}
 	data, err := doGET(ctx, c, c.ruleEndpoint(site), "list-rules")
 	if err != nil {
 		return nil, err
@@ -368,6 +407,9 @@ func listFirewallRules(ctx context.Context, c *unifiClient, site string) ([]Fire
 }
 
 func createFirewallRule(ctx context.Context, c *unifiClient, site string, r FirewallRule) (FirewallRule, error) {
+	if err := requireSegment("site", site); err != nil {
+		return FirewallRule{}, err
+	}
 	payload := apiRule{
 		Name:                r.Name,
 		Enabled:             r.Enabled,
@@ -397,13 +439,19 @@ func createFirewallRule(ctx context.Context, c *unifiClient, site string, r Fire
 }
 
 func updateFirewallRule(ctx context.Context, c *unifiClient, site string, r FirewallRule) error {
+	if err := requireSegments("site", site, "firewall rule ID", r.ID); err != nil {
+		return err
+	}
 	payload := apiRule(r)
-	u := c.ruleEndpoint(site) + "/" + r.ID
+	u := c.ruleEndpoint(site) + "/" + url.PathEscape(r.ID)
 	return doPUT(ctx, c, u, "update-rule", payload)
 }
 
 func deleteFirewallRule(ctx context.Context, c *unifiClient, site, id string) error {
-	u := c.ruleEndpoint(site) + "/" + id
+	if err := requireSegments("site", site, "firewall rule ID", id); err != nil {
+		return err
+	}
+	u := c.ruleEndpoint(site) + "/" + url.PathEscape(id)
 	return ignoreNotFound(doDELETE(ctx, c, u, "delete-rule"))
 }
 
@@ -589,6 +637,9 @@ func discoverSitesWithSession(ctx context.Context, c *unifiClient) ([]string, er
 // listFirewallZones fetches all zones from the integration v1 API.
 // siteID must be the site UUID (from getSiteID), not the site name.
 func listFirewallZones(ctx context.Context, c *unifiClient, siteID string) ([]Zone, error) {
+	if err := requireSegment("site ID", siteID); err != nil {
+		return nil, err
+	}
 	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/zones", siteID)
 	data, err := listAllV1Pages(ctx, c, endpointURL, "list-zones")
 	if err != nil {
@@ -608,6 +659,9 @@ func listFirewallZones(ctx context.Context, c *unifiClient, siteID string) ([]Zo
 // --- Traffic Matching Lists (integration v1) ---------------------------------
 
 func listTMLs(ctx context.Context, c *unifiClient, siteID string) ([]TrafficMatchingList, error) {
+	if err := requireSegment("site ID", siteID); err != nil {
+		return nil, err
+	}
 	endpointURL := c.networkURL("/integration/v1/sites/%s/traffic-matching-lists", siteID)
 	data, err := listAllV1Pages(ctx, c, endpointURL, "list-tmls")
 	if err != nil {
@@ -625,6 +679,9 @@ func listTMLs(ctx context.Context, c *unifiClient, siteID string) ([]TrafficMatc
 }
 
 func createTML(ctx context.Context, c *unifiClient, siteID string, list TrafficMatchingList) (TrafficMatchingList, error) {
+	if err := requireSegment("site ID", siteID); err != nil {
+		return TrafficMatchingList{}, err
+	}
 	endpointURL := c.networkURL("/integration/v1/sites/%s/traffic-matching-lists", siteID)
 	raw, err := doPOSTv2(ctx, c, endpointURL, "create-tml", tmlToWire(list))
 	if err != nil {
@@ -638,11 +695,17 @@ func createTML(ctx context.Context, c *unifiClient, siteID string, list TrafficM
 }
 
 func updateTML(ctx context.Context, c *unifiClient, siteID string, list TrafficMatchingList) error {
+	if err := requireSegments("site ID", siteID, "traffic matching list ID", list.ID); err != nil {
+		return err
+	}
 	endpointURL := c.networkURL("/integration/v1/sites/%s/traffic-matching-lists/%s", siteID, list.ID)
 	return doPUT(ctx, c, endpointURL, "update-tml", tmlToWireUpdate(list))
 }
 
 func deleteTML(ctx context.Context, c *unifiClient, siteID, id string) error {
+	if err := requireSegments("site ID", siteID, "traffic matching list ID", id); err != nil {
+		return err
+	}
 	endpointURL := c.networkURL("/integration/v1/sites/%s/traffic-matching-lists/%s", siteID, id)
 	return ignoreNotFound(doDELETE(ctx, c, endpointURL, "delete-tml"))
 }
@@ -704,6 +767,9 @@ func tmlFromWire(t apiTMLV1) TrafficMatchingList {
 // --- Zone Policies (integration v1) -----------------------------------------
 
 func listZonePoliciesV1(ctx context.Context, c *unifiClient, siteID string) ([]ZonePolicy, error) {
+	if err := requireSegment("site ID", siteID); err != nil {
+		return nil, err
+	}
 	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/policies", siteID)
 	data, err := listAllV1Pages(ctx, c, endpointURL, "list-policies")
 	if err != nil {
@@ -721,6 +787,9 @@ func listZonePoliciesV1(ctx context.Context, c *unifiClient, siteID string) ([]Z
 }
 
 func createZonePolicyV1(ctx context.Context, c *unifiClient, siteID string, policy ZonePolicy) (ZonePolicy, error) {
+	if err := requireSegment("site ID", siteID); err != nil {
+		return ZonePolicy{}, err
+	}
 	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/policies", siteID)
 	raw, err := doPOSTv2(ctx, c, endpointURL, "create-policy", modelToV1Policy(policy))
 	if err != nil {
@@ -734,11 +803,17 @@ func createZonePolicyV1(ctx context.Context, c *unifiClient, siteID string, poli
 }
 
 func updateZonePolicyV1(ctx context.Context, c *unifiClient, siteID string, policy ZonePolicy) error {
+	if err := requireSegments("site ID", siteID, "zone policy ID", policy.ID); err != nil {
+		return err
+	}
 	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/policies/%s", siteID, policy.ID)
 	return doPUT(ctx, c, endpointURL, "update-policy", modelToV1PolicyUpdate(policy))
 }
 
 func deleteZonePolicyV1(ctx context.Context, c *unifiClient, siteID, id string) error {
+	if err := requireSegments("site ID", siteID, "zone policy ID", id); err != nil {
+		return err
+	}
 	endpointURL := c.networkURL("/integration/v1/sites/%s/firewall/policies/%s", siteID, id)
 	return ignoreNotFound(doDELETE(ctx, c, endpointURL, "delete-policy"))
 }

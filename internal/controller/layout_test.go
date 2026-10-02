@@ -139,3 +139,25 @@ func TestStandaloneClientPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestNetworkURLEscapesStringArguments(t *testing.T) {
+	c := &unifiClient{cfg: ClientConfig{BaseURL: "https://ctl.example"}, layout: layoutUniFiOS}
+	tests := []struct {
+		name   string
+		format string
+		args   []any
+		want   string
+	}{
+		{"plain segment", "/api/s/%s/rest/x", []any{"default"}, "https://ctl.example/proxy/network/api/s/default/rest/x"},
+		{"slash and query characters", "/api/s/%s/rest/x", []any{"a/b?c#d"}, "https://ctl.example/proxy/network/api/s/a%2Fb%3Fc%23d/rest/x"},
+		{"query in the format is kept", "/sites/%s/zones?limit=1", []any{"x y"}, "https://ctl.example/proxy/network/sites/x%20y/zones?limit=1"},
+		{"non-string arguments pass through", "/n/%d", []any{7}, "https://ctl.example/proxy/network/n/7"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := c.networkURL(tt.format, tt.args...); got != tt.want {
+				t.Errorf("networkURL = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
