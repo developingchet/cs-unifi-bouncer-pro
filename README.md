@@ -687,8 +687,8 @@ Manifests are provided under `docs/kubernetes/`. Full instructions are in [docs/
 |------|----------|
 | `docs/kubernetes/deployment.yaml` | `Deployment` (1 replica, Recreate strategy) with liveness/readiness probes, resource limits, securityContext, and PVC mount |
 | `docs/kubernetes/pvc.yaml` | `PersistentVolumeClaim` for `/data` (bbolt) |
-| `docs/kubernetes/secret.example.yaml` | `Secret` template — copy, fill in values, do **not** commit |
-| `docs/kubernetes/networkpolicy.yaml` | `NetworkPolicy` — restricts ingress/egress to metrics (9090), health (8081), UniFi (443), LAPI (8080), and DNS (53) |
+| `docs/kubernetes/secret.example.yaml` | `Secret` (credentials, mounted as files and read through the `*_FILE` settings) and `ConfigMap` (other settings) templates — copy, fill in values, do **not** commit |
+| `docs/kubernetes/networkpolicy.yaml` | `NetworkPolicy` — ingress to the metrics port (9090) from the monitoring namespace only; egress to cluster DNS, the UniFi controller, and the LAPI. The peers are placeholders to adjust for your cluster |
 
 **Quick deploy:**
 

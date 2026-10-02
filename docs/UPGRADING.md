@@ -34,6 +34,25 @@ lists fewer than half of its previous entries is applied without pruning. See
 `BLOCKLIST_MIN_PREFIX_V4` (default `8`) and `BLOCKLIST_MIN_PREFIX_V6` (default
 `32`) set the shortest prefix accepted for a feed entry.
 
+Kubernetes manifests, re-apply all of them:
+
+- `secret.example.yaml` now defines a Secret and a ConfigMap. The Secret holds
+  only `UNIFI_API_KEY`, `UNIFI_USERNAME`, `UNIFI_PASSWORD` and
+  `CROWDSEC_LAPI_KEY`; the Deployment mounts it as files under
+  `/run/secrets/cs-unifi-bouncer-pro` and sets the matching `*_FILE` variables
+  instead of loading the Secret with `envFrom`. Everything else (`UNIFI_URL`,
+  `CROWDSEC_LAPI_URL`, `ZONE_PAIRS`, and any setting you added to the Secret)
+  moves to the ConfigMap, which the Deployment loads with `envFrom`. A
+  Deployment applied without the new ConfigMap does not start.
+- `networkpolicy.yaml` no longer allows ingress on the health port or from
+  every source on the metrics port: metrics are reachable from the `monitoring`
+  namespace only. Egress is limited to cluster DNS, one controller address and
+  the CrowdSec LAPI pods. Edit the marked placeholders before applying, or the
+  bouncer loses its controller or LAPI connection.
+- The memory limit rises from 256Mi to 512Mi, above the 256 MiB cap on a LAPI
+  resync response. The pod also gets the `RuntimeDefault` seccomp profile and
+  no service account token.
+
 ## From 2.0 to 2.1
 
 Building from source now requires Go 1.27.1 or newer.
