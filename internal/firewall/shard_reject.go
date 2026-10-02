@@ -56,6 +56,17 @@ func (sm *ShardManager) withoutRejected(shard *Shard, ips []string) []string {
 	return out
 }
 
+// refusedMembers returns the members the controller has refused for shard.
+func (sm *ShardManager) refusedMembers(shard *Shard) []string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	refused := make([]string, 0, len(shard.rejected))
+	for ip := range shard.rejected {
+		refused = append(refused, ip)
+	}
+	return refused
+}
+
 func (sm *ShardManager) rejectMember(shard *Shard, member string) {
 	sm.mu.Lock()
 	if shard.rejected == nil {
