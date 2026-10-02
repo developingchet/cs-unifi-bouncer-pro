@@ -32,6 +32,9 @@ func (zm *ZoneManager) policiesByID(ctx context.Context, site string) (map[strin
 func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards, v6Shards *ShardManager) error {
 	zm.opMu.Lock()
 	defer zm.opMu.Unlock()
+	if len(zm.cfg.ZonePairs) == 0 {
+		return errNoZonePairs
+	}
 	zoneMap, err := zm.zoneMapForSite(site)
 	if err != nil {
 		return err

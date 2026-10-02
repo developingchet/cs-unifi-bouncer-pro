@@ -589,8 +589,14 @@ func (c *Config) validateFirewall() error {
 
 	// Validate zone pairs if mode is zone or auto
 	if c.FirewallMode != "legacy" {
-		if _, err := c.ParseZonePairs(); err != nil {
+		pairs, err := c.ParseZonePairs()
+		if err != nil {
 			return fmt.Errorf("ZONE_PAIRS: %w", err)
+		}
+		// With no pairs, every block policy the bouncer manages would be
+		// treated as belonging to a removed pair and deleted.
+		if c.FirewallMode == "zone" && len(pairs) == 0 {
+			return fmt.Errorf("ZONE_PAIRS must name at least one src->dst zone pair when FIREWALL_MODE=zone")
 		}
 	}
 	return nil

@@ -555,6 +555,21 @@ func TestInvalidZonePairs(t *testing.T) {
 	}
 }
 
+// An empty ZONE_PAIRS in zone mode would make the bouncer delete every block
+// policy it manages as an orphan, so it is refused at startup.
+func TestZoneModeRejectsEmptyZonePairs(t *testing.T) {
+	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
+	setEnv(t, "UNIFI_API_KEY", "key")
+	setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
+	setEnv(t, "FIREWALL_MODE", "zone")
+	setEnv(t, "ZONE_PAIRS", "")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "ZONE_PAIRS") {
+		t.Fatalf("Load() error = %v, want an error naming ZONE_PAIRS", err)
+	}
+}
+
 func TestZoneModeRequiresAPIKey(t *testing.T) {
 	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
 	setEnv(t, "UNIFI_USERNAME", "admin")

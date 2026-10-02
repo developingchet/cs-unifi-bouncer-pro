@@ -23,6 +23,11 @@ type ZoneConfig struct {
 	APIWriteDelay    time.Duration
 }
 
+// errNoZonePairs is returned instead of acting on an empty zone pair set:
+// every block policy the bouncer manages would look like it belongs to a
+// removed pair, and the orphan sweep would delete all of them.
+var errNoZonePairs = errors.New("no zone pairs configured; refusing to manage zone policies, which would delete every block policy")
+
 // ZoneManager manages zone-based firewall policies.
 type ZoneManager struct {
 	cfg   ZoneConfig
@@ -117,6 +122,9 @@ func (zm *ZoneManager) Bootstrap(ctx context.Context, sites []string) error {
 // live cache is updated only if every zone resolves successfully (validate-then-commit).
 // Safe to call concurrently with read operations.
 func (zm *ZoneManager) Reload(ctx context.Context, sites []string, pairs []config.ZonePair) error {
+	if len(pairs) == 0 {
+		return fmt.Errorf("reload: %w", errNoZonePairs)
+	}
 	zm.opMu.Lock()
 	defer zm.opMu.Unlock()
 	// Stage all resolutions before acquiring the write lock.

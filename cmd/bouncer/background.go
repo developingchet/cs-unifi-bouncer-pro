@@ -112,6 +112,11 @@ func reloadZones(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager
 		log.Warn().Err(err).Msg("SIGHUP: parse zone pairs failed")
 		return
 	}
+	if len(newPairs) == 0 {
+		// Applying an empty set would delete every block policy as an orphan.
+		log.Error().Msg("SIGHUP: ZONE_PAIRS names no zone pair; keeping the current zone pairs")
+		return
+	}
 	zm := fwMgr.ZoneManager()
 	if zm == nil {
 		log.Warn().Msg("SIGHUP: ZoneManager not available (legacy mode?), skipping reload")
