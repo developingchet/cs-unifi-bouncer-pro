@@ -14,15 +14,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history, so the tagged commit can be compared with main.
+          fetch-depth: 0
+      # Release builds do not restore the Go build or module cache: a cache
+      # entry written by an earlier, less trusted workflow run would otherwise
+      # end up in the released artifacts.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
       - name: Validate release tag
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+      - name: Require the tagged commit to be on main
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$RELEASE_SHA" FETCH_HEAD; then
+            echo "::error::Tagged commit $RELEASE_SHA is not reachable from origin/main; releases are cut from main only."
+            exit 1
+          fi
       - name: Verify module checksums
         run: go mod verify
       - name: Test source
@@ -55,7 +70,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
 
       - name: Build binary
         env:
@@ -142,6 +157,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      attestations: write  # build provenance
+      packages: write      # push-to-registry stores the attestation next to the image
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -188,8 +205,45 @@ jobs:
             VERSION=${{ github.ref_name }}
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ github.event.repository.updated_at }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+
+      # The image the registry serves, by digest and for every platform, not
+      # only the amd64 build scanned before the push. Runs before signing and
+      # before the version tags are published, so a failing scan stops the release.
+      - name: Trivy scan of the pushed image (linux/amd64)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/amd64
+          TRIVY_IMAGE_SRC: remote
+        with:
+          image-ref: developingchet/cs-unifi-bouncer-pro@${{ steps.build.outputs.digest }}
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          version: v0.69.2
+
+      - name: Trivy scan of the pushed image (linux/arm64)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/arm64
+          TRIVY_IMAGE_SRC: remote
+        with:
+          image-ref: developingchet/cs-unifi-bouncer-pro@${{ steps.build.outputs.digest }}
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          skip-setup-trivy: true
+
+      - name: Trivy scan of the pushed image (linux/arm/v7)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/arm/v7
+          TRIVY_IMAGE_SRC: remote
+        with:
+          image-ref: developingchet/cs-unifi-bouncer-pro@${{ steps.build.outputs.digest }}
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          skip-setup-trivy: true
 
       - name: Generate SBOM (CycloneDX)
         timeout-minutes: 10
@@ -210,6 +264,15 @@ jobs:
             --predicate cs-unifi-bouncer-pro.sbom.cyclonedx.json \
             --type cyclonedx \
             developingchet/cs-unifi-bouncer-pro@${{ steps.build.outputs.digest }}
+
+      # SLSA build provenance, signed through the same GitHub OIDC identity as
+      # the cosign signature and stored next to the image in the registry.
+      - name: Attest image build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: index.docker.io/developingchet/cs-unifi-bouncer-pro
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -244,7 +307,8 @@ jobs:
     needs: [build-binaries, docker-push]
     permissions:
       contents: write
-      id-token: write  # cosign keyless signing of the release files
+      id-token: write      # cosign keyless signing of the release files
+      attestations: write  # build provenance of the binaries
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -278,6 +342,11 @@ jobs:
         working-directory: dist/
         run: cosign sign-blob --yes --bundle checksums.txt.sigstore.json checksums.txt
 
+      - name: Attest binary build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/cs-unifi-bouncer-pro-linux-*
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v2
         with:
@@ -310,6 +379,13 @@ jobs:
               --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
               --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
             sha256sum --ignore-missing -c checksums.txt
+            ```
+
+            The image and the binaries also carry SLSA build provenance, verifiable with the GitHub CLI:
+
+            ```bash
+            gh attestation verify oci://developingchet/cs-unifi-bouncer-pro:${{ github.ref_name }} --repo developingchet/cs-unifi-bouncer-pro
+            gh attestation verify cs-unifi-bouncer-pro-linux-amd64 --repo developingchet/cs-unifi-bouncer-pro
             ```
           files: |
             dist/cs-unifi-bouncer-pro-linux-amd64
