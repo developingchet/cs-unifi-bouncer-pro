@@ -407,7 +407,17 @@ func deleteFirewallRule(ctx context.Context, c *unifiClient, site, id string) er
 
 // --- Integration v1 helpers -------------------------------------------------
 
+const (
+	// maxV1Pages and maxV1Items bound a paginated listing so that a controller
+	// which never reports the end of a list cannot hold the caller in the loop
+	// or grow the result without limit. Real sites hold a few hundred objects
+	// per collection.
+	maxV1Pages = 500
+	maxV1Items = 100_000
+)
+
 // listAllV1Pages fetches all pages from an integration v1 paginated endpoint.
+// It fails once a listing exceeds maxV1Pages pages or maxV1Items items.
 func listAllV1Pages(ctx context.Context, c *unifiClient, endpointURL, metricEndpoint string) ([]json.RawMessage, error) {
 	const pageLimit = 200
 	base, err := url.Parse(endpointURL)
@@ -416,7 +426,10 @@ func listAllV1Pages(ctx context.Context, c *unifiClient, endpointURL, metricEndp
 	}
 	var all []json.RawMessage
 	offset := 0
-	for {
+	for pages := 1; ; pages++ {
+		if pages > maxV1Pages {
+			return nil, fmt.Errorf("%s pagination exceeded %d pages without reaching the end of the list", metricEndpoint, maxV1Pages)
+		}
 		u := *base
 		q := u.Query()
 		q.Set("offset", strconv.Itoa(offset))
@@ -438,6 +451,9 @@ func listAllV1Pages(ctx context.Context, c *unifiClient, endpointURL, metricEndp
 		})
 		if err != nil {
 			return nil, err
+		}
+		if len(all)+len(page.Data) > maxV1Items {
+			return nil, fmt.Errorf("%s pagination exceeded %d items", metricEndpoint, maxV1Items)
 		}
 		all = append(all, page.Data...)
 		if len(page.Data) == 0 || (page.TotalCount > 0 && offset+page.Count >= page.TotalCount) {
