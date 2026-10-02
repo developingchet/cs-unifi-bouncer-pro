@@ -135,7 +135,7 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 	}
 	c.session = newSessionManager(authCfg, httpClient, log)
 
-	if err := c.session.EnsureAuth(ctx); err != nil {
+	if err := c.session.InitialAuth(ctx); err != nil {
 		return nil, fmt.Errorf("initial login: %w", err)
 	}
 	return c, nil

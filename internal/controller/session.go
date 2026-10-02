@@ -25,18 +25,21 @@ type AuthConfig struct {
 	ReauthMinGap  time.Duration
 }
 
-// UniFi OS refuses every login, the right password included, after a handful
-// of failed attempts, and keeps refusing until it has seen no attempts for
-// well over ten minutes. A controller that is still starting fails logins it
-// would otherwise accept, so failed attempts are spaced out rather than
-// repeated on every request that gets a 401.
+// A controller that is still starting fails logins it would otherwise accept,
+// so failed attempts are spaced out rather than repeated on every request
+// that gets a 401.
+//
+// UniFi OS answers 429 without Retry-After in two cases that look the same:
+// more than five successful logins in a minute, which clears within the
+// minute, and a handful of failed logins, after which it refuses even the
+// right password until it has seen no attempts for well over ten minutes.
+// Consecutive 429s therefore wait from loginLimitWaitInitial up to
+// loginLimitWaitMax, which outlasts the lockout.
 const (
-	loginBackoffInitial = 15 * time.Second
-	loginBackoffMax     = 5 * time.Minute
-	// loginLockoutWait applies when a login is refused with 429 and no
-	// Retry-After header, which is how UniFi OS reports the lockout. Retrying
-	// sooner keeps the lockout in place.
-	loginLockoutWait = 15 * time.Minute
+	loginBackoffInitial   = 15 * time.Second
+	loginBackoffMax       = 5 * time.Minute
+	loginLimitWaitInitial = time.Minute
+	loginLimitWaitMax     = 16 * time.Minute
 )
 
 // sessionManager guards re-authentication with a mutex to prevent thundering herd.
@@ -46,12 +49,15 @@ type sessionManager struct {
 	http       *http.Client
 	csrfToken  string // cached from X-Csrf-Token response header
 	lastReauth time.Time
-	// loginFailures counts consecutive failed logins; no login is attempted
-	// before retryLoginAt, and EnsureAuth returns lastLoginErr instead.
+	// loginFailures counts consecutive failed logins and loginLimited the
+	// 429s among them; no login is attempted before retryLoginAt, and
+	// EnsureAuth returns lastLoginErr instead.
 	loginFailures int
+	loginLimited  int
 	retryLoginAt  time.Time
 	lastLoginErr  error
 	now           func() time.Time
+	sleep         func(context.Context, time.Duration) error
 	log           zerolog.Logger
 }
 
@@ -60,11 +66,40 @@ func newSessionManager(cfg AuthConfig, httpClient *http.Client, log zerolog.Logg
 		cfg.LoginPath = layoutUniFiOS.loginPath
 	}
 	return &sessionManager{
-		cfg:  cfg,
-		http: httpClient,
-		now:  time.Now,
-		log:  log,
+		cfg:   cfg,
+		http:  httpClient,
+		now:   time.Now,
+		sleep: sleepContext,
+		log:   log,
 	}
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// InitialAuth logs in for a new client. Short-lived commands log in on every
+// run, so they can meet the controller's limit on successful logins; a wait
+// of up to loginLimitWaitInitial is taken once rather than failing.
+func (s *sessionManager) InitialAuth(ctx context.Context) error {
+	err := s.EnsureAuth(ctx)
+	var rateLimited *ErrRateLimit
+	if !errors.As(err, &rateLimited) || rateLimited.RetryAfter > loginLimitWaitInitial {
+		return err
+	}
+	s.log.Warn().Stringer("retry_in", rateLimited.RetryAfter).
+		Msg("UniFi login rate limited; waiting before one more attempt")
+	if err := s.sleep(ctx, rateLimited.RetryAfter); err != nil {
+		return fmt.Errorf("wait for login rate limit: %w", err)
+	}
+	return s.EnsureAuth(ctx)
 }
 
 // EnsureAuth is called by client.go only when a 401 response is detected.
@@ -104,6 +139,7 @@ func (s *sessionManager) EnsureAuth(ctx context.Context) error {
 	metrics.ReauthTotal.Inc()
 	s.lastReauth = s.now()
 	s.loginFailures = 0
+	s.loginLimited = 0
 	s.lastLoginErr = nil
 	s.log.Debug().Msg("re-authenticated with UniFi controller")
 	return nil
@@ -111,21 +147,33 @@ func (s *sessionManager) EnsureAuth(ctx context.Context) error {
 
 // recordLoginFailure must be called with s.mu held. It schedules the next
 // login attempt and returns how long until then: doubling from
-// loginBackoffInitial up to loginBackoffMax, or longer when the controller
-// asked for it with a 429.
+// loginBackoffInitial up to loginBackoffMax, or longer for a 429, by its
+// Retry-After or, without one, by the loginLimitWait schedule. The
+// ErrRateLimit is updated to carry the wait.
 func (s *sessionManager) recordLoginFailure(err error) time.Duration {
 	s.loginFailures++
-	wait := loginBackoffMax
-	if shift := s.loginFailures - 1; shift < 8 {
-		wait = min(loginBackoffInitial<<shift, loginBackoffMax)
-	}
+	wait := doubling(loginBackoffInitial, loginBackoffMax, s.loginFailures)
 	var rateLimited *ErrRateLimit
 	if errors.As(err, &rateLimited) {
-		wait = max(wait, rateLimited.RetryAfter)
+		s.loginLimited++
+		if rateLimited.RetryAfter <= 0 {
+			rateLimited.RetryAfter = doubling(loginLimitWaitInitial, loginLimitWaitMax, s.loginLimited)
+		}
+		rateLimited.RetryAfter = max(rateLimited.RetryAfter, wait)
+		wait = rateLimited.RetryAfter
 	}
 	s.retryLoginAt = s.now().Add(wait)
 	s.lastLoginErr = err
 	return wait
+}
+
+// doubling returns initial doubled for each attempt after the first, capped
+// at limit.
+func doubling(initial, limit time.Duration, attempt int) time.Duration {
+	if shift := attempt - 1; shift < 16 {
+		return min(initial<<shift, limit)
+	}
+	return limit
 }
 
 // SetAuthHeader applies auth credentials to an outgoing request.
@@ -199,7 +247,8 @@ func (s *sessionManager) login(ctx context.Context) error {
 
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests:
-		wait := loginLockoutWait
+		// Without Retry-After the wait is left to recordLoginFailure.
+		var wait time.Duration
 		if h := resp.Header.Get("Retry-After"); h != "" {
 			wait = parseRetryAfter(h, s.now())
 		}

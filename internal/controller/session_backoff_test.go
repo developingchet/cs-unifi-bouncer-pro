@@ -135,14 +135,23 @@ func TestEnsureAuthSpacesOutFailedLogins(t *testing.T) {
 	}
 }
 
-func TestEnsureAuthWaitsOutLoginLockout(t *testing.T) {
+func TestEnsureAuthWaitsOutLoginLimit(t *testing.T) {
 	tests := []struct {
-		name     string
-		header   http.Header
-		wantWait time.Duration
+		name      string
+		header    http.Header
+		wantWaits []time.Duration // per consecutive 429
 	}{
-		{"no Retry-After, as UniFi OS sends", nil, loginLockoutWait},
-		{"Retry-After in seconds", http.Header{"Retry-After": {"120"}}, 120 * time.Second},
+		{
+			"no Retry-After, as UniFi OS sends", nil,
+			[]time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute,
+				loginLimitWaitMax, loginLimitWaitMax},
+		},
+		{
+			"Retry-After in seconds", http.Header{"Retry-After": {"120"}},
+			// The failed-login backoff overtakes Retry-After from the fifth.
+			[]time.Duration{120 * time.Second, 120 * time.Second, 120 * time.Second, 120 * time.Second,
+				4 * time.Minute, loginBackoffMax},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -151,29 +160,93 @@ func TestEnsureAuthWaitsOutLoginLockout(t *testing.T) {
 			})
 			clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
 			sm := newBackoffSession(t, srv, clock)
+			ctx := context.Background()
 
-			err := sm.EnsureAuth(context.Background())
-			var rateLimited *ErrRateLimit
-			if !errors.As(err, &rateLimited) {
-				t.Fatalf("error = %v, want ErrRateLimit", err)
-			}
-			if rateLimited.RetryAfter != tt.wantWait {
-				t.Fatalf("RetryAfter = %s, want %s", rateLimited.RetryAfter, tt.wantWait)
-			}
-
-			clock.advance(tt.wantWait - time.Second)
-			err = sm.EnsureAuth(context.Background())
-			if !errors.As(err, &rateLimited) {
-				t.Fatalf("deferred error = %v, want the ErrRateLimit kept", err)
-			}
-			if got := atomic.LoadInt32(logins); got != 1 {
-				t.Fatalf("logins inside the lockout = %d, want 1", got)
-			}
-			clock.advance(time.Second)
-			_ = sm.EnsureAuth(context.Background())
-			if got := atomic.LoadInt32(logins); got != 2 {
-				t.Fatalf("logins after the lockout = %d, want 2", got)
+			for i, want := range tt.wantWaits {
+				err := sm.EnsureAuth(ctx)
+				var rateLimited *ErrRateLimit
+				if !errors.As(err, &rateLimited) {
+					t.Fatalf("429 %d: error = %v, want ErrRateLimit", i+1, err)
+				}
+				if rateLimited.RetryAfter != want {
+					t.Fatalf("429 %d: RetryAfter = %s, want %s", i+1, rateLimited.RetryAfter, want)
+				}
+				clock.advance(want - time.Second)
+				if err := sm.EnsureAuth(ctx); !errors.As(err, &rateLimited) {
+					t.Fatalf("429 %d: deferred error = %v, want the ErrRateLimit kept", i+1, err)
+				}
+				if got := atomic.LoadInt32(logins); got != int32(i+1) {
+					t.Fatalf("429 %d: logins inside the wait = %d, want %d", i+1, got, i+1)
+				}
+				clock.advance(time.Second)
 			}
 		})
+	}
+}
+
+func TestInitialAuthWaitsOnceForLoginLimit(t *testing.T) {
+	var limited atomic.Int32
+	srv, logins := loginServer(t, func(*http.Request) (int, http.Header) {
+		if limited.Add(-1) >= 0 {
+			return http.StatusTooManyRequests, nil
+		}
+		return http.StatusOK, nil
+	})
+
+	tests := []struct {
+		name       string
+		limited    int32
+		wantErr    bool
+		wantLogins int32
+		wantSlept  time.Duration
+	}{
+		{"accepted at once", 0, false, 1, 0},
+		{"limited once, then accepted", 1, false, 2, loginLimitWaitInitial},
+		{"still limited after the wait", 2, true, 2, loginLimitWaitInitial},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			limited.Store(tt.limited)
+			atomic.StoreInt32(logins, 0)
+			clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+			sm := newBackoffSession(t, srv, clock)
+			var slept time.Duration
+			sm.sleep = func(_ context.Context, d time.Duration) error {
+				slept += d
+				clock.advance(d)
+				return nil
+			}
+
+			err := sm.InitialAuth(context.Background())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("InitialAuth error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got := atomic.LoadInt32(logins); got != tt.wantLogins {
+				t.Fatalf("logins = %d, want %d", got, tt.wantLogins)
+			}
+			if slept != tt.wantSlept {
+				t.Fatalf("slept %s, want %s", slept, tt.wantSlept)
+			}
+		})
+	}
+}
+
+func TestInitialAuthDoesNotWaitOutLongLimits(t *testing.T) {
+	srv, logins := loginServer(t, func(*http.Request) (int, http.Header) {
+		return http.StatusTooManyRequests, http.Header{"Retry-After": {"600"}}
+	})
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	sm := newBackoffSession(t, srv, clock)
+	sm.sleep = func(context.Context, time.Duration) error {
+		t.Fatal("InitialAuth slept for a ten-minute Retry-After")
+		return nil
+	}
+
+	var rateLimited *ErrRateLimit
+	if err := sm.InitialAuth(context.Background()); !errors.As(err, &rateLimited) {
+		t.Fatalf("error = %v, want ErrRateLimit", err)
+	}
+	if got := atomic.LoadInt32(logins); got != 1 {
+		t.Fatalf("logins = %d, want 1", got)
 	}
 }
