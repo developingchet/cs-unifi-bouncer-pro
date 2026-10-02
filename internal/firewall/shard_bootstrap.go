@@ -3,6 +3,7 @@ package firewall
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -42,7 +43,9 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	cached := maps.Clone(candidates)
 	sm.addAPICandidates(api, candidates)
+	sm.unknownObjects = sm.unrecordedNames(candidates, cached)
 	ordered, err := sm.resolveShardIndices(candidates, indices, known)
 	if err != nil {
 		return err
@@ -161,6 +164,35 @@ func (sm *ShardManager) collectCachedCandidates(allGroups map[string]storage.Gro
 		}
 	}
 	return candidates, indices, known, nil
+}
+
+// unrecordedNames returns, sorted, the names in candidates that are not in
+// cached and that this site and family's name template renders for some
+// shard. Such objects exist on the controller without this instance's
+// database knowing them: either the database was lost, or another bouncer
+// instance uses the same templates.
+func (sm *ShardManager) unrecordedNames(candidates, cached map[string]struct{}) []string {
+	var names []string
+	for name := range candidates {
+		if _, known := cached[name]; known {
+			continue
+		}
+		if _, ok := sm.shardIndexForName(name); ok {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// TakeUnknownObjects returns and clears the names of controller objects this
+// instance's templates render but its database has no record of.
+func (sm *ShardManager) TakeUnknownObjects() []string {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	names := sm.unknownObjects
+	sm.unknownObjects = nil
+	return names
 }
 
 // addAPICandidates adds the names of controller objects that match this

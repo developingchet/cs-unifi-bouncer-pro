@@ -154,13 +154,23 @@ Each template is rendered at startup. Startup fails if a template cannot be rend
 
 ### Multi-instance example
 
+Two bouncer instances can manage the same UniFi site only if their name templates differ. The templates are the only thing that tells one instance's groups, rules and policies from the other's; an instance adopts any object whose name its templates render, and deletes the ones its database no longer expects. Give every instance distinct `GROUP_NAME_TEMPLATE`, `RULE_NAME_TEMPLATE` and `POLICY_NAME_TEMPLATE` values, with a literal prefix that is not shared:
+
 ```bash
 # Instance A (production)
 GROUP_NAME_TEMPLATE=crowdsec-prod-{{.Family}}-{{.Index}}
+RULE_NAME_TEMPLATE=crowdsec-prod-drop-{{.Family}}-{{.Index}}
+POLICY_NAME_TEMPLATE=crowdsec-prod-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}
 
 # Instance B (staging)
 GROUP_NAME_TEMPLATE=crowdsec-staging-{{.Family}}-{{.Index}}
+RULE_NAME_TEMPLATE=crowdsec-staging-drop-{{.Family}}-{{.Index}}
+POLICY_NAME_TEMPLATE=crowdsec-staging-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}
 ```
+
+The per-pair port and destination-IP filter lists (`crowdsec-ports-*`, `crowdsec-dstips-*`) and the Cloudflare whitelist objects (`crowdsec-whitelist-cloudflare-*`) have fixed names that the templates do not change. Use `ZONE_PAIRS` port or destination-IP filters and `CLOUDFLARE_WHITELIST_ENABLED` on only one instance per site.
+
+At startup the bouncer logs a warning when the controller holds groups or lists named like its own that its database has no record of; see [Troubleshooting](TROUBLESHOOTING.md#log-warns-that-objects-exist-that-the-database-has-no-record-of).
 
 **Warning**: Changing templates in a running deployment renames managed objects. The bouncer will recreate them with the new names and may lose track of objects created under the old names. Plan renames carefully.
 

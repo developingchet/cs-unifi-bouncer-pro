@@ -223,6 +223,7 @@ func (m *managerImpl) LoadInfrastructure(ctx context.Context, sites []string) er
 			return fmt.Errorf("ensure v4 shards for site %s: %w", site, err)
 		}
 
+		m.warnUnrecordedObjects(site, v4)
 		// Clean up placeholder-only (orphaned) groups found in UniFi
 		m.cleanupOrphanedShardGroups(ctx, site, mode, v4)
 
@@ -237,6 +238,7 @@ func (m *managerImpl) LoadInfrastructure(ctx context.Context, sites []string) er
 				return fmt.Errorf("ensure v6 shards for site %s: %w", site, err)
 			}
 
+			m.warnUnrecordedObjects(site, v6)
 			// Clean up placeholder-only (orphaned) groups found in UniFi
 			m.cleanupOrphanedShardGroups(ctx, site, mode, v6)
 			m.mu.Lock()
@@ -295,6 +297,22 @@ func (m *managerImpl) wireShardManager(site string, ipv6 bool, sm *ShardManager)
 		}
 		return nil
 	})
+}
+
+// warnUnrecordedObjects logs controller objects that carry this instance's
+// names but that its database has no record of. Two bouncer instances on one
+// site with the same name templates adopt, rewrite and delete each other's
+// objects, and this is the only sign of it before that happens.
+func (m *managerImpl) warnUnrecordedObjects(site string, sm *ShardManager) {
+	names := sm.TakeUnknownObjects()
+	if len(names) == 0 {
+		return
+	}
+	m.log.Warn().Str("site", site).Str("family", sm.family).Int("objects", len(names)).
+		Strs("examples", names[:min(len(names), 5)]).
+		Msg("controller objects named like this instance's own exist that its database has no record of; " +
+			"they are adopted, but if another bouncer instance manages this site, give each instance distinct " +
+			"GROUP_NAME_TEMPLATE, RULE_NAME_TEMPLATE and POLICY_NAME_TEMPLATE values")
 }
 
 // cleanupOrphanedShardGroups deletes placeholder-only (orphaned) groups found

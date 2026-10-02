@@ -176,6 +176,11 @@ type ShardManager struct {
 	// These groups should be deleted (policies/rules first, then the group).
 	// Guarded by mu.
 	orphanedGroups []orphanedGroup
+
+	// unknownObjects holds the names of controller objects that this
+	// instance's templates render but its database has no record of, found by
+	// the last EnsureShards. Guarded by mu.
+	unknownObjects []string
 }
 
 // NewShardManager creates a ShardManager. Call EnsureShards to initialize from the API.
