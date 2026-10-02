@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
@@ -32,6 +33,22 @@ func (sm *ShardManager) PrunableTail() (unifiID string, shardIdx int, ok bool) {
 	return last.ID, last.Index, true
 }
 
+// forgetShardMetrics deletes the per-shard metric series of a shard that no
+// longer exists, so scrapes stop reporting its last values as if it were live.
+// The size and occupancy gauges are labelled with the shard name; the rest
+// with its index.
+func (sm *ShardManager) forgetShardMetrics(shard *Shard) {
+	family := Family(sm.ipv6)
+	index := strconv.Itoa(shard.Index)
+	metrics.FirewallGroupSize.DeleteLabelValues(family, shard.Name, sm.site)
+	metrics.ShardOccupancy.DeleteLabelValues(family, shard.Name, sm.site)
+	metrics.ShardIPCount.DeleteLabelValues(family, index, sm.site)
+	metrics.ShardSyncDuration.DeleteLabelValues(family, index, sm.site)
+	for _, result := range []string{"ok", "error"} {
+		metrics.ShardSyncTotal.DeleteLabelValues(family, index, sm.site, result)
+	}
+}
+
 // RemoveTail removes the last shard from in-memory slice and bbolt.
 // Call only after the API group has been successfully deleted.
 //
@@ -56,6 +73,7 @@ func (sm *ShardManager) RemoveTail() error {
 		}
 	}
 	family.Shards = family.Shards[:n-1]
+	sm.forgetShardMetrics(last)
 	for _, ip := range stranded {
 		sm.addIPLocked(ip)
 	}
@@ -250,6 +268,8 @@ func (sm *ShardManager) drainShard(ctx context.Context, shard *Shard) error {
 			delete(family.ipOwner, ip)
 		}
 	}
+	sm.forgetShardMetrics(shard)
+	sm.updateMetricsLocked()
 	sm.mu.Unlock()
 
 	// 6. Increment rebalanced-shards metric.
