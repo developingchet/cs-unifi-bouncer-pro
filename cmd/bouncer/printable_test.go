@@ -16,7 +16,7 @@ func TestPrintable(t *testing.T) {
 		{"newline and tab", "a\nb\tc", `a\nb\tc`},
 		{"NUL and DEL", "a\x00b\x7f", `a\x00b\x7f`},
 		{"C1 control", "a\u009bb", "a\\u009bb"},
-		{"bidi override", "evil‮gpj.exe", "evil\\u202egpj.exe"},
+		{"bidi override", "evil\u202egpj.exe", "evil\\u202egpj.exe"},
 		{"invalid UTF-8", "a\xffb", `a\xffb`},
 	}
 	for _, tt := range tests {
