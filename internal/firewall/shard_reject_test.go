@@ -88,3 +88,77 @@ func TestSyncShard_UnnamedBadRequestIsNotABreakerFailure(t *testing.T) {
 		t.Fatalf("400 counted %d sync errors against the breaker", syncErrors)
 	}
 }
+
+// TestSyncShard_RefusedMemberDoesNotRewriteTheShardEveryTick: a member the
+// controller refuses stays in the desired set, but it must not keep the shard
+// dirty, or the whole shard is written again on every tick.
+func TestSyncShard_RefusedMemberDoesNotRewriteTheShardEveryTick(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	ctrl.RefuseGroupMember("203.0.113.77/32")
+	sm := NewShardManager(testSite, false, 10, testNamer(t), ctrl, testutil.NewMockStore(), zerolog.Nop(), 0, false, "legacy")
+	ctx := context.Background()
+	for _, ip := range []string{"198.51.100.1", "203.0.113.77/32"} {
+		if err := sm.AddIP(ctx, ip); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sm.FlushDirty(ctx); err != nil {
+		t.Fatalf("FlushDirty: %v", err)
+	}
+	shard := sm.fam.Shards[0]
+	if shard.IPs.IsDirty() {
+		t.Fatal("shard is still dirty after every acceptable member was written")
+	}
+
+	writes := ctrl.Calls("UpdateFirewallGroup")
+	for range 3 {
+		if err := sm.FlushDirty(ctx); err != nil {
+			t.Fatalf("FlushDirty: %v", err)
+		}
+	}
+	if got := ctrl.Calls("UpdateFirewallGroup"); got != writes {
+		t.Errorf("UpdateFirewallGroup calls grew from %d to %d across idle ticks", writes, got)
+	}
+
+	// A new member still triggers a write, which keeps leaving the refused one out.
+	if err := sm.AddIP(ctx, "198.51.100.2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sm.FlushDirty(ctx); err != nil {
+		t.Fatalf("FlushDirty: %v", err)
+	}
+	if got := ctrl.Calls("UpdateFirewallGroup"); got != writes+1 {
+		t.Errorf("UpdateFirewallGroup calls = %d, want %d after one new member", got, writes+1)
+	}
+	if shard.IPs.IsDirty() {
+		t.Error("shard dirty again after the follow-up write")
+	}
+}
+
+// TestMarkRemoteDriftIgnoresRefusedMembers: the controller never holds a
+// refused member, so its absence is not drift.
+func TestMarkRemoteDriftIgnoresRefusedMembers(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	ctrl.RefuseGroupMember("203.0.113.77/32")
+	sm := NewShardManager(testSite, false, 10, testNamer(t), ctrl, testutil.NewMockStore(), zerolog.Nop(), 0, false, "legacy")
+	ctx := context.Background()
+	for _, ip := range []string{"198.51.100.1", "203.0.113.77/32"} {
+		if err := sm.AddIP(ctx, ip); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sm.FlushDirty(ctx); err != nil {
+		t.Fatalf("FlushDirty: %v", err)
+	}
+
+	missing, extra, err := sm.MarkRemoteDrift(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing != 0 || extra != 0 {
+		t.Errorf("drift = %d missing, %d extra; want none", missing, extra)
+	}
+	if sm.fam.Shards[0].IPs.IsDirty() {
+		t.Error("shard marked dirty by drift detection")
+	}
+}

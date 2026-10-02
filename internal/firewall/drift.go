@@ -3,6 +3,7 @@ package firewall
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 )
@@ -81,7 +82,12 @@ func (sm *ShardManager) MarkRemoteDrift(ctx context.Context) (missing, extra int
 			// Deleted out of band; startup reconciliation recreates it.
 			continue
 		}
-		m, e := diffMembers(shard.IPs.Members(), members)
+		// Members the controller refused are never written, so they are not missing.
+		held := slices.DeleteFunc(shard.IPs.Members(), func(ip string) bool {
+			_, refused := shard.rejected[ip]
+			return refused
+		})
+		m, e := diffMembers(held, members)
 		if m == 0 && e == 0 {
 			continue
 		}

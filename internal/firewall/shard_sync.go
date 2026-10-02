@@ -253,7 +253,7 @@ func (sm *ShardManager) markCreatedActive(shard *Shard) {
 // commitSyncedMembers records sentMembers as the shard's flushed content and
 // caches them in bbolt.
 func (sm *ShardManager) commitSyncedMembers(shard *Shard, sentMembers []string, shardLabel string) {
-	shard.IPs.CommitFlushed(sentMembers)
+	shard.IPs.CommitFlushedExcept(sentMembers, sm.refusedMembers(shard))
 	metrics.ShardIPCount.WithLabelValues(shard.Family, shardLabel, sm.site).Set(float64(len(sentMembers)))
 	if err := sm.store.SetGroup(cacheKey(sm.site, shard.Name), storage.GroupRecord{
 		UnifiID: shard.ID,
