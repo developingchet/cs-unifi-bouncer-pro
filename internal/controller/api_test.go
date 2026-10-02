@@ -1213,6 +1213,98 @@ func makeV1PageOf(n, totalCount int) []byte {
 	return []byte(fmt.Sprintf(`{"data":[%s],"count":%d,"totalCount":%d}`, strings.Join(items, ","), n, totalCount))
 }
 
+func TestRequestsRejectUnusablePathSegments(t *testing.T) {
+	ctx := context.Background()
+	const goodSite = "default"
+	ops := map[string]func(c *unifiClient, site, id string) error{
+		"update group": func(c *unifiClient, site, id string) error {
+			return updateFirewallGroup(ctx, c, site, FirewallGroup{ID: id})
+		},
+		"delete group": func(c *unifiClient, site, id string) error { return deleteFirewallGroup(ctx, c, site, id) },
+		"update rule": func(c *unifiClient, site, id string) error {
+			return updateFirewallRule(ctx, c, site, FirewallRule{ID: id})
+		},
+		"delete rule": func(c *unifiClient, site, id string) error { return deleteFirewallRule(ctx, c, site, id) },
+		"update TML": func(c *unifiClient, site, id string) error {
+			return updateTML(ctx, c, site, TrafficMatchingList{ID: id})
+		},
+		"delete TML": func(c *unifiClient, site, id string) error { return deleteTML(ctx, c, site, id) },
+		"update policy": func(c *unifiClient, site, id string) error {
+			return updateZonePolicyV1(ctx, c, site, ZonePolicy{ID: id})
+		},
+		"delete policy": func(c *unifiClient, site, id string) error { return deleteZonePolicyV1(ctx, c, site, id) },
+	}
+	for name, op := range ops {
+		for _, bad := range []string{"", ".", ".."} {
+			t.Run(fmt.Sprintf("%s with id %q", name, bad), func(t *testing.T) {
+				requests := 0
+				srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
+				defer srv.Close()
+				if err := op(newTestClient(srv.URL, "key"), goodSite, bad); err == nil {
+					t.Error("expected an error for an unusable ID")
+				}
+				if requests != 0 {
+					t.Errorf("sent %d requests, want none", requests)
+				}
+			})
+			t.Run(fmt.Sprintf("%s with site %q", name, bad), func(t *testing.T) {
+				requests := 0
+				srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
+				defer srv.Close()
+				if err := op(newTestClient(srv.URL, "key"), bad, "id-1"); err == nil {
+					t.Error("expected an error for an unusable site")
+				}
+				if requests != 0 {
+					t.Errorf("sent %d requests, want none", requests)
+				}
+			})
+		}
+	}
+}
+
+func TestRequestPathsEscapeDynamicSegments(t *testing.T) {
+	ctx := context.Background()
+	const awkward = "a b/c?d#e%f"
+	const escaped = "a%20b%2Fc%3Fd%23e%25f"
+	tests := []struct {
+		name string
+		call func(c *unifiClient) error
+		want string
+	}{
+		{"list groups", func(c *unifiClient) error { _, err := listFirewallGroups(ctx, c, awkward); return err },
+			"/proxy/network/api/s/" + escaped + "/rest/firewallgroup"},
+		{"update group", func(c *unifiClient) error {
+			return updateFirewallGroup(ctx, c, awkward, FirewallGroup{ID: awkward})
+		}, "/proxy/network/api/s/" + escaped + "/rest/firewallgroup/" + escaped},
+		{"delete rule", func(c *unifiClient) error { return deleteFirewallRule(ctx, c, awkward, awkward) },
+			"/proxy/network/api/s/" + escaped + "/rest/firewallrule/" + escaped},
+		{"delete TML", func(c *unifiClient) error { return deleteTML(ctx, c, awkward, awkward) },
+			"/proxy/network/integration/v1/sites/" + escaped + "/traffic-matching-lists/" + escaped},
+		{"update policy", func(c *unifiClient) error {
+			return updateZonePolicyV1(ctx, c, awkward, ZonePolicy{ID: awkward})
+		}, "/proxy/network/integration/v1/sites/" + escaped + "/firewall/policies/" + escaped},
+		{"list zones", func(c *unifiClient) error { _, err := listFirewallZones(ctx, c, awkward); return err },
+			"/proxy/network/integration/v1/sites/" + escaped + "/firewall/zones"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.EscapedPath()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(makeV1Page())
+			}))
+			defer srv.Close()
+			if err := tt.call(newTestClient(srv.URL, "key")); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if gotPath != tt.want {
+				t.Errorf("path: got %q, want %q", gotPath, tt.want)
+			}
+		})
+	}
+}
+
 func TestLegacyEnvelopeError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

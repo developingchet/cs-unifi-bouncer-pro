@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 )
 
 // apiLayout describes where the Network application's endpoints live.
@@ -82,6 +83,15 @@ func classicErrorArg(body []byte) string {
 }
 
 // networkURL joins the base URL, the layout's Network API prefix, and path.
+// String arguments fill path segments (site names, UUIDs, object IDs) and are
+// escaped so a "/", "?" or "#" in one cannot change which endpoint is hit.
 func (c *unifiClient) networkURL(format string, args ...any) string {
-	return c.cfg.BaseURL + c.layout.networkPrefix + fmt.Sprintf(format, args...)
+	escaped := make([]any, len(args))
+	for i, arg := range args {
+		if s, ok := arg.(string); ok {
+			arg = url.PathEscape(s)
+		}
+		escaped[i] = arg
+	}
+	return c.cfg.BaseURL + c.layout.networkPrefix + fmt.Sprintf(format, escaped...)
 }
