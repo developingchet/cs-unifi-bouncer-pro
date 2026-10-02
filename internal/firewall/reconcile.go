@@ -32,17 +32,31 @@ func (m *managerImpl) Reconcile(ctx context.Context, sites []string) (*Reconcile
 // IPs missing from sm and removes members no longer in desired. If ctx is
 // cancelled partway through, it returns the counts accumulated so far with
 // ctx.Err() appended to errs.
+//
+// desired was read some time ago, and decisions keep being applied while a
+// large diff runs. Each change is therefore confirmed against the ban database
+// just before it is made, so a ban recorded since the snapshot is not removed
+// and a ban lifted since is not added back.
 func (m *managerImpl) diffFamily(ctx context.Context, sm *ShardManager, desired map[string]struct{}) (added, removed int, errs []error) {
 	for ip := range desired {
 		if ctx.Err() != nil {
 			return added, removed, append(errs, ctx.Err())
 		}
-		if !sm.Contains(ip) {
-			if _, _, err := sm.Add(ctx, ip); err != nil {
-				errs = append(errs, err)
-			} else {
-				added++
-			}
+		if sm.Contains(ip) {
+			continue
+		}
+		recorded, err := m.store.BanExists(ip)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("re-read ban %s: %w", ip, err))
+			continue
+		}
+		if !recorded {
+			continue
+		}
+		if _, _, err := sm.Add(ctx, ip); err != nil {
+			errs = append(errs, err)
+		} else {
+			added++
 		}
 	}
 
