@@ -3,6 +3,7 @@ package bouncer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,6 +51,8 @@ func (b *Bouncer) runPeriodicResync(ctx context.Context) {
 // ban expires (BAN_TTL at the latest).
 func (b *Bouncer) resync(ctx context.Context) error {
 	start := time.Now()
+	b.resyncDeleted.begin()
+	defer b.resyncDeleted.end()
 	decisions, err := b.fetchActiveDecisions(ctx)
 	if err != nil {
 		return err
@@ -93,23 +96,70 @@ func (b *Bouncer) fetchActiveDecisions(ctx context.Context) ([]*models.Decision,
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("list decisions: LAPI returned %s", resp.Status)
 	}
-	return decodeDecisions(io.LimitReader(resp.Body, resyncMaxBody+1))
+	return decodeDecisions(resp.Body)
 }
 
-// decodeDecisions parses a decision list. The LAPI answers "null" when there
-// are no active decisions. A body over resyncMaxBody is an error rather than
-// a silently truncated list.
-func decodeDecisions(r io.Reader) ([]*models.Decision, error) {
-	body, err := io.ReadAll(r)
-	if err != nil {
-		return nil, fmt.Errorf("read decision list: %w", err)
+var errDecisionListTooLarge = errors.New("decision list too large")
+
+// cappedReader fails once more than max bytes have been read, so an oversized
+// body is an error rather than a silently truncated list.
+type cappedReader struct {
+	r    io.Reader
+	left int64
+}
+
+func (c *cappedReader) Read(p []byte) (int, error) {
+	if c.left < 0 {
+		return 0, errDecisionListTooLarge
 	}
-	if len(body) > resyncMaxBody {
+	if int64(len(p)) > c.left+1 {
+		p = p[:c.left+1]
+	}
+	n, err := c.r.Read(p)
+	c.left -= int64(n)
+	if c.left < 0 {
+		return n, errDecisionListTooLarge
+	}
+	return n, err
+}
+
+// decodeDecisions parses a decision list one element at a time, so the raw
+// JSON is never held in memory next to the decoded decisions. The LAPI answers
+// "null" when there are no active decisions. A body over resyncMaxBody is an
+// error.
+func decodeDecisions(r io.Reader) ([]*models.Decision, error) {
+	dec := json.NewDecoder(&cappedReader{r: r, left: resyncMaxBody})
+	decisions, err := decodeDecisionList(dec)
+	if errors.Is(err, errDecisionListTooLarge) {
 		return nil, fmt.Errorf("decision list exceeds %d MiB", resyncMaxBody>>20)
 	}
-	var decisions []*models.Decision
-	if err := json.Unmarshal(body, &decisions); err != nil {
+	if err != nil {
 		return nil, fmt.Errorf("decode decision list: %w", err)
+	}
+	return decisions, nil
+}
+
+func decodeDecisionList(dec *json.Decoder) ([]*models.Decision, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if tok == nil {
+		return nil, nil
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '[' {
+		return nil, fmt.Errorf("expected a JSON array, got %v", tok)
+	}
+	var decisions []*models.Decision
+	for dec.More() {
+		var d models.Decision
+		if err := dec.Decode(&d); err != nil {
+			return nil, err
+		}
+		decisions = append(decisions, &d)
+	}
+	if _, err := dec.Token(); err != nil { // the closing bracket
+		return nil, err
 	}
 	return decisions, nil
 }
