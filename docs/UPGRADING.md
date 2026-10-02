@@ -27,6 +27,13 @@ from the last successful sync, when it is empty, has more than 1000 entries,
 or contains a range that is private, non-public, broader than a /12 (IPv4) or
 broader than a /29 (IPv6).
 
+A blocklist feed whose country filter rejects every entry now keeps its
+previous bans and logs an error; before, it released all of them. A feed that
+lists fewer than half of its previous entries is applied without pruning. See
+[Blocklist import](CONFIGURATION.md#external-blocklists). New settings
+`BLOCKLIST_MIN_PREFIX_V4` (default `8`) and `BLOCKLIST_MIN_PREFIX_V6` (default
+`32`) set the shortest prefix accepted for a feed entry.
+
 ## From 2.0 to 2.1
 
 Building from source now requires Go 1.27.1 or newer.

@@ -1,7 +1,6 @@
 package blocklist
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -26,7 +25,10 @@ const (
 	SourceKindAbuseIPDB = "abuseipdb"
 )
 
-var errPartialFeed = errors.New("feed contains invalid entries")
+var (
+	errPartialFeed    = errors.New("feed contains invalid entries")
+	errPruningSkipped = errors.New("feed shrank sharply")
+)
 
 // Feed is one blocklist source. Include and Exclude filter entries by the
 // two-letter country code a feed puts in each line's comment
@@ -101,6 +103,15 @@ type Manager struct {
 	// source key, even if it shares a URL with another importer.
 	maxOutage time.Duration
 	lastGood  map[string]time.Time
+
+	// lastSize is how many valid entries each feed listed, before country
+	// filtering, the last time it was applied in full. It is the baseline the
+	// shrink guard compares the next fetch with.
+	lastSize map[string]int
+
+	// minPrefixV4 and minPrefixV6 are the shortest prefix lengths accepted
+	// for a feed entry.
+	minPrefixV4, minPrefixV6 int
 }
 
 // NewManager builds a manager for unfiltered feed URLs. maxOutage is how
@@ -131,8 +142,18 @@ func NewFeedManager(feeds []Feed, interval, maxOutage time.Duration, claims *ban
 		feeds: feeds, interval: interval, claims: claims,
 		protected: protected, dryRun: dryRun, log: log,
 		client:    feedhttp.NewClient(timeout),
-		maxOutage: maxOutage, lastGood: lastGood,
+		maxOutage: maxOutage, lastGood: lastGood, lastSize: make(map[string]int, len(feeds)),
+		minPrefixV4: decision.DefaultMinRangePrefixV4, minPrefixV6: decision.DefaultMinRangePrefixV6,
 	}
+}
+
+// SetMinPrefixes sets the shortest prefix length accepted for a feed entry,
+// per address family; a shorter range is skipped. A value below the built-in
+// minimum (8 for IPv4, 32 for IPv6) keeps that minimum, so a zero value from
+// an unset option never relaxes the guard.
+func (m *Manager) SetMinPrefixes(v4, v6 int) {
+	m.minPrefixV4 = max(v4, decision.DefaultMinRangePrefixV4)
+	m.minPrefixV6 = max(v6, decision.DefaultMinRangePrefixV6)
 }
 
 func (m *Manager) Run(ctx context.Context) {
@@ -156,10 +177,10 @@ func (m *Manager) Run(ctx context.Context) {
 func (m *Manager) fetchAndApply(ctx context.Context) {
 	for _, feed := range m.feeds {
 		if err := m.fetchFeed(ctx, feed); err != nil {
-			partial := errors.Is(err, errPartialFeed)
+			partial := errors.Is(err, errPartialFeed) || errors.Is(err, errPruningSkipped)
 			if partial {
 				m.log.Warn().Err(err).Str("url", logger.SafeHost(feed.URL)).
-					Msg("blocklist: partial feed applied; pruning skipped")
+					Msg("blocklist: feed applied without pruning")
 			} else {
 				m.log.Error().Err(err).Str("url", logger.SafeHost(feed.URL)).Msg("blocklist: fetch failed")
 			}
@@ -228,56 +249,27 @@ func (m *Manager) fetchFeed(ctx context.Context, feed Feed) error {
 	}
 	body := &countingReader{r: io.LimitReader(resp.Body, limit+1)}
 
-	var entries []banstate.ClaimRequest
-	seen := make(map[string]struct{})
-	var skipped, filtered, invalid int
-	scanner := bufio.NewScanner(body)
-	for scanner.Scan() {
-		raw := scanner.Text()
-		line := feedLineValue(raw)
-		if line == "" {
-			continue
-		}
-		ip, ipv6, ok := parseEntry(line)
-		if !ok {
-			skipped++
-			invalid++
-			continue
-		}
-		if feed.filtered() && !feed.allows(feedLineCountry(raw)) {
-			filtered++
-			continue
-		}
-		if decision.Unbannable(ip, ipv6, m.protected) {
-			skipped++
-			continue
-		}
-		if _, duplicate := seen[ip]; duplicate {
-			continue
-		}
-		if len(entries) >= maxFeedEntries {
-			return fmt.Errorf("blocklist exceeds %d unique entries", maxFeedEntries)
-		}
-		seen[ip] = struct{}{}
-		entries = append(entries, banstate.ClaimRequest{IP: ip, IPv6: ipv6})
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan blocklist: %w", err)
+	scan, err := m.scanFeed(body, feed)
+	if err != nil {
+		return err
 	}
 	if body.n > limit {
 		return fmt.Errorf("blocklist exceeds %d bytes", limit)
 	}
+	entries, seen := scan.entries, scan.seen
+	skipped, filtered, invalid := scan.skipped, scan.filtered, scan.invalid
 	if len(entries) == 0 && filtered == 0 {
 		// An error page or truncated response served with 200 must not
 		// count as "the feed now lists nothing".
 		return fmt.Errorf("no valid entries (%d lines skipped)", skipped)
 	}
-	partial := feed.Prune && invalid > 0
-	if len(entries) == 0 && !partial {
-		// The feed is fine; the country filter matched nothing in it.
-		m.log.Warn().Str("url", display).Int("filtered", filtered).
-			Msg("blocklist: country filter matched no entries in this feed")
+	if len(entries) == 0 {
+		// Every entry was rejected by the country filter. That is far more
+		// likely a mistyped code, or a feed that stopped tagging its lines,
+		// than an intent to release every ban, so the previous bans stay.
+		return noMatchError(feed, scan)
 	}
+	partial := feed.Prune && invalid > 0
 	if m.dryRun {
 		m.log.Info().Str("url", display).Int("entries", len(entries)).Int("filtered", filtered).
 			Msg("[DRY-RUN] would import blocklist")
@@ -287,6 +279,8 @@ func (m *Manager) fetchFeed(ctx context.Context, feed Feed) error {
 		return nil
 	}
 	source := feed.sourceKey()
+	previous := m.previousSize(feed)
+	shrunk := m.shrunk(source, previous, scan.valid)
 	added := 0
 	if len(entries) > 0 {
 		expiresAt := time.Now().Add(m.interval * 2)
@@ -296,7 +290,7 @@ func (m *Manager) fetchFeed(ctx context.Context, feed Feed) error {
 		}
 	}
 	removed := 0
-	if feed.Prune && !partial {
+	if feed.Prune && !partial && !shrunk {
 		removed, err = m.claims.ReleaseSourceExcept(ctx, source, seen)
 		if err != nil {
 			m.log.Warn().Err(err).Str("url", display).Msg("blocklist: could not release bans the feed no longer lists")
@@ -308,7 +302,7 @@ func (m *Manager) fetchFeed(ctx context.Context, feed Feed) error {
 		event = event.Int("filtered", filtered)
 	}
 	if feed.Prune {
-		event = event.Int("removed", removed).Bool("pruning_skipped", partial)
+		event = event.Int("removed", removed).Bool("pruning_skipped", partial || shrunk)
 	}
 	event.Msg("blocklist: fetch complete")
 	if partial {
@@ -316,6 +310,10 @@ func (m *Manager) fetchFeed(ctx context.Context, feed Feed) error {
 		// time so repeated partial feeds cannot extend stale claims forever.
 		return fmt.Errorf("%w: %d invalid lines; valid entries applied without pruning", errPartialFeed, invalid)
 	}
+	if shrunk {
+		return fmt.Errorf("%w: feed lists %d entries, down from %d; previous bans kept", errPruningSkipped, scan.valid, previous)
+	}
+	m.lastSize[source] = scan.valid
 	return nil
 }
 

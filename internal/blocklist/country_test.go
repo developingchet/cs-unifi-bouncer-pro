@@ -39,7 +39,7 @@ func TestFetchFeed_DryRunWithInvalidLines(t *testing.T) {
 	}{
 		{"complete response", "203.0.113.9 # CN\n", false, false},
 		{"valid entry and stray line", "203.0.113.9 # CN\nstray-line\n", true, true},
-		{"excluded entry and stray line", "203.0.113.3 # US\nstray-line\n", true, true},
+		{"excluded entry and stray line", "203.0.113.3 # US\nstray-line\n", false, true},
 		{"only invalid lines", "stray-line\n", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,29 +101,6 @@ func TestFetchFeed_CountryFilter(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// A filter that matches nothing is a valid result, not a feed outage: the
-// fetch succeeds and a pruning feed releases what it held.
-func TestFetchFeed_FilterMatchingNothingPrunes(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(abuseipdbBody))
-	}))
-	defer srv.Close()
-
-	feed := Feed{URL: srv.URL, Include: codes("CN", "RU"), Prune: true}
-	mgr, store := newFeedTestManager(feed)
-	if err := mgr.fetchFeed(context.Background(), feed); err != nil {
-		t.Fatal(err)
-	}
-
-	feed.Include = codes("KP")
-	if err := mgr.fetchFeed(context.Background(), feed); err != nil {
-		t.Fatalf("filter matching nothing reported as failure: %v", err)
-	}
-	if bans, _ := store.BanList(); len(bans) != 0 {
-		t.Fatalf("pruning feed kept bans outside its filter: %v", bans)
 	}
 }
 

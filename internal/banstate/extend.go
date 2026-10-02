@@ -51,6 +51,28 @@ func (m *Manager) ExtendSource(source string, expiry time.Time) (int, error) {
 	return len(updates), nil
 }
 
+// CountSource returns how many unexpired claims source holds. A feed uses it
+// to compare a fresh fetch with what the previous one left behind.
+func (m *Manager) CountSource(source string) (int, error) {
+	if source == "" {
+		return 0, fmt.Errorf("ban source is required")
+	}
+	m.mu.Lock()
+	bans, err := m.store.BanList()
+	m.mu.Unlock()
+	if err != nil {
+		return 0, fmt.Errorf("list bans: %w", err)
+	}
+	now := time.Now().UTC()
+	count := 0
+	for _, entry := range bans {
+		if expiry, ok := entry.Claims[source]; ok && (expiry.IsZero() || expiry.After(now)) {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // ReleaseSourceExcept drops source's claim from every ban whose address is
 // not in keep, unbanning addresses no other source still holds. A filtered
 // feed uses it after a successful fetch so entries it stopped listing, or
