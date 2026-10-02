@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
@@ -53,9 +55,9 @@ type Notifier struct {
 	log     zerolog.Logger
 }
 
-// New creates a Notifier. If url is empty, all calls to Fire are no-ops.
+// New creates a Notifier. If rawURL is empty, all calls to Fire are no-ops.
 // events is the list of event names to deliver (empty = all events).
-func New(url string, events []string, log zerolog.Logger) *Notifier {
+func New(rawURL string, events []string, log zerolog.Logger) *Notifier {
 	var allowed map[string]struct{}
 	if len(events) > 0 {
 		allowed = make(map[string]struct{}, len(events))
@@ -63,14 +65,29 @@ func New(url string, events []string, log zerolog.Logger) *Notifier {
 			allowed[e] = struct{}{}
 		}
 	}
-	return &Notifier{
-		url:     url,
-		display: logger.SafeHost(url),
+	n := &Notifier{
+		url:     rawURL,
+		display: logger.SafeHost(rawURL),
 		events:  allowed,
 		queue:   make(chan Event, queueSize),
-		client:  &http.Client{Timeout: requestTimeout},
-		log:     log,
+		client: &http.Client{
+			Timeout: requestTimeout,
+			// A redirect would re-send the event payload to a host the
+			// operator did not configure.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+		log: log,
 	}
+	if isPlainHTTP(rawURL) {
+		log.Warn().Str("host", n.display).Msg("webhook: URL uses http://, event payloads are sent unencrypted; use https://")
+	}
+	return n
+}
+
+// isPlainHTTP reports whether raw is an http:// URL.
+func isPlainHTTP(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && strings.EqualFold(u.Scheme, "http")
 }
 
 // Fire queues an event for delivery and returns immediately.
@@ -145,7 +162,12 @@ func (n *Notifier) deliver(ctx context.Context, ev Event) {
 		return
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
+	switch {
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		n.log.Warn().Str("event", ev.Event).Str("host", n.display).
+			Str("status", fmt.Sprintf("%d", resp.StatusCode)).
+			Msg("webhook: redirect not followed; set WEBHOOK_URL to the final endpoint")
+	case resp.StatusCode >= 400:
 		n.log.Warn().Str("event", ev.Event).Str("host", n.display).
 			Str("status", fmt.Sprintf("%d", resp.StatusCode)).
 			Msg("webhook: server returned error status")
