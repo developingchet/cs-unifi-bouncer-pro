@@ -35,6 +35,7 @@ Common issues and solutions for cs-unifi-bouncer-pro.
   - [Shard creation fails with "API returned empty ID"](#shard-creation-fails-with-api-returned-empty-id)
   - [Stale policies after removing a zone pair](#stale-policies-after-removing-a-zone-pair)
   - [Duplicate firewall groups after rename](#duplicate-firewall-groups-after-rename)
+  - [Log warns that objects exist that the database has no record of](#log-warns-that-objects-exist-that-the-database-has-no-record-of)
 - [Performance Issues](#performance-issues)
   - [API rate gate triggered](#api-rate-gate-triggered)
   - [Worker queue full — jobs dropped](#worker-queue-full--jobs-dropped)
@@ -624,6 +625,19 @@ The cleanup requires ownership evidence from the cache or a static name prefix a
 
 1. Delete the old firewall groups and rules manually from the UniFi console
 2. Stop the daemon, run `docker compose run --rm --no-deps cs-unifi-bouncer-pro reconcile`, then restart with `docker compose up -d cs-unifi-bouncer-pro`
+
+---
+
+### Log warns that objects exist that the database has no record of
+
+**Symptom:** At startup the log shows `controller objects named like this instance's own exist that its database has no record of`, listing names such as `crowdsec-block-v4-0`.
+
+**Cause:** Firewall groups or lists whose names match this instance's `GROUP_NAME_TEMPLATE` exist on the controller, but the bouncer's database holds no record of them. Either the database volume was lost or replaced, or a second bouncer instance manages the same UniFi site with the same name templates.
+
+**Fix:**
+
+- After a lost database the warning is informational: the bouncer adopts the objects and reconciles them against the CrowdSec decisions. It appears once.
+- With two instances on one site, each must use distinct `GROUP_NAME_TEMPLATE`, `RULE_NAME_TEMPLATE` and `POLICY_NAME_TEMPLATE` values (see [Object Naming Templates](CONFIGURATION.md#object-naming-templates)). Instances that share names adopt, rewrite and delete each other's groups, rules and policies. Set the templates before the second instance first starts; changing them later renames objects (see [Duplicate firewall groups after rename](#duplicate-firewall-groups-after-rename)).
 
 ---
 
