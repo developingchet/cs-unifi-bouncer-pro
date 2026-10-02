@@ -98,7 +98,7 @@ func filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger, deleted bo
 		scenario = *d.Scenario
 	}
 
-	// Stage 1: action must be ban or delete
+	// Stage 1: action must be an allowed type
 	if !containsCI(cfg.AllowedActions, action) {
 		metrics.DecisionsFiltered.WithLabelValues(stageAction, "unsupported_action").Inc()
 		log.Trace().Str("action", action).Msg("filtered: unsupported action")
@@ -111,6 +111,12 @@ func filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger, deleted bo
 	// before BLOCK_SCENARIO_EXCLUDE, CROWDSEC_ORIGINS or BLOCK_WHITELIST changed.
 	if deleted {
 		action = "delete"
+	} else if action != "ban" {
+		// A decision in the stream's new list is applied as a ban whatever its
+		// type says, so any other type would bypass the ban-only stages.
+		metrics.DecisionsFiltered.WithLabelValues(stageAction, "not_a_ban").Inc()
+		log.Debug().Str("action", action).Msg("filtered: new decision is not a ban")
+		return FilterResult{}
 	}
 	isBan := action == "ban"
 
@@ -169,6 +175,13 @@ func filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger, deleted bo
 		parsed, parseErr := time.ParseDuration(*d.Duration)
 		if parseErr == nil {
 			dur = parsed
+			// A ban that has already run out would otherwise be stored with an
+			// expiry in the past, or with none at all for a zero duration.
+			if isBan && parsed <= 0 {
+				metrics.DecisionsFiltered.WithLabelValues(stageMinDur, "non_positive_duration").Inc()
+				log.Debug().Str("ip", sanitized).Str("duration", *d.Duration).Msg("filtered: ban duration is not positive")
+				return FilterResult{}
+			}
 		}
 	}
 	if isBan && cfg.MinBanDuration > 0 && dur > 0 && dur < cfg.MinBanDuration {
@@ -221,21 +234,27 @@ func excludedBy(scenario string, excludes []string) string {
 // almost certainly a mistake or a hostile feed, and would cut off a large
 // share of the internet. Smaller private ranges are caught by stage 6.
 const (
-	minRangePrefixV4 = 8
-	minRangePrefixV6 = 32
+	DefaultMinRangePrefixV4 = 8
+	DefaultMinRangePrefixV6 = 32
 )
 
 // TooBroad reports whether value is a range broader than /8 (IPv4) or /32
 // (IPv6). A single address is never too broad.
 func TooBroad(value string, ipv6 bool) bool {
+	return TooBroadFor(value, ipv6, DefaultMinRangePrefixV4, DefaultMinRangePrefixV6)
+}
+
+// TooBroadFor is TooBroad with the shortest accepted prefix length chosen by
+// the caller for each address family.
+func TooBroadFor(value string, ipv6 bool, minV4, minV6 int) bool {
 	prefix, err := netip.ParsePrefix(value)
 	if err != nil {
 		return false // a single address
 	}
 	if ipv6 {
-		return prefix.Bits() < minRangePrefixV6
+		return prefix.Bits() < minV6
 	}
-	return prefix.Bits() < minRangePrefixV4
+	return prefix.Bits() < minV4
 }
 
 // longerOrFirst reports whether key should replace matched as the scenario

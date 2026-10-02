@@ -20,12 +20,20 @@
    kubectl create namespace crowdsec
    ```
 
-2. **Create the Secret** — copy `secret.example.yaml`, fill in your values, and apply:
+2. **Create the Secret and ConfigMap** — copy `secret.example.yaml`, fill in your values, and apply:
    ```bash
    cp docs/kubernetes/secret.example.yaml my-secret.yaml
    # Edit my-secret.yaml — do NOT commit this file to source control
    kubectl apply -f my-secret.yaml
    ```
+   The file holds two objects. The Secret carries the four credentials
+   (`UNIFI_API_KEY`, `UNIFI_USERNAME`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`);
+   the Deployment mounts it at `/run/secrets/cs-unifi-bouncer-pro` and points
+   the matching `*_FILE` settings at the files, so the credentials never appear
+   in the container environment. Keep all four keys and leave the ones you do
+   not use empty. The ConfigMap carries the other settings (`UNIFI_URL`,
+   `CROWDSEC_LAPI_URL`, `ZONE_PAIRS`, and so on) as environment variables; add
+   further non-secret settings there.
 
 3. **Create the PVC** for the bbolt database:
    ```bash
@@ -37,11 +45,16 @@
    kubectl apply -f docs/kubernetes/deployment.yaml
    ```
 
-5. **Apply the NetworkPolicy** (recommended — restricts ingress/egress to known ports):
+5. **Apply the NetworkPolicy** (recommended — restricts ingress/egress to known peers and ports). It contains placeholders that must be adjusted first, each marked `Adjust` in the file:
+   - the namespace allowed to scrape the metrics port (default: `monitoring`);
+   - the controller address (`ipBlock` `192.168.1.1/32`, which must match `UNIFI_URL`) and port, 443 for UniFi OS or 8443 for a self-hosted Network Application;
+   - the labels of the CrowdSec LAPI pods, or an `ipBlock` for a LAPI outside the cluster;
+   - the labels of the cluster DNS pods, if they are not `k8s-app: kube-dns` in `kube-system`.
+
    ```bash
    kubectl apply -f docs/kubernetes/networkpolicy.yaml
    ```
-   Egress is allowed to DNS, the controller on 443 (UniFi OS) or 8443 (self-hosted Network Application), and the LAPI on 8080. If your controller or LAPI listens elsewhere, edit the ports first: a blocked controller shows as `connection refused` in the logs and `/readyz` returns 503.
+   A blocked controller shows as `connection refused` or a timeout in the logs and `/readyz` returns 503. Optional features that fetch from the internet (`BLOCKLIST_URLS`, `ABUSEIPDB_LIST`, `CLOUDFLARE_WHITELIST_ENABLED`, `WEBHOOK_URL`) need egress rules of their own. Only the metrics port accepts ingress; kubelet probes are not affected on CNIs that exempt node traffic from NetworkPolicy.
 
 6. **Verify** the pod is running:
    ```bash
@@ -51,7 +64,7 @@
 
 ## Configuration Reload
 
-Restart the pod after changing its Secret or environment variables:
+Restart the pod after changing its Secret or ConfigMap. Kubernetes refreshes mounted Secret files in place, but the bouncer reads them only at startup:
 ```bash
 kubectl -n crowdsec rollout restart deployment/cs-unifi-bouncer-pro
 ```
@@ -60,6 +73,13 @@ kubectl -n crowdsec rollout restart deployment/cs-unifi-bouncer-pro
 
 The deployment includes `prometheus.io/scrape: "true"` annotations on the pod template.
 If you use the Prometheus Operator, create a `ServiceMonitor` targeting port `9090`.
+The NetworkPolicy admits scrapes only from the `monitoring` namespace; change its `namespaceSelector` if Prometheus runs elsewhere.
+
+## Resources and Hardening
+
+The container limit is 512Mi. A periodic resync (`CROWDSEC_RESYNC_INTERVAL`) reads the whole LAPI decision list into memory, accepting a response of up to 256 MiB, and then decodes it, so the limit has to stay above that cap; raise it for lists that approach it.
+
+The pod runs with the runtime default seccomp profile, a read-only root filesystem, no capabilities, and no Kubernetes API token (`automountServiceAccountToken: false`).
 
 ## Health Endpoints
 

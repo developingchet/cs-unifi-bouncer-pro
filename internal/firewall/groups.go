@@ -148,6 +148,12 @@ type ShardManager struct {
 	// The manager uses this to back off future flushes.
 	onRateLimit func(retryAfter time.Duration)
 
+	// writesPaused reports that the manager has stopped controller writes (a
+	// rate-limit window is open or the circuit breaker is open). A flush checks
+	// it after a failed shard write and leaves the remaining shards for the
+	// next tick.
+	writesPaused func() bool
+
 	// onSyncError is called when a shard PUT fails (non-rate-limit errors).
 	// The manager uses this to trip the circuit breaker.
 	onSyncError func()
@@ -170,6 +176,11 @@ type ShardManager struct {
 	// These groups should be deleted (policies/rules first, then the group).
 	// Guarded by mu.
 	orphanedGroups []orphanedGroup
+
+	// unknownObjects holds the names of controller objects that this
+	// instance's templates render but its database has no record of, found by
+	// the last EnsureShards. Guarded by mu.
+	unknownObjects []string
 }
 
 // NewShardManager creates a ShardManager. Call EnsureShards to initialize from the API.
@@ -214,6 +225,12 @@ func (sm *ShardManager) SetActivationCallback(fn func(ctx context.Context, shard
 // SetRateLimitCallback sets the function to be called when a shard sync returns ErrRateLimit.
 func (sm *ShardManager) SetRateLimitCallback(fn func(retryAfter time.Duration)) {
 	sm.onRateLimit = fn
+}
+
+// SetWritesPausedCheck sets the function a flush consults to learn that the
+// manager has stopped controller writes.
+func (sm *ShardManager) SetWritesPausedCheck(fn func() bool) {
+	sm.writesPaused = fn
 }
 
 // SetSyncCallbacks sets callbacks for shard sync success and non-rate-limit errors.

@@ -144,6 +144,64 @@ func TestNotifier_FireDoesNotBlock(t *testing.T) {
 	}
 }
 
+func TestNotifier_DoesNotFollowRedirects(t *testing.T) {
+	target := &recorder{}
+	targetSrv := httptest.NewServer(target)
+	defer targetSrv.Close()
+
+	var mu sync.Mutex
+	var hits int
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		http.Redirect(w, r, targetSrv.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	var logs bytes.Buffer
+	n := New(redirector.URL, nil, zerolog.New(&logs))
+	fireAndStop(t, n, func() { n.Fire("test", nil) })
+
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 1 {
+		t.Fatalf("webhook endpoint hit %d times, want 1", hits)
+	}
+	if got := target.events(t); len(got) != 0 {
+		t.Fatalf("redirect target received %d events, want 0", len(got))
+	}
+	if !strings.Contains(logs.String(), "redirect not followed") {
+		t.Fatalf("log missing redirect warning: %s", logs.String())
+	}
+}
+
+func TestNew_WarnsOnPlainHTTP(t *testing.T) {
+	tests := []struct {
+		name     string
+		url      string
+		wantWarn bool
+	}{
+		{name: "http", url: "http://hooks.example.com/notify", wantWarn: true},
+		{name: "http mixed case", url: "HTTP://hooks.example.com/notify", wantWarn: true},
+		{name: "https", url: "https://hooks.example.com/notify"},
+		{name: "empty", url: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			New(tt.url, nil, zerolog.New(&logs))
+			got := strings.Contains(logs.String(), "event payloads are sent unencrypted")
+			if got != tt.wantWarn {
+				t.Fatalf("warned = %v, want %v (log: %s)", got, tt.wantWarn, logs.String())
+			}
+			if strings.Contains(logs.String(), "/notify") {
+				t.Fatalf("warning leaks the webhook path: %s", logs.String())
+			}
+		})
+	}
+}
+
 func TestNotifier_EmptyURLDisabled(t *testing.T) {
 	n := New("", nil, zerolog.Nop())
 	n.Fire("test", nil)

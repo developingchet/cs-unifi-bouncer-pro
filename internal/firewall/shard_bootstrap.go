@@ -3,6 +3,7 @@ package firewall
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -42,7 +43,9 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	cached := maps.Clone(candidates)
 	sm.addAPICandidates(api, candidates)
+	sm.unknownObjects = sm.unrecordedNames(candidates, cached)
 	ordered, err := sm.resolveShardIndices(candidates, indices, known)
 	if err != nil {
 		return err
@@ -163,6 +166,35 @@ func (sm *ShardManager) collectCachedCandidates(allGroups map[string]storage.Gro
 	return candidates, indices, known, nil
 }
 
+// unrecordedNames returns, sorted, the names in candidates that are not in
+// cached and that this site and family's name template renders for some
+// shard. Such objects exist on the controller without this instance's
+// database knowing them: either the database was lost, or another bouncer
+// instance uses the same templates.
+func (sm *ShardManager) unrecordedNames(candidates, cached map[string]struct{}) []string {
+	var names []string
+	for name := range candidates {
+		if _, known := cached[name]; known {
+			continue
+		}
+		if _, ok := sm.shardIndexForName(name); ok {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// TakeUnknownObjects returns and clears the names of controller objects this
+// instance's templates render but its database has no record of.
+func (sm *ShardManager) TakeUnknownObjects() []string {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	names := sm.unknownObjects
+	sm.unknownObjects = nil
+	return names
+}
+
 // addAPICandidates adds the names of controller objects that match this
 // family's object type and the configured name prefix.
 func (sm *ShardManager) addAPICandidates(api apiShardObjects, candidates map[string]struct{}) {
@@ -281,8 +313,8 @@ func (sm *ShardManager) loadShardLocked(idx int, allGroups map[string]storage.Gr
 		} else {
 			// Restore cached members if a previously populated group has only
 			// the creation placeholder in UniFi.
-			shard.IPs.Replace(rec.Members)
-			members = rec.Members
+			members = sm.stillBanned(rec.Members)
+			shard.IPs.Replace(members)
 		}
 		if err := sm.store.SetGroup(cacheKey(sm.site, name), storage.GroupRecord{UnifiID: apiID, Site: sm.site, Index: idx, Members: members, IPv6: sm.ipv6}); err != nil {
 			return nil, fmt.Errorf("cache recovered shard %s: %w", name, err)
@@ -292,12 +324,36 @@ func (sm *ShardManager) loadShardLocked(idx int, allGroups map[string]storage.Gr
 	case cached:
 		// Allocate a Pending shard in-memory without creating in UniFi yet.
 		shard = sm.allocShard(idx)
-		if len(rec.Members) > 0 {
+		if members := sm.stillBanned(rec.Members); len(members) > 0 {
 			// Keep dirty so old members are restored on next sync tick.
-			shard.IPs.Replace(rec.Members)
+			shard.IPs.Replace(members)
 		}
 	}
 	return shard, nil
+}
+
+// stillBanned returns the members of a cached group record that the ban
+// database still holds. The record is a write-through cache and can be older
+// than the database, for example after a stop between a rebalance writing it
+// and the shards being flushed, so replaying it unchecked would block bans
+// that have expired or been lifted since. A member whose ban cannot be read
+// is kept: dropping it could leave a live ban unenforced.
+func (sm *ShardManager) stillBanned(members []string) []string {
+	kept := make([]string, 0, len(members))
+	dropped := 0
+	for _, ip := range members {
+		banned, err := sm.store.BanExists(ip)
+		if err != nil || banned {
+			kept = append(kept, ip)
+			continue
+		}
+		dropped++
+	}
+	if dropped > 0 {
+		sm.log.Warn().Str("site", sm.site).Int("dropped", dropped).
+			Msg("cached shard members are no longer in the ban database; not restoring them")
+	}
+	return kept
 }
 
 // assignOwnersLocked rebuilds ipOwner from the loaded shards, which must be

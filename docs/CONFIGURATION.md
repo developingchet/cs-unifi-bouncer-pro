@@ -154,13 +154,23 @@ Each template is rendered at startup. Startup fails if a template cannot be rend
 
 ### Multi-instance example
 
+Two bouncer instances can manage the same UniFi site only if their name templates differ. The templates are the only thing that tells one instance's groups, rules and policies from the other's; an instance adopts any object whose name its templates render, and deletes the ones its database no longer expects. Give every instance distinct `GROUP_NAME_TEMPLATE`, `RULE_NAME_TEMPLATE` and `POLICY_NAME_TEMPLATE` values, with a literal prefix that is not shared:
+
 ```bash
 # Instance A (production)
 GROUP_NAME_TEMPLATE=crowdsec-prod-{{.Family}}-{{.Index}}
+RULE_NAME_TEMPLATE=crowdsec-prod-drop-{{.Family}}-{{.Index}}
+POLICY_NAME_TEMPLATE=crowdsec-prod-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}
 
 # Instance B (staging)
 GROUP_NAME_TEMPLATE=crowdsec-staging-{{.Family}}-{{.Index}}
+RULE_NAME_TEMPLATE=crowdsec-staging-drop-{{.Family}}-{{.Index}}
+POLICY_NAME_TEMPLATE=crowdsec-staging-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}
 ```
+
+The per-pair port and destination-IP filter lists (`crowdsec-ports-*`, `crowdsec-dstips-*`) and the Cloudflare whitelist objects (`crowdsec-whitelist-cloudflare-*`) have fixed names that the templates do not change. Use `ZONE_PAIRS` port or destination-IP filters and `CLOUDFLARE_WHITELIST_ENABLED` on only one instance per site.
+
+At startup the bouncer logs a warning when the controller holds groups or lists named like its own that its database has no record of; see [Troubleshooting](TROUBLESHOOTING.md#log-warns-that-objects-exist-that-the-database-has-no-record-of).
 
 **Warning**: Changing templates in a running deployment renames managed objects. The bouncer will recreate them with the new names and may lose track of objects created under the old names. Plan renames carefully.
 
@@ -187,7 +197,7 @@ These settings apply only when `FIREWALL_MODE=zone` or when `auto` detects a zon
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ZONE_PAIRS` | `External->Dmz` | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. Use commas between simple pairs; use semicolons between pairs when ports or destination IPs contain commas. Ambiguous strings fail validation. A block policy is created for each pair and shard. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. Standard UUIDs and MongoDB ObjectIDs are also accepted. Optional port lists and `@ip1,ip2,...` scope each policy. |
+| `ZONE_PAIRS` | `External->Dmz` | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. Use commas between simple pairs; use semicolons between pairs when ports or destination IPs contain commas. Ambiguous strings fail validation. A block policy is created for each pair and shard. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. Standard UUIDs and MongoDB ObjectIDs are also accepted. Optional port lists and `@ip1,ip2,...` scope each policy. An empty value is rejected when `FIREWALL_MODE=zone`, and a SIGHUP reload with an empty value is ignored, because an empty set would delete every block policy. |
 
 ```bash
 # Named zones (auto-resolved at startup) — no port filter (any port)
@@ -273,9 +283,11 @@ When enabled, the bouncer periodically fetches current Cloudflare IP ranges and 
 |----------|---------|----------|-------------|
 | `CLOUDFLARE_WHITELIST_ENABLED` | `false` | No | Enable the Cloudflare IP whitelist sync. Requires zone mode and `UNIFI_API_KEY`; startup fails with `FIREWALL_MODE=legacy` or without an API key. |
 | `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | No | How often to re-fetch Cloudflare IP ranges and update the IP TMLs (default: weekly). |
-| `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | No | URL to fetch the current Cloudflare IPv4 CIDR list. |
-| `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | No | URL to fetch the current Cloudflare IPv6 CIDR list. |
+| `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | No | `https://` URL to fetch the current Cloudflare IPv4 CIDR list. |
+| `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | No | `https://` URL to fetch the current Cloudflare IPv6 CIDR list. |
 | `CLOUDFLARE_ZONE_PAIRS` | — | If enabled | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]` format. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. Use semicolons between pairs when a pair contains comma-separated ports or IPs. Zones are resolved separately for each site. Filter creation failure prevents a broader ALLOW policy from being created. |
+
+A fetched list is applied only if every entry passes validation: IPv4 ranges no broader than a /12, IPv6 ranges no broader than a /29, no private, loopback, link-local, multicast or other non-public ranges, and at most 1000 entries per list. A list that fails validation, or an empty one, is rejected with an error and the ranges from the last successful sync stay in place.
 
 ```bash
 # Minimal — ALLOW Cloudflare traffic from External to Internal on any port
@@ -437,6 +449,9 @@ The bouncer can periodically fetch plain-text IP/CIDR blocklists from external U
 | `BLOCKLIST_URLS` | — | Comma-separated list of URLs to fetch. Each URL must return a plain-text list with one IP address or CIDR per line. Anything after `#` or `;` is a comment, so annotated feeds such as Spamhaus DROP (`192.0.2.0/24 ; SBL123`) work; only the first field of a line is read. A `/32` or `/128` entry is stored as the bare address. Blank and comment-only lines are ignored. |
 | `BLOCKLIST_REFRESH_INTERVAL` | `24h` | How often to re-fetch and re-apply each URL. Each successful fetch sets its bans to expire at `now + 2×BLOCKLIST_REFRESH_INTERVAL`, so an entry the feed drops lapses within two intervals. A failed fetch (error, non-200, or a 200 with no valid entries) extends the bans from the last good fetch instead, for up to `BAN_TTL` since that fetch. |
 
+| `BLOCKLIST_MIN_PREFIX_V4` | `8` | Shortest IPv4 prefix length accepted for a feed entry, from `8` to `32`. A broader range is skipped and counted as skipped in the fetch log. Applies to `BLOCKLIST_URLS` and the AbuseIPDB list, not to CrowdSec decisions. |
+| `BLOCKLIST_MIN_PREFIX_V6` | `32` | Shortest IPv6 prefix length accepted for a feed entry, from `32` to `128`. Same scope as the IPv4 setting. |
+
 ```bash
 # Fetch two external threat intelligence feeds every 12 hours
 BLOCKLIST_URLS=https://example.com/badips.txt,https://example.net/threatlist.txt
@@ -444,6 +459,8 @@ BLOCKLIST_REFRESH_INTERVAL=12h
 ```
 
 Each feed URL owns a separate ban claim. If CrowdSec or another feed still claims an IP, expiry of one feed's claim does not remove the firewall ban. Feed refreshes extend claim expiry to twice the refresh interval. A failed fetch keeps the feed's current bans (logged as "keeping bans from the last successful fetch"); once a feed has failed for longer than `BAN_TTL`, its bans are no longer extended and expire. Feed imports are logged with entry, new and skipped counts. Logs show only the feed scheme and host. Stored claim sources use an opaque SHA-256 key derived from the full URL and importer kind, so URL path tokens and query credentials are not stored in new claims. On startup, old URL-based claims migrate while preserving their expiry. If multiple configured importers matched the same old claim, its original expiry is retained under an opaque legacy key until a fresh fetch establishes ownership.
+
+A fetch that looks damaged never prunes. A feed with a country filter whose entries are all rejected by that filter (a mistyped code, or a feed that stopped tagging its lines) is treated as a failed fetch and keeps its previous bans. A feed that lists fewer than half the entries it listed on its last full fetch, when that was at least 50, has its entries applied but nothing pruned, and its previous bans are kept as for a failed fetch. After a feed has stayed in either state for `BAN_TTL`, its old bans expire and the smaller list is accepted. The comparison uses the feed's size before the country filter, so narrowing a filter still releases the entries it now excludes.
 
 Addresses are recorded and applied in batches of 500, so a large feed does not hold up CrowdSec decisions while it imports. Addresses the controller rejects stay recorded as pending and are retried by the next reconcile.
 
@@ -514,7 +531,7 @@ The bouncer can POST a JSON notification to a webhook URL when significant event
 
 The payload always has `event` and `timestamp` (UTC, RFC 3339). `detail` is present only for `reconcile_drift`.
 
-Notifications are delivered in the background, so a slow endpoint never delays syncing. Up to 64 events can be queued; further events are dropped with a `webhook: queue full` warning. On shutdown, queued events get up to 5 seconds to send. Webhook errors are logged at `warn` level and never cause the bouncer to exit or retry. The HTTP timeout for webhook POSTs is 5 seconds. Logs show only the webhook host, because Slack- and Discord-style URLs carry a token in the path.
+Notifications are delivered in the background, so a slow endpoint never delays syncing. Up to 64 events can be queued; further events are dropped with a `webhook: queue full` warning. On shutdown, queued events get up to 5 seconds to send. Webhook errors are logged at `warn` level and never cause the bouncer to exit or retry. The HTTP timeout for webhook POSTs is 5 seconds. Redirects are not followed, so the payload is only ever sent to `WEBHOOK_URL` itself, and an `http://` URL logs a startup warning because the payload then travels unencrypted. Logs show only the webhook host, because Slack- and Discord-style URLs carry a token in the path.
 
 ```bash
 # Fire a notification when the circuit breaker trips or resets
@@ -532,8 +549,8 @@ WEBHOOK_EVENTS=circuit_breaker_open,circuit_breaker_close,reconcile_drift
 | `LOG_LEVEL` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error`. Messages from the CrowdSec stream client carry `"component":"crowdsec-client"`; its per-poll debug messages appear only at `trace`. |
 | `LOG_FORMAT` | `json` | Log format: `json` (structured, for Loki/Splunk) or `text` (human-readable) |
 | `METRICS_ENABLED` | `true` | Enable the Prometheus metrics HTTP server |
-| `METRICS_ADDR` | `:9090` | Address for the Prometheus metrics endpoint. Must differ from `HEALTH_ADDR` while metrics are enabled. |
-| `HEALTH_ADDR` | `:8081` | Address for health endpoints (`/healthz`, `/readyz`) |
+| `METRICS_ADDR` | `:9090` | Address for the Prometheus metrics endpoint. Must differ from `HEALTH_ADDR` while metrics are enabled. The default listens on every interface, which a container needs for published ports and scraping; when running on a host (for example under systemd) set `127.0.0.1:9090` unless a remote Prometheus must reach it. The shipped systemd unit does this. |
+| `HEALTH_ADDR` | `:8081` | Address for health endpoints (`/healthz`, `/readyz`). The default listens on every interface; on a host set `127.0.0.1:8081`. The `healthcheck` subcommand reads this variable too. |
 | `JANITOR_INTERVAL` | `1h` | How often the background janitor lifts expired ban claims, records `expire` history events, and updates the `crowdsec_unifi_db_size_bytes` metric |
 | `SHUTDOWN_GRACE_PERIOD` | `30s` | Time given to in-flight goroutines to finish cleanly after a shutdown signal before the process exits forcefully. |
 | `HEALTH_CHECK_LAPI` | `true` | When `true`, `/readyz` checks both the UniFi controller and CrowdSec LAPI. Set to `false` to check only the controller. Either way `/readyz` returns 503 `starting` until the first LAPI decision batch has been processed, so it stays unready while the LAPI is unreachable at startup. |

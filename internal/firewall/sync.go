@@ -89,9 +89,43 @@ func (cb *circuitBreaker) isHalfOpen() bool {
 	return cb.state == circuitHalfOpen
 }
 
-// setRateLimitUntil records when the rate-limit window expires.
+func (cb *circuitBreaker) isOpen() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return cb.state == circuitOpen
+}
+
+// reopen ends a failed half-open probe: the breaker opens again and waits a
+// full reset interval before the next probe. It returns false, changing
+// nothing, when no probe was in progress.
+func (cb *circuitBreaker) reopen() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if cb.state != circuitHalfOpen {
+		return false
+	}
+	cb.state = circuitOpen
+	cb.openedAt = time.Now()
+	return true
+}
+
+// setRateLimitUntil records when the rate-limit window expires. A deadline
+// earlier than the one already recorded is ignored: flushes that fail
+// together can report different Retry-After values, and the longest wait
+// has to hold.
 func (m *managerImpl) setRateLimitUntil(t time.Time) {
-	m.rateLimitUntil.Store(t)
+	for {
+		cur := m.rateLimitUntil.Load()
+		if cur == nil {
+			if m.rateLimitUntil.CompareAndSwap(nil, t) {
+				return
+			}
+			continue
+		}
+		if !t.After(cur.(time.Time)) || m.rateLimitUntil.CompareAndSwap(cur, t) {
+			return
+		}
+	}
 }
 
 // isRateLimited returns true if we are still inside a rate-limit window.
@@ -110,6 +144,7 @@ func (m *managerImpl) attachShardCallbacks(mgr *ShardManager) {
 	mgr.SetRateLimitCallback(func(retryAfter time.Duration) {
 		m.setRateLimitUntil(time.Now().Add(retryAfter))
 	})
+	mgr.SetWritesPausedCheck(func() bool { return m.writesPaused() != nil })
 	mgr.SetSyncCallbacks(
 		func() { // onSyncSuccess
 			m.recordControllerSuccess()
@@ -136,26 +171,29 @@ func (m *managerImpl) recordControllerSuccess() {
 	}
 }
 
+// dirtyFamily pairs a family's ShardManager with its name (for log fields and
+// error messages) and records whether its shards were flushed cleanly.
+type dirtyFamily struct {
+	name   string
+	sm     *ShardManager
+	synced bool
+}
+
 // SyncDirty flushes all dirty shards to the UniFi API for the given sites.
 // Errors are logged per-shard and those shards remain dirty for retry on the next call.
 // Updates the DirtyShards gauge with the pre-sync dirty count before flushing.
 // If the controller previously signalled rate-limiting, SyncDirty skips all flushes
-// until the Retry-After window has elapsed.
+// until the Retry-After window has elapsed. A rate limit or an open circuit
+// breaker that appears mid-pass ends the pass; the remaining shards wait for
+// the next tick.
 func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 	if m.cfg.DryRun {
 		m.log.Debug().Msg("[DRY-RUN] skipping shard sync")
 		return nil
 	}
-	// Check rate-limit window before doing any work.
-	if limited, until := m.isRateLimited(); limited {
-		m.log.Info().Time("retry_after", until).Msg("SyncDirty skipped: rate-limited by controller")
-		return fmt.Errorf("sync deferred by controller rate limit until %s", until.Format(time.RFC3339))
-	}
-
-	// Check circuit breaker.
-	if !m.cb.allow() {
-		m.log.Info().Msg("SyncDirty skipped: circuit breaker open")
-		return fmt.Errorf("sync deferred: controller circuit breaker open")
+	if err := m.admitWrites(); err != nil {
+		m.log.Info().Err(err).Msg("SyncDirty skipped")
+		return err
 	}
 
 	// First pass: snapshot dirty-shard counts per site so the Prometheus gauge
@@ -165,11 +203,7 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 	var syncErrors []error
 	deferred := false
 	for _, site := range sites {
-		m.mu.RLock()
-		v4 := m.v4Mgrs[site]
-		v6 := m.v6Mgrs[site]
-		m.mu.RUnlock()
-
+		v4, v6 := m.siteShardMgrs(site)
 		n := 0
 		if v4 != nil {
 			n += v4.countDirty()
@@ -182,20 +216,13 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 	}
 	metrics.DirtyShards.Set(float64(totalDirty))
 
-	// dirtyFamily pairs a family's ShardManager with its name (for log fields
-	// and error messages) and a pointer to that family's synced flag.
-	type dirtyFamily struct {
-		name   string
-		sm     *ShardManager
-		synced *bool
-	}
-
 	// Second pass: flush and emit a per-site Info summary when work was done.
 	for _, site := range sites {
-		m.mu.RLock()
-		v4 := m.v4Mgrs[site]
-		v6 := m.v6Mgrs[site]
-		m.mu.RUnlock()
+		if m.writesPaused() != nil {
+			deferred = true
+			break
+		}
+		v4, v6 := m.siteShardMgrs(site)
 
 		// Rebalance, flush, and drain must be one serialized operation. A
 		// concurrent reconcile must not see a Draining donor before its target
@@ -207,39 +234,11 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 			deferred = true
 			continue
 		}
-		v4Synced, v6Synced := true, true
-		var families []dirtyFamily
-		if v4 != nil {
-			families = append(families, dirtyFamily{"v4", v4, &v4Synced})
-		}
-		if v6 != nil {
-			families = append(families, dirtyFamily{"v6", v6, &v6Synced})
-		}
-		func() {
-			defer m.syncMu.Unlock()
-			for _, f := range families {
-				if n := f.sm.Rebalance(ctx); n > 0 {
-					m.log.Info().Str("site", site).Int("merged", n).Str("family", f.name).Msg("shard rebalance complete")
-				}
-			}
-			for _, f := range families {
-				if err := f.sm.syncAllFamilies(ctx); err != nil {
-					*f.synced = false
-					syncErrors = append(syncErrors, fmt.Errorf("sync %s shards for site %s: %w", f.name, site, err))
-				}
-			}
-			// Drain only after each family's target shards reached the API.
-			for _, f := range families {
-				if !*f.synced {
-					continue
-				}
-				if err := f.sm.drainDraining(ctx); err != nil {
-					syncErrors = append(syncErrors, fmt.Errorf("drain %s shards for site %s: %w", f.name, site, err))
-				}
-			}
-		}()
+		synced, errs := m.flushSite(ctx, site, v4, v6)
+		m.syncMu.Unlock()
+		syncErrors = append(syncErrors, errs...)
 
-		if siteDirty[site] > 0 && v4Synced && v6Synced {
+		if siteDirty[site] > 0 && synced {
 			v4Total := 0
 			v6Total := 0
 			if v4 != nil {
@@ -259,20 +258,62 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 
 	// Update active_bans gauge from bbolt after every sync tick.
 	m.UpdateActiveBansMetric()
-	if len(syncErrors) == 0 && m.cb.isHalfOpen() {
-		// No shard write was available to probe the controller. A successful
-		// read closes the breaker so the next decision can be flushed.
-		if err := m.ctrl.Ping(ctx); err != nil {
-			m.cb.recordFailure()
-			syncErrors = append(syncErrors, fmt.Errorf("controller circuit breaker probe: %w", err))
-		} else {
-			m.recordControllerSuccess()
-		}
-	}
+	syncErrors = m.settleProbe(ctx, syncErrors)
 	if len(syncErrors) == 0 && !deferred {
 		metrics.LastSyncTimestamp.Set(float64(time.Now().Unix()))
 	}
 	return errors.Join(syncErrors...)
+}
+
+// siteShardMgrs returns the IPv4 and IPv6 shard managers of site; either may be nil.
+func (m *managerImpl) siteShardMgrs(site string) (v4, v6 *ShardManager) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.v4Mgrs[site], m.v6Mgrs[site]
+}
+
+// flushSite rebalances, flushes and drains the shards of one site. The caller
+// holds syncMu. It reports whether every family was flushed, and the errors
+// of the families that were not.
+func (m *managerImpl) flushSite(ctx context.Context, site string, v4, v6 *ShardManager) (bool, []error) {
+	var families []*dirtyFamily
+	if v4 != nil {
+		families = append(families, &dirtyFamily{name: "v4", sm: v4, synced: true})
+	}
+	if v6 != nil {
+		families = append(families, &dirtyFamily{name: "v6", sm: v6, synced: true})
+	}
+
+	var errs []error
+	for _, f := range families {
+		if n := f.sm.Rebalance(ctx); n > 0 {
+			m.log.Info().Str("site", site).Int("merged", n).Str("family", f.name).Msg("shard rebalance complete")
+		}
+	}
+	for _, f := range families {
+		if m.writesPaused() != nil {
+			f.synced = false
+			continue
+		}
+		if err := f.sm.syncAllFamilies(ctx); err != nil {
+			f.synced = false
+			errs = append(errs, fmt.Errorf("sync %s shards for site %s: %w", f.name, site, err))
+		}
+	}
+	// Drain only after each family's target shards reached the API.
+	for _, f := range families {
+		if !f.synced || m.writesPaused() != nil {
+			continue
+		}
+		if err := f.sm.drainDraining(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("drain %s shards for site %s: %w", f.name, site, err))
+		}
+	}
+	synced := true
+	for _, f := range families {
+		synced = synced && f.synced
+	}
+	return synced, errs
 }
 
 // pruneEmptyTailShards deletes empty trailing shards (group + rule/policy) for both families.
@@ -323,6 +364,16 @@ func (m *managerImpl) pruneEmptyTailShards(ctx context.Context, site string, v4,
 				case <-ctx.Done():
 					return
 				}
+			}
+
+			// A ban may have been applied to the tail while its rule or policy
+			// was being deleted. Deleting the group would drop it, so keep the
+			// shard and have its rule or policy provisioned again.
+			if id, idx, ok := e.sm.PrunableTail(); !ok || id != unifiID || idx != shardIdx {
+				e.sm.MarkUnprovisioned(shardIdx)
+				m.log.Warn().Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
+					Msg("shard received a ban while being pruned; keeping it")
+				break pruneLoop
 			}
 
 			// Delete backing shard object from UniFi.

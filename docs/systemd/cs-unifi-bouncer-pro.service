@@ -20,8 +20,16 @@ EnvironmentFile=/etc/cs-unifi-bouncer-pro/bouncer.env
 StateDirectory=cs-unifi-bouncer-pro
 Environment=DATA_DIR=/var/lib/cs-unifi-bouncer-pro
 
+# Serve the health and metrics endpoints on loopback only. The program default
+# (all interfaces) suits containers; on a host it would expose them to the
+# network. A HEALTH_ADDR or METRICS_ADDR in the environment file overrides
+# these, for example to let a remote Prometheus scrape metrics.
+Environment=HEALTH_ADDR=127.0.0.1:8081
+Environment=METRICS_ADDR=127.0.0.1:9090
+
 # Security hardening
 DynamicUser=yes
+UMask=0077
 CapabilityBoundingSet=
 AmbientCapabilities=
 NoNewPrivileges=yes
@@ -29,14 +37,20 @@ PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
+ProtectKernelLogs=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
 RestrictAddressFamilies=AF_INET AF_INET6
 RestrictNamespaces=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
+SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 

@@ -1,3 +1,7 @@
+# Restricts the bouncer to the traffic it needs. Every selector and address
+# marked "adjust" is a placeholder for your cluster; with the wrong value the
+# matching traffic is dropped, which shows up as `connection refused` or
+# timeouts in the logs and as 503 from /readyz.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -11,32 +15,58 @@ spec:
     - Ingress
     - Egress
 
+  # Only the metrics port is reachable, and only from the monitoring
+  # namespace. The health port (8081) has no rule: kubelet probes come from the
+  # node, which common CNIs exempt from NetworkPolicy. If probes fail under
+  # your CNI, allow the node address range on 8081 here.
   ingress:
-    # Allow Prometheus scrapers to reach the metrics endpoint.
-    - ports:
+    - from:
+        # Adjust: the namespace your Prometheus runs in.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
         - protocol: TCP
           port: 9090
-    # Allow kubelet liveness/readiness probes.
-    - ports:
-        - protocol: TCP
-          port: 8081
 
   egress:
-    # Allow DNS resolution (required by all egress connections).
-    - ports:
+    # DNS, through the cluster resolver only.
+    # Adjust: the labels of your cluster DNS pods if they differ.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
-    # Allow egress to the UniFi controller: 443 on UniFi OS consoles (UDM,
-    # UCG, Cloud Key Gen2+), 8443 on a self-hosted Network Application.
-    # Remove the port you do not use.
-    - ports:
+    # The UniFi controller: 443 on UniFi OS consoles (UDM, UCG, Cloud Key
+    # Gen2+), 8443 on a self-hosted Network Application. Remove the port you do
+    # not use.
+    # Adjust: the controller address; it must match UNIFI_URL.
+    - to:
+        - ipBlock:
+            cidr: 192.168.1.1/32
+      ports:
         - protocol: TCP
           port: 443
         - protocol: TCP
           port: 8443
-    # Allow egress to CrowdSec LAPI (default port 8080).
-    - ports:
+    # CrowdSec LAPI (default port 8080).
+    # Adjust: the labels of your LAPI pods (these match the CrowdSec Helm
+    # chart). For a LAPI outside the cluster, use an ipBlock instead.
+    - to:
+        - podSelector:
+            matchLabels:
+              k8s-app: crowdsec
+              type: lapi
+      ports:
         - protocol: TCP
           port: 8080
+    # Add rules of your own for any optional feature that fetches from the
+    # internet: BLOCKLIST_URLS, ABUSEIPDB_LIST, CLOUDFLARE_WHITELIST_ENABLED
+    # and WEBHOOK_URL.

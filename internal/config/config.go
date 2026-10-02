@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/webhook"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/v2"
@@ -134,6 +135,12 @@ type Config struct {
 	// Blocklist import
 	BlocklistURLs            []string      `koanf:"-"` // parsed from BLOCKLIST_URLS CSV
 	BlocklistRefreshInterval time.Duration `koanf:"blocklist_refresh_interval"`
+	// BlocklistMinPrefixV4 and V6 are the shortest prefix lengths a feed
+	// entry may have. Shorter ranges are skipped like any other unbannable
+	// entry. They apply to BLOCKLIST_URLS and the AbuseIPDB feed, not to
+	// CrowdSec decisions.
+	BlocklistMinPrefixV4 int `koanf:"blocklist_min_prefix_v4"`
+	BlocklistMinPrefixV6 int `koanf:"blocklist_min_prefix_v6"`
 
 	// AbuseIPDB feed (github.com/borestad/blocklist-abuseipdb)
 	AbuseIPDBList            string        `koanf:"abuseipdb_list"`
@@ -386,6 +393,8 @@ func defaults() map[string]interface{} {
 		"health_check_lapi":              true,
 		"history_max_events":             10000,
 		"blocklist_refresh_interval":     "24h",
+		"blocklist_min_prefix_v4":        decision.DefaultMinRangePrefixV4,
+		"blocklist_min_prefix_v6":        decision.DefaultMinRangePrefixV6,
 		"abuseipdb_refresh_interval":     "6h",
 		"decision_rate_limit":            0,
 		"decision_burst_size":            1000,
@@ -589,8 +598,14 @@ func (c *Config) validateFirewall() error {
 
 	// Validate zone pairs if mode is zone or auto
 	if c.FirewallMode != "legacy" {
-		if _, err := c.ParseZonePairs(); err != nil {
+		pairs, err := c.ParseZonePairs()
+		if err != nil {
 			return fmt.Errorf("ZONE_PAIRS: %w", err)
+		}
+		// With no pairs, every block policy the bouncer manages would be
+		// treated as belonging to a removed pair and deleted.
+		if c.FirewallMode == "zone" && len(pairs) == 0 {
+			return fmt.Errorf("ZONE_PAIRS must name at least one src->dst zone pair when FIREWALL_MODE=zone")
 		}
 	}
 	return nil
@@ -739,6 +754,12 @@ func (c *Config) validateFeeds() error {
 			return fmt.Errorf("BLOCKLIST_URLS entry %d must be an absolute http:// or https:// URL", i+1)
 		}
 	}
+	if c.BlocklistMinPrefixV4 < decision.DefaultMinRangePrefixV4 || c.BlocklistMinPrefixV4 > 32 {
+		return fmt.Errorf("BLOCKLIST_MIN_PREFIX_V4 must be between %d and 32; got %d", decision.DefaultMinRangePrefixV4, c.BlocklistMinPrefixV4)
+	}
+	if c.BlocklistMinPrefixV6 < decision.DefaultMinRangePrefixV6 || c.BlocklistMinPrefixV6 > 128 {
+		return fmt.Errorf("BLOCKLIST_MIN_PREFIX_V6 must be between %d and 128; got %d", decision.DefaultMinRangePrefixV6, c.BlocklistMinPrefixV6)
+	}
 	if err := c.validateAbuseIPDB(); err != nil {
 		return err
 	}
@@ -852,8 +873,8 @@ func (c *Config) validateCloudflare() error {
 	if _, err := c.ParseCloudflareZonePairs(); err != nil {
 		return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: %w", err)
 	}
-	if !isHTTPURL(c.CloudflareIPv4URL) || !isHTTPURL(c.CloudflareIPv6URL) {
-		return fmt.Errorf("CLOUDFLARE_IPV4_URL and CLOUDFLARE_IPV6_URL must be absolute http:// or https:// URLs")
+	if !isHTTPSURL(c.CloudflareIPv4URL) || !isHTTPSURL(c.CloudflareIPv6URL) {
+		return fmt.Errorf("CLOUDFLARE_IPV4_URL and CLOUDFLARE_IPV6_URL must be absolute https:// URLs")
 	}
 	return nil
 }
@@ -893,6 +914,11 @@ func (c *Config) InsecureLAPIURLWarning() string {
 func isHTTPURL(raw string) bool {
 	u, err := url.Parse(raw)
 	return err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https")
+}
+
+func isHTTPSURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Host != "" && u.Scheme == "https"
 }
 
 // isLoopbackHost reports whether host is the loopback address or "localhost".

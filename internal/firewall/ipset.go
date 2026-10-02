@@ -151,10 +151,21 @@ func (s *IPSet) SkipUnchanged() bool {
 // CommitFlushed records exactly the members sent in a successful API write.
 // Changes made while that write was in flight remain dirty for the next flush.
 func (s *IPSet) CommitFlushed(sent []string) {
+	s.CommitFlushedExcept(sent, nil)
+}
+
+// CommitFlushedExcept is CommitFlushed for a write that left out members the
+// controller refused. Those stay in the set but are never sent, so they count
+// as accounted for: without that, the set would differ from the flushed
+// snapshot forever and the whole shard would be written again on every sync.
+func (s *IPSet) CommitFlushedExcept(sent, refused []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastFlushed = make(map[string]struct{}, len(sent))
+	s.lastFlushed = make(map[string]struct{}, len(sent)+len(refused))
 	for _, ip := range sent {
+		s.lastFlushed[ip] = struct{}{}
+	}
+	for _, ip := range refused {
 		s.lastFlushed[ip] = struct{}{}
 	}
 	s.dirty = !sameMembers(s.members, s.lastFlushed)

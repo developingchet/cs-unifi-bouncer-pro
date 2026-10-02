@@ -137,10 +137,12 @@ func runDaemon() error {
 		}
 		if len(cfg.BlocklistURLs) > 0 {
 			blMgr := blocklist.NewManager(cfg.BlocklistURLs, cfg.BlocklistRefreshInterval, cfg.BanTTL, claims, protected, cfg.DryRun, log)
+			blMgr.SetMinPrefixes(cfg.BlocklistMinPrefixV4, cfg.BlocklistMinPrefixV6)
 			go blMgr.Run(ctx)
 		}
 		if feed := abuseIPDBFeed(cfg); feed.URL != "" {
 			abMgr := blocklist.NewFeedManager([]blocklist.Feed{feed}, cfg.AbuseIPDBRefreshInterval, cfg.BanTTL, claims, protected, cfg.DryRun, log)
+			abMgr.SetMinPrefixes(cfg.BlocklistMinPrefixV4, cfg.BlocklistMinPrefixV6)
 			go abMgr.Run(ctx)
 		}
 	}

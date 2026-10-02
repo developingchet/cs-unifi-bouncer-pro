@@ -518,19 +518,37 @@ func (m *Manager) blocksAheadOfAllow(ctx context.Context, site string, pair Zone
 // previously-created objects are cleaned up rather than left as orphans.
 // The provider is not used — no live Cloudflare IPs are fetched.
 func (m *Manager) Drain(ctx context.Context) error {
+	return m.drain(ctx, false)
+}
+
+// PreviewDrain logs the policies and lists Drain would delete without
+// deleting them.
+func (m *Manager) PreviewDrain(ctx context.Context) error {
+	return m.drain(ctx, true)
+}
+
+func (m *Manager) drain(ctx context.Context, dryRun bool) error {
+	var failed []error
 	for _, site := range m.sites {
 		policies, err := m.ctrl.ListZonePolicies(ctx, site)
 		if err != nil {
 			m.log.Warn().Err(err).Str("site", site).Msg("Cloudflare drain: failed to list zone policies")
+			failed = append(failed, fmt.Errorf("list zone policies for site %s: %w", site, err))
 		} else {
 			deletable := deletableWhitelistPolicies(policies)
 			for _, p := range policies {
 				if !deletable[p.ID] {
 					continue
 				}
+				if dryRun {
+					m.log.Info().Str("policy", p.Name).Str("site", site).
+						Msg("[DRY-RUN] Cloudflare drain: would delete whitelist policy")
+					continue
+				}
 				if err := m.ctrl.DeleteZonePolicy(ctx, site, p.ID); err != nil {
 					m.log.Warn().Err(err).Str("policy", p.Name).Str("site", site).
 						Msg("Cloudflare drain: failed to delete whitelist policy")
+					failed = append(failed, fmt.Errorf("delete whitelist policy %s: %w", p.Name, err))
 				} else {
 					m.log.Info().Str("policy", p.Name).Str("site", site).
 						Msg("Cloudflare drain: deleted whitelist policy")
@@ -541,14 +559,21 @@ func (m *Manager) Drain(ctx context.Context) error {
 		tmls, err := m.ctrl.ListTrafficMatchingLists(ctx, site)
 		if err != nil {
 			m.log.Warn().Err(err).Str("site", site).Msg("Cloudflare drain: failed to list TMLs")
+			failed = append(failed, fmt.Errorf("list traffic matching lists for site %s: %w", site, err))
 		} else {
 			for _, t := range tmls {
 				if !strings.HasPrefix(t.Name, whitelistPrefix) {
 					continue
 				}
+				if dryRun {
+					m.log.Info().Str("tml", t.Name).Str("site", site).
+						Msg("[DRY-RUN] Cloudflare drain: would delete whitelist TML")
+					continue
+				}
 				if err := m.ctrl.DeleteTrafficMatchingList(ctx, site, t.ID); err != nil {
 					m.log.Warn().Err(err).Str("tml", t.Name).Str("site", site).
 						Msg("Cloudflare drain: failed to delete whitelist TML")
+					failed = append(failed, fmt.Errorf("delete whitelist list %s: %w", t.Name, err))
 				} else {
 					m.log.Info().Str("tml", t.Name).Str("site", site).
 						Msg("Cloudflare drain: deleted whitelist TML")
@@ -556,7 +581,7 @@ func (m *Manager) Drain(ctx context.Context) error {
 			}
 		}
 	}
-	return nil
+	return errors.Join(failed...)
 }
 
 // tmlItemsEqual returns true if two TML item slices have the same values (order-independent).

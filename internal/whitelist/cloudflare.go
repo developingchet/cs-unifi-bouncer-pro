@@ -24,7 +24,7 @@ func NewCloudflareProvider(ipv4URL, ipv6URL string) *CloudflareProvider {
 	return &CloudflareProvider{
 		IPv4URL:    ipv4URL,
 		IPv6URL:    ipv6URL,
-		HTTPClient: &http.Client{Timeout: 15 * time.Second, CheckRedirect: feedhttp.CheckRedirect},
+		HTTPClient: feedhttp.NewClient(15 * time.Second),
 	}
 }
 
@@ -39,6 +39,9 @@ func (p *CloudflareProvider) FetchIPv6(ctx context.Context) ([]string, error) {
 }
 
 func (p *CloudflareProvider) fetch(ctx context.Context, url string, ipv6 bool) ([]string, error) {
+	if !strings.HasPrefix(strings.ToLower(url), "https://") {
+		return nil, fmt.Errorf("refusing to fetch Cloudflare ranges over plain HTTP from %s", url)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request for %s: %w", url, err)
@@ -72,7 +75,13 @@ func (p *CloudflareProvider) fetch(ctx context.Context, url string, ipv6 bool) (
 		if err != nil || prefix.Addr().Is6() != ipv6 {
 			return nil, fmt.Errorf("invalid Cloudflare CIDR %q in %s", cidr, url)
 		}
+		if err := validateCloudflarePrefix(prefix); err != nil {
+			return nil, fmt.Errorf("unacceptable Cloudflare CIDR %q in %s: %w", cidr, url, err)
+		}
 		result = append(result, cidr)
+		if len(result) > maxCloudflareEntries {
+			return nil, fmt.Errorf("cloudflare feed %s lists more than %d CIDRs", url, maxCloudflareEntries)
+		}
 	}
 	if len(result) == 0 {
 		return nil, fmt.Errorf("cloudflare feed %s contains no CIDRs", url)

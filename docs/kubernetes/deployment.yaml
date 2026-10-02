@@ -27,6 +27,8 @@ spec:
         prometheus.io/port: "9090"
         prometheus.io/path: "/metrics"
     spec:
+      # The bouncer does not talk to the Kubernetes API; do not hand it a token.
+      automountServiceAccountToken: false
       containers:
         - name: cs-unifi-bouncer-pro
           # Pin to a specific release tag. Using 'latest' is not recommended in production
@@ -36,8 +38,20 @@ spec:
           env:
             - name: DATA_DIR
               value: /data
+            # Credentials are read from files mounted from the Secret, so they
+            # are not part of the container environment.
+            - name: UNIFI_API_KEY_FILE
+              value: /run/secrets/cs-unifi-bouncer-pro/UNIFI_API_KEY
+            - name: UNIFI_USERNAME_FILE
+              value: /run/secrets/cs-unifi-bouncer-pro/UNIFI_USERNAME
+            - name: UNIFI_PASSWORD_FILE
+              value: /run/secrets/cs-unifi-bouncer-pro/UNIFI_PASSWORD
+            - name: CROWDSEC_LAPI_KEY_FILE
+              value: /run/secrets/cs-unifi-bouncer-pro/CROWDSEC_LAPI_KEY
+          # Non-secret settings. Add further settings to the ConfigMap in
+          # secret.example.yaml.
           envFrom:
-            - secretRef:
+            - configMapRef:
                 name: cs-unifi-bouncer-pro
           ports:
             - name: metrics
@@ -68,16 +82,23 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 15
             failureThreshold: 3
+          # A periodic resync reads the whole LAPI decision list into memory,
+          # accepting a response of up to 256 MiB, and then decodes it. The
+          # limit must stay above that cap or a very large list is OOM-killed
+          # mid-resync; raise it further for lists that approach the cap.
           resources:
             requests:
               cpu: 50m
-              memory: 64Mi
+              memory: 128Mi
             limits:
               cpu: 500m
-              memory: 256Mi
+              memory: 512Mi
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: credentials
+              mountPath: /run/secrets/cs-unifi-bouncer-pro
+              readOnly: true
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -89,5 +110,12 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: cs-unifi-bouncer-pro-data
+        - name: credentials
+          secret:
+            secretName: cs-unifi-bouncer-pro
+            # Readable by the pod's fsGroup only.
+            defaultMode: 0440
       securityContext:
         fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault

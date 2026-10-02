@@ -212,6 +212,8 @@ Templates are rendered at startup and must produce a non-empty name that include
 |----------|---------|-------------|
 | `BLOCKLIST_URLS` | — | Comma-separated URLs of plain-text IP/CIDR blocklists to fetch |
 | `BLOCKLIST_REFRESH_INTERVAL` | `24h` | How often to re-fetch each URL |
+| `BLOCKLIST_MIN_PREFIX_V4` | `8` | Shortest IPv4 prefix accepted for a feed entry (8-32) |
+| `BLOCKLIST_MIN_PREFIX_V6` | `32` | Shortest IPv6 prefix accepted for a feed entry (32-128) |
 
 ### AbuseIPDB blocklist
 
@@ -247,8 +249,8 @@ Imports a list from [borestad/blocklist-abuseipdb](https://github.com/borestad/b
 | `LOG_FORMAT` | `json` | `json` or `text` |
 | `DRY_RUN` | `false` | Safe testing mode. The bouncer connects to both the UniFi controller and CrowdSec LAPI, reads all existing state, and logs every action it *would* take — but makes zero write requests (no `POST`, `PUT`, or `DELETE` to UniFi) and does not mutate bbolt state. Reads (`GET`) are still performed so the diff output is meaningful. Turning off dry run after a dry run session starts cleanly with no phantom bbolt entries. |
 | `METRICS_ENABLED` | `true` | Expose Prometheus metrics endpoint |
-| `METRICS_ADDR` | `:9090` | Listen address for `/metrics` |
-| `HEALTH_ADDR` | `:8081` | Listen address for `/healthz` and `/readyz` |
+| `METRICS_ADDR` | `:9090` | Listen address for `/metrics`. The default binds all interfaces, which a container needs; on a host use `127.0.0.1:9090` |
+| `HEALTH_ADDR` | `:8081` | Listen address for `/healthz` and `/readyz`. The default binds all interfaces; on a host use `127.0.0.1:8081` |
 
 ---
 
@@ -496,7 +498,7 @@ last_group_update  2026-02-24T12:00:00Z
 ```
 
 The `--data-dir` flag overrides the data directory (default: `DATA_DIR` env or `/data`).
-While the daemon runs, bbolt holds an exclusive lock on the database. Run `status` inside the bouncer's container, for example `docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status`: it then reads a consistent snapshot the daemon serves on `HEALTH_ADDR` at `/status/db`. That endpoint answers only requests from the container itself (loopback or its own address) that present the token the daemon writes to `status.token` in `DATA_DIR` at startup, so only a caller that can already read the data directory gets the snapshot. With the daemon stopped, `status` opens the database directly.
+While the daemon runs, bbolt holds an exclusive lock on the database. Run `status` inside the bouncer's container, for example `docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status`: it then reads a consistent snapshot the daemon serves on `HEALTH_ADDR` at `/status/db`. That endpoint answers only requests from the container itself (loopback or its own address) that present the token the daemon writes to `status.token` in `DATA_DIR` at startup, so only a caller that can already read the data directory gets the snapshot. The snapshot must finish within 30 seconds, and the daemon and `status` remove leftover `bouncer.db.status-*` files older than five minutes from `DATA_DIR`. With the daemon stopped, `status` opens the database directly.
 
 ### `drain` subcommand
 
@@ -554,7 +556,7 @@ Exits 0 when all checks pass, 1 if any fail. The zone list output is useful for 
 
 ### `ban` subcommand
 
-Manually bans a single IP address across all sites listed in `UNIFI_SITES`. The ban is written to the relevant firewall group shards and recorded in bbolt for expiry tracking.
+Manually bans a single IP address across all sites listed in `UNIFI_SITES`. The ban is written to the relevant firewall group shards and recorded in bbolt for expiry tracking. The same guards as for CrowdSec decisions apply: the command refuses private, loopback and link-local addresses, anything covered by `BLOCK_WHITELIST`, and ranges broader than /8 (IPv4) or /32 (IPv6).
 
 ```bash
 cs-unifi-bouncer-pro ban 203.0.113.42               # Ban for 24h (default)
@@ -574,6 +576,8 @@ Removes a manually or automatically applied ban from all configured sites and de
 cs-unifi-bouncer-pro unban 203.0.113.42
 cs-unifi-bouncer-pro unban 2001:db8::1
 ```
+
+An unban does not change CrowdSec. If CrowdSec still holds a decision for the address, the ban is applied again at the next stream pull or resync, so the command prints a reminder to remove the decision there too (`cscli decisions delete --ip <IP>`).
 
 ---
 
@@ -663,7 +667,13 @@ The unit file enables a comprehensive set of systemd hardening directives:
 | `LockPersonality=yes` | ABI personality locked |
 | `MemoryDenyWriteExecute=yes` | No writable+executable memory mappings |
 | `RestrictRealtime=yes` | Real-time scheduling blocked |
+| `UMask=0077` | Created files are readable by the service user only |
+| `ProtectProc=invisible`, `ProcSubset=pid` | Other processes and non-process `/proc` entries hidden (systemd 247+) |
+| `ProtectKernelLogs=yes`, `ProtectClock=yes`, `ProtectHostname=yes` | No kernel log, clock or hostname access |
+| `SystemCallArchitectures=native` | Only the native syscall ABI is accepted |
 | `SystemCallFilter=@system-service` | Syscall allowlist (service profile) |
+
+The unit also sets `HEALTH_ADDR=127.0.0.1:8081` and `METRICS_ADDR=127.0.0.1:9090` so both endpoints are reachable from the host only; see [docs/systemd/README.md](docs/systemd/README.md#listen-addresses) to expose metrics to a remote Prometheus.
 
 State is stored in `/var/lib/cs-unifi-bouncer-pro/` (created automatically by `StateDirectory=`). Send `SIGHUP` via `systemctl reload cs-unifi-bouncer-pro` to hot-reload zone pairs.
 
@@ -683,8 +693,8 @@ Manifests are provided under `docs/kubernetes/`. Full instructions are in [docs/
 |------|----------|
 | `docs/kubernetes/deployment.yaml` | `Deployment` (1 replica, Recreate strategy) with liveness/readiness probes, resource limits, securityContext, and PVC mount |
 | `docs/kubernetes/pvc.yaml` | `PersistentVolumeClaim` for `/data` (bbolt) |
-| `docs/kubernetes/secret.example.yaml` | `Secret` template — copy, fill in values, do **not** commit |
-| `docs/kubernetes/networkpolicy.yaml` | `NetworkPolicy` — restricts ingress/egress to metrics (9090), health (8081), UniFi (443), LAPI (8080), and DNS (53) |
+| `docs/kubernetes/secret.example.yaml` | `Secret` (credentials, mounted as files and read through the `*_FILE` settings) and `ConfigMap` (other settings) templates — copy, fill in values, do **not** commit |
+| `docs/kubernetes/networkpolicy.yaml` | `NetworkPolicy` — ingress to the metrics port (9090) from the monitoring namespace only; egress to cluster DNS, the UniFi controller, and the LAPI. The peers are placeholders to adjust for your cluster |
 
 **Quick deploy:**
 

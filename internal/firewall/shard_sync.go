@@ -32,8 +32,9 @@ func (sm *ShardManager) countDirty() int {
 
 // syncAllFamilies flushes dirty shards for every family managed by this ShardManager.
 // Takes a snapshot of shard pointers under lock to avoid data races with concurrent AddIP calls
-// that may append to the Shards slice. Returns the first error encountered (subsequent errors
-// are still attempted and logged internally by syncShard).
+// that may append to the Shards slice. Returns the first error encountered. Later shards are
+// still attempted, except after a rate limit or once the manager has paused writes: the
+// controller is refusing requests then, and the rest stay dirty for the next tick.
 func (sm *ShardManager) syncAllFamilies(ctx context.Context) error {
 	// Snapshot shard pointers under read lock.
 	// Individual shard operations (IPSet) are internally lock-protected,
@@ -45,11 +46,28 @@ func (sm *ShardManager) syncAllFamilies(ctx context.Context) error {
 
 	var firstErr error
 	for _, shard := range shards {
-		if err := sm.syncShard(ctx, shard); err != nil && firstErr == nil {
+		err := sm.syncShard(ctx, shard)
+		if err == nil {
+			continue
+		}
+		if firstErr == nil {
 			firstErr = err
+		}
+		if sm.stopsFlush(err) {
+			break
 		}
 	}
 	return firstErr
+}
+
+// stopsFlush reports whether a failed shard write means the remaining shards
+// should not be attempted in this flush.
+func (sm *ShardManager) stopsFlush(err error) bool {
+	var rl *controller.ErrRateLimit
+	if errors.As(err, &rl) {
+		return true
+	}
+	return sm.writesPaused != nil && sm.writesPaused()
 }
 
 func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) error {
@@ -235,7 +253,7 @@ func (sm *ShardManager) markCreatedActive(shard *Shard) {
 // commitSyncedMembers records sentMembers as the shard's flushed content and
 // caches them in bbolt.
 func (sm *ShardManager) commitSyncedMembers(shard *Shard, sentMembers []string, shardLabel string) {
-	shard.IPs.CommitFlushed(sentMembers)
+	shard.IPs.CommitFlushedExcept(sentMembers, sm.refusedMembers(shard))
 	metrics.ShardIPCount.WithLabelValues(shard.Family, shardLabel, sm.site).Set(float64(len(sentMembers)))
 	if err := sm.store.SetGroup(cacheKey(sm.site, shard.Name), storage.GroupRecord{
 		UnifiID: shard.ID,

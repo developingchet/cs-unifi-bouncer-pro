@@ -188,11 +188,87 @@ func TestStage8_DeleteIgnoresMinDuration(t *testing.T) {
 	cfg := NewFilterConfig()
 	cfg.MinBanDuration = 24 * time.Hour
 
-	// delete actions are always allowed regardless of duration
-	d := makeDecision("delete", "ip", "1.2.3.4", "ssh-bf", "crowdsec", "1m")
-	r := Filter(d, cfg, zerolog.Nop())
+	// deletions are applied regardless of duration
+	d := makeDecision("ban", "ip", "1.2.3.4", "ssh-bf", "crowdsec", "1m")
+	r := FilterDeleted(d, cfg, zerolog.Nop())
 	if !r.Passed {
-		t.Error("delete action should pass regardless of min duration")
+		t.Error("deletion should pass regardless of min duration")
+	}
+}
+
+// A decision in the stream's new list is a ban. One of another type, such as
+// "delete", must not slip past the ban-only stages and be applied as a ban.
+func TestFilter_NewDecisionOfOtherTypeIsDropped(t *testing.T) {
+	cfg := NewFilterConfig()
+	cfg.AllowedOrigins = []string{"crowdsec"}
+	for _, tt := range []struct {
+		name, action, value, origin string
+	}{
+		{"delete type", "delete", "198.51.100.1", "crowdsec"},
+		{"delete type on private address", "delete", "10.1.2.3", "crowdsec"},
+		{"delete type from unlisted origin", "delete", "198.51.100.1", "cscli"},
+		{"upper-case delete type", "DELETE", "198.51.100.1", "crowdsec"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := makeDecision(tt.action, "ip", tt.value, "ssh-bf", tt.origin, "4h")
+			if r := Filter(d, cfg, zerolog.Nop()); r.Passed {
+				t.Fatalf("new %q decision passed: %+v", tt.action, r)
+			}
+		})
+	}
+}
+
+func TestFilter_NonPositiveBanDurationIsDropped(t *testing.T) {
+	for _, tt := range []struct {
+		duration string
+		want     bool
+	}{
+		{"4h", true},
+		{"0s", false},
+		{"-5m", false},
+		{"-3h59m59.5s", false},
+	} {
+		t.Run(tt.duration, func(t *testing.T) {
+			d := makeDecision("ban", "ip", "198.51.100.1", "ssh-bf", "crowdsec", tt.duration)
+			if got := Filter(d, NewFilterConfig(), zerolog.Nop()).Passed; got != tt.want {
+				t.Fatalf("Passed = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTooBroadFor(t *testing.T) {
+	tests := []struct {
+		value      string
+		ipv6       bool
+		minV4      int
+		minV6      int
+		wantBroad  bool
+		descriptor string
+	}{
+		{"198.51.100.0/24", false, 8, 32, false, "default minimum"},
+		{"64.0.0.0/8", false, 8, 32, false, "at the IPv4 minimum"},
+		{"64.0.0.0/7", false, 8, 32, true, "below the IPv4 minimum"},
+		{"64.0.0.0/8", false, 16, 32, true, "raised IPv4 minimum"},
+		{"198.51.0.0/16", false, 16, 32, false, "at a raised IPv4 minimum"},
+		{"198.51.100.7", false, 24, 48, false, "single address"},
+		{"2001:db8::/32", true, 8, 32, false, "at the IPv6 minimum"},
+		{"2001:db8::/32", true, 8, 48, true, "raised IPv6 minimum"},
+		{"2001:db8:1::/48", true, 8, 48, false, "at a raised IPv6 minimum"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.descriptor, func(t *testing.T) {
+			if got := TooBroadFor(tt.value, tt.ipv6, tt.minV4, tt.minV6); got != tt.wantBroad {
+				t.Fatalf("TooBroadFor(%q, %v, %d, %d) = %v, want %v", tt.value, tt.ipv6, tt.minV4, tt.minV6, got, tt.wantBroad)
+			}
+		})
+	}
+}
+
+func TestFilterDeleted_NonPositiveDurationStillPasses(t *testing.T) {
+	d := makeDecision("ban", "ip", "198.51.100.1", "ssh-bf", "crowdsec", "-5m")
+	if !FilterDeleted(d, NewFilterConfig(), zerolog.Nop()).Passed {
+		t.Fatal("a deletion must be applied whatever duration the stream reports")
 	}
 }
 

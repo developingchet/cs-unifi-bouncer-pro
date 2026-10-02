@@ -26,6 +26,20 @@ func newTestBouncer(t *testing.T, cfg *config.Config) *Bouncer {
 	return b
 }
 
+func TestNewMetricsServer_BoundsConnections(t *testing.T) {
+	srv := newMetricsServer("127.0.0.1:0")
+	for name, got := range map[string]time.Duration{
+		"ReadHeaderTimeout": srv.ReadHeaderTimeout,
+		"ReadTimeout":       srv.ReadTimeout,
+		"WriteTimeout":      srv.WriteTimeout,
+		"IdleTimeout":       srv.IdleTimeout,
+	} {
+		if got <= 0 {
+			t.Errorf("%s = %v, want a positive timeout", name, got)
+		}
+	}
+}
+
 func TestBouncer_New_RateLimiterNilWhenDisabled(t *testing.T) {
 	cfg := &config.Config{
 		UnifiSites:           []string{"default"},
@@ -135,6 +149,25 @@ func TestBouncer_DeletionOfWhitelistedBanReachesHandler(t *testing.T) {
 	b.handleDecisionBlock(context.Background(), &models.DecisionsStreamResponse{New: []*models.Decision{d}, Deleted: []*models.Decision{d}}, "stream")
 	if len(jobs) != 1 || jobs[0].Action != "delete" || jobs[0].IP != ip || jobs[0].Source != "crowdsec:id:42" {
 		t.Fatalf("jobs = %+v, want one delete for %s", jobs, ip)
+	}
+}
+
+func TestBouncer_NewDecisionOfDeleteTypeIsNotBanned(t *testing.T) {
+	cfg := &config.Config{UnifiSites: []string{"default"}, BanTTL: time.Hour, BlockWhitelist: []string{"203.0.113.0/24"}}
+	b := newTestBouncer(t, cfg)
+	var jobs []SyncJob
+	b.handler = func(_ context.Context, job SyncJob) error {
+		jobs = append(jobs, job)
+		return nil
+	}
+	action, scope, origin := "delete", "ip", "cscli"
+	for i, ip := range []string{"198.51.100.9", "203.0.113.7", "10.0.0.5"} {
+		value := ip
+		d := &models.Decision{ID: int64(i + 1), Type: &action, Scope: &scope, Value: &value, Origin: &origin}
+		b.handleDecisionBlock(context.Background(), &models.DecisionsStreamResponse{New: []*models.Decision{d}}, "stream")
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("non-ban decisions in the new list reached the handler: %+v", jobs)
 	}
 }
 

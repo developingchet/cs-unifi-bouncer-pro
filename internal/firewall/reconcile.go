@@ -32,17 +32,31 @@ func (m *managerImpl) Reconcile(ctx context.Context, sites []string) (*Reconcile
 // IPs missing from sm and removes members no longer in desired. If ctx is
 // cancelled partway through, it returns the counts accumulated so far with
 // ctx.Err() appended to errs.
+//
+// desired was read some time ago, and decisions keep being applied while a
+// large diff runs. Each change is therefore confirmed against the ban database
+// just before it is made, so a ban recorded since the snapshot is not removed
+// and a ban lifted since is not added back.
 func (m *managerImpl) diffFamily(ctx context.Context, sm *ShardManager, desired map[string]struct{}) (added, removed int, errs []error) {
 	for ip := range desired {
 		if ctx.Err() != nil {
 			return added, removed, append(errs, ctx.Err())
 		}
-		if !sm.Contains(ip) {
-			if _, _, err := sm.Add(ctx, ip); err != nil {
-				errs = append(errs, err)
-			} else {
-				added++
-			}
+		if sm.Contains(ip) {
+			continue
+		}
+		recorded, err := m.store.BanExists(ip)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("re-read ban %s: %w", ip, err))
+			continue
+		}
+		if !recorded {
+			continue
+		}
+		if _, _, err := sm.Add(ctx, ip); err != nil {
+			errs = append(errs, err)
+		} else {
+			added++
 		}
 	}
 
@@ -50,12 +64,21 @@ func (m *managerImpl) diffFamily(ctx context.Context, sm *ShardManager, desired 
 		if ctx.Err() != nil {
 			return added, removed, append(errs, ctx.Err())
 		}
-		if _, ok := desired[ip]; !ok {
-			if _, err := sm.Remove(ctx, ip); err != nil {
-				errs = append(errs, err)
-			} else {
-				removed++
-			}
+		if _, ok := desired[ip]; ok {
+			continue
+		}
+		recorded, err := m.store.BanExists(ip)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("re-read ban %s: %w", ip, err))
+			continue
+		}
+		if recorded {
+			continue
+		}
+		if _, err := sm.Remove(ctx, ip); err != nil {
+			errs = append(errs, err)
+		} else {
+			removed++
 		}
 	}
 	return added, removed, errs
@@ -110,64 +133,125 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 			m.log.Info().Str("site", site).Int("would_add", added).Int("would_remove", removed).
 				Msg("[DRY-RUN] reconcile diff computed; no changes written to UniFi")
 		}
-	} else {
-		func() {
-			m.syncMu.Lock()
-			defer m.syncMu.Unlock()
-			// Shards the bouncer considers in sync may have been edited on the
-			// controller. Checked under syncMu so no flush is in flight.
-			for _, mgr := range []*ShardManager{v4Mgr, v6Mgr} {
-				if mgr == nil {
-					continue
-				}
-				missing, extra, err := mgr.MarkRemoteDrift(ctx)
-				if err != nil {
-					errs = append(errs, fmt.Errorf("check controller membership for site %s: %w", site, err))
-					continue
-				}
-				added += missing
-				removed += extra
-			}
-			flushed := true
-			if err := v4Mgr.syncAllFamilies(ctx); err != nil {
-				errs = append(errs, fmt.Errorf("v4 flush: %w", err))
-				flushed = false
-			}
-			if v6Mgr != nil {
-				if err := v6Mgr.syncAllFamilies(ctx); err != nil {
-					errs = append(errs, fmt.Errorf("v6 flush: %w", err))
-					flushed = false
-				}
-			}
-			// Donor shards keep their policies until every target has been
-			// flushed, so draining and pruning wait for a clean flush.
-			if flushed {
-				if err := v4Mgr.drainDraining(ctx); err != nil {
-					errs = append(errs, fmt.Errorf("drain v4 shards: %w", err))
-				}
-				if v6Mgr != nil {
-					if err := v6Mgr.drainDraining(ctx); err != nil {
-						errs = append(errs, fmt.Errorf("drain v6 shards: %w", err))
-					}
-				}
-				m.pruneEmptyTailShards(ctx, site, v4Mgr, v6Mgr)
-			}
-			// Membership alone does not enforce bans. Repair policies/rules that were
-			// deleted externally or missed when an activation callback failed. This
-			// runs even when one shard failed to flush: that shard has no ID yet
-			// and is skipped, and every other shard still gets its policy.
-			switch m.cachedMode(site) {
-			case "zone":
-				if err := m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr); err != nil {
-					errs = append(errs, fmt.Errorf("ensure zone policies for site %s: %w", site, err))
-				}
-			case "legacy":
-				if err := m.legacyMgr.EnsureRules(ctx, site, v4Mgr, v6Mgr); err != nil {
-					errs = append(errs, fmt.Errorf("ensure legacy rules for site %s: %w", site, err))
-				}
-			}
-		}()
+		return added, removed, errs
 	}
 
-	return
+	missing, extra, writeErrs := m.reconcileWrites(ctx, site, v4Mgr, v6Mgr)
+	return added + missing, removed + extra, append(errs, writeErrs...)
+}
+
+// reconcileWrites brings the controller in line with the shards' in-memory
+// state: it detects out-of-band edits, flushes dirty shards, drains donors,
+// prunes empty tails and repairs policies. It returns how many addresses the
+// controller was missing and had in excess.
+//
+// It holds syncMu throughout and follows the same write gates as SyncDirty:
+// nothing is written while the controller is rate limiting or the circuit
+// breaker is open, and the work stops as soon as either begins. Shards left
+// dirty are flushed by a later sync or reconcile.
+func (m *managerImpl) reconcileWrites(ctx context.Context, site string, v4Mgr, v6Mgr *ShardManager) (missing, extra int, errs []error) {
+	m.syncMu.Lock()
+	defer m.syncMu.Unlock()
+
+	if err := m.admitWrites(); err != nil {
+		m.log.Info().Err(err).Str("site", site).Msg("reconcile: controller writes deferred")
+		return 0, 0, []error{fmt.Errorf("reconcile writes for site %s: %w", site, err)}
+	}
+	defer func() {
+		for _, err := range errs {
+			m.noteRateLimit(err)
+		}
+		errs = m.settleProbe(ctx, errs)
+	}()
+
+	// Shards the bouncer considers in sync may have been edited on the
+	// controller. Checked under syncMu so no flush is in flight.
+	for _, mgr := range []*ShardManager{v4Mgr, v6Mgr} {
+		if mgr == nil {
+			continue
+		}
+		if m.writesPaused() != nil {
+			break
+		}
+		gone, surplus, err := mgr.MarkRemoteDrift(ctx)
+		if err != nil {
+			m.noteRateLimit(err)
+			errs = append(errs, fmt.Errorf("check controller membership for site %s: %w", site, err))
+			continue
+		}
+		missing += gone
+		extra += surplus
+	}
+	if m.writesPaused() != nil {
+		return missing, extra, errs
+	}
+
+	flushed, flushErrs := m.flushReconciled(ctx, v4Mgr, v6Mgr)
+	errs = append(errs, flushErrs...)
+	if m.writesPaused() != nil {
+		return missing, extra, errs
+	}
+
+	// Donor shards keep their policies until every target has been
+	// flushed, so draining and pruning wait for a clean flush.
+	if flushed {
+		errs = append(errs, m.drainReconciled(ctx, v4Mgr, v6Mgr)...)
+		m.pruneEmptyTailShards(ctx, site, v4Mgr, v6Mgr)
+		if m.writesPaused() != nil {
+			return missing, extra, errs
+		}
+	}
+
+	// Membership alone does not enforce bans. Repair policies/rules that were
+	// deleted externally or missed when an activation callback failed. This
+	// runs even when one shard failed to flush: that shard has no ID yet
+	// and is skipped, and every other shard still gets its policy.
+	switch m.cachedMode(site) {
+	case "zone":
+		if err := m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr); err != nil {
+			errs = append(errs, fmt.Errorf("ensure zone policies for site %s: %w", site, err))
+		}
+	case "legacy":
+		if err := m.legacyMgr.EnsureRules(ctx, site, v4Mgr, v6Mgr); err != nil {
+			errs = append(errs, fmt.Errorf("ensure legacy rules for site %s: %w", site, err))
+		}
+	}
+	return missing, extra, errs
+}
+
+// flushReconciled flushes the dirty shards of both families and reports
+// whether every family was flushed.
+func (m *managerImpl) flushReconciled(ctx context.Context, v4Mgr, v6Mgr *ShardManager) (bool, []error) {
+	var errs []error
+	flushed := true
+	for _, f := range []struct {
+		name string
+		sm   *ShardManager
+	}{{"v4", v4Mgr}, {"v6", v6Mgr}} {
+		if f.sm == nil {
+			continue
+		}
+		if m.writesPaused() != nil {
+			return false, errs
+		}
+		if err := f.sm.syncAllFamilies(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("%s flush: %w", f.name, err))
+			flushed = false
+		}
+	}
+	return flushed, errs
+}
+
+// drainReconciled removes the drained donor shards of both families.
+func (m *managerImpl) drainReconciled(ctx context.Context, v4Mgr, v6Mgr *ShardManager) []error {
+	var errs []error
+	if err := v4Mgr.drainDraining(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("drain v4 shards: %w", err))
+	}
+	if v6Mgr != nil {
+		if err := v6Mgr.drainDraining(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("drain v6 shards: %w", err))
+		}
+	}
+	return errs
 }

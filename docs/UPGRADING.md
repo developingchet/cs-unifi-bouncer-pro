@@ -21,6 +21,62 @@ report unhealthy during startup. The example Kubernetes Deployment adds a
 
 An empty `HEALTH_ADDR` is now rejected at startup.
 
+`CLOUDFLARE_IPV4_URL` and `CLOUDFLARE_IPV6_URL` must now be `https://` URLs; an
+`http://` URL fails startup. A fetched list is rejected, keeping the ranges
+from the last successful sync, when it is empty, has more than 1000 entries,
+or contains a range that is private, non-public, broader than a /12 (IPv4) or
+broader than a /29 (IPv6).
+
+A blocklist feed whose country filter rejects every entry now keeps its
+previous bans and logs an error; before, it released all of them. A feed that
+lists fewer than half of its previous entries is applied without pruning. See
+[Blocklist import](CONFIGURATION.md#external-blocklists). New settings
+`BLOCKLIST_MIN_PREFIX_V4` (default `8`) and `BLOCKLIST_MIN_PREFIX_V6` (default
+`32`) set the shortest prefix accepted for a feed entry.
+
+Kubernetes manifests, re-apply all of them:
+
+- `secret.example.yaml` now defines a Secret and a ConfigMap. The Secret holds
+  only `UNIFI_API_KEY`, `UNIFI_USERNAME`, `UNIFI_PASSWORD` and
+  `CROWDSEC_LAPI_KEY`; the Deployment mounts it as files under
+  `/run/secrets/cs-unifi-bouncer-pro` and sets the matching `*_FILE` variables
+  instead of loading the Secret with `envFrom`. Everything else (`UNIFI_URL`,
+  `CROWDSEC_LAPI_URL`, `ZONE_PAIRS`, and any setting you added to the Secret)
+  moves to the ConfigMap, which the Deployment loads with `envFrom`. A
+  Deployment applied without the new ConfigMap does not start.
+- `networkpolicy.yaml` no longer allows ingress on the health port or from
+  every source on the metrics port: metrics are reachable from the `monitoring`
+  namespace only. Egress is limited to cluster DNS, one controller address and
+  the CrowdSec LAPI pods. Edit the marked placeholders before applying, or the
+  bouncer loses its controller or LAPI connection.
+- The memory limit rises from 256Mi to 512Mi, above the 256 MiB cap on a LAPI
+  resync response. The pod also gets the `RuntimeDefault` seccomp profile and
+  no service account token.
+
+systemd: copy the new `docs/systemd/cs-unifi-bouncer-pro.service` over the
+installed unit and run `systemctl daemon-reload`.
+
+- The unit now sets `HEALTH_ADDR=127.0.0.1:8081` and
+  `METRICS_ADDR=127.0.0.1:9090`. A remote Prometheus that scraped the host
+  stops reaching the metrics port; set `METRICS_ADDR` in the environment file
+  to an address it can reach. The environment file overrides the unit.
+- Added `UMask=0077`, `ProtectProc=invisible`, `ProcSubset=pid`,
+  `ProtectKernelLogs=yes`, `ProtectClock=yes`, `ProtectHostname=yes` and
+  `SystemCallArchitectures=native`. `ProtectProc` and `ProcSubset` need
+  systemd 247; remove them on an older release.
+
+Seccomp: if you run with a downloaded copy of `security/seccomp-unifi.json`,
+download it again. `clone` is now allowed only without namespace flags and
+`clone3` returns `ENOSYS`, so the runtime creates threads through `clone`. A
+profile of your own that allows `clone3` keeps working.
+
+`/readyz` caches its result for 5 seconds. A dependency that recovers is
+reported ready up to 5 seconds later.
+
+A webhook endpoint that answers with a redirect no longer receives the event:
+the redirect is logged and not followed, so point `WEBHOOK_URL` at the final
+URL. An `http://` `WEBHOOK_URL` logs a warning at startup.
+
 ## From 2.0 to 2.1
 
 Building from source now requires Go 1.27.1 or newer.

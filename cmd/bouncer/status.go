@@ -19,6 +19,7 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/bouncer"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
+	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 )
 
@@ -56,6 +57,7 @@ snapshot from the bouncer's health server instead.`,
 // its health server instead; that works from inside the bouncer's container
 // (docker exec) or network namespace.
 func withReadOnlyStore(dataDir string, fn func(storage.Store) error) error {
+	bouncer.RemoveStaleSnapshots(dataDir, zerolog.Nop())
 	store, err := storage.NewBboltStoreReadOnly(dataDir)
 	if errors.Is(err, storage.ErrDatabaseLocked) {
 		return withSnapshotStore(dataDir, fn)
@@ -104,7 +106,7 @@ func fetchDBSnapshot(ctx context.Context, dataDir string) (string, error) {
 		return "", fmt.Errorf("read status token: %w", err)
 	}
 	snapshotURL := strings.TrimSuffix(healthURL, "/healthz") + bouncer.DBSnapshotPath
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, snapshotURL, nil)
 	if err != nil {
@@ -119,7 +121,7 @@ func fetchDBSnapshot(ctx context.Context, dataDir string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("%s returned HTTP %d", bouncer.DBSnapshotPath, resp.StatusCode)
 	}
-	f, err := os.CreateTemp(dataDir, "bouncer.db.status-*")
+	f, err := os.CreateTemp(dataDir, bouncer.SnapshotTempPrefix+"*")
 	if err != nil {
 		return "", err
 	}
@@ -251,7 +253,7 @@ func statusBansCmd(dataDir *string) *cobra.Command {
 				w := newTable()
 				fmt.Fprintln(w, "IP\tIPv6\tRECORDED_AT\tEXPIRES_AT\tEXPIRED")
 				for _, r := range f.apply(bans, now) {
-					fmt.Fprintf(w, "%s\t%v\t%s\t%s\t%v\n", r.ip, r.entry.IPv6,
+					fmt.Fprintf(w, "%s\t%v\t%s\t%s\t%v\n", printable(r.ip), r.entry.IPv6,
 						formatTime(r.entry.RecordedAt, "-"), formatTime(r.entry.ExpiresAt, "-"), isExpired(r.entry, now))
 				}
 				return w.Flush()
@@ -295,7 +297,7 @@ func statusIPCmd(dataDir *string) *cobra.Command {
 				w := newTable()
 				fmt.Fprintln(w, "TIME\tACTION\tORIGIN\tSCENARIO")
 				for _, e := range events {
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", formatTime(e.RecordedAt, "-"), e.Action, e.Origin, e.Scenario)
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", formatTime(e.RecordedAt, "-"), printable(e.Action), printable(e.Origin), printable(e.Scenario))
 				}
 				return w.Flush()
 			})
@@ -307,12 +309,12 @@ func statusIPCmd(dataDir *string) *cobra.Command {
 
 func printBan(w *tabwriter.Writer, ip string, entry *storage.BanEntry) error {
 	if entry == nil {
-		fmt.Fprintf(w, "ip\t%s\n", ip)
+		fmt.Fprintf(w, "ip\t%s\n", printable(ip))
 		fmt.Fprintf(w, "status\tnot banned\n")
 		return w.Flush()
 	}
 	fmt.Fprintln(w, "FIELD\tVALUE")
-	fmt.Fprintf(w, "ip\t%s\n", ip)
+	fmt.Fprintf(w, "ip\t%s\n", printable(ip))
 	fmt.Fprintf(w, "ipv6\t%v\n", entry.IPv6)
 	fmt.Fprintf(w, "recorded_at\t%s\n", formatTime(entry.RecordedAt, "-"))
 	fmt.Fprintf(w, "expires_at\t%s\n", formatTime(entry.ExpiresAt, "never"))
@@ -335,7 +337,7 @@ func statusHistoryCmd(dataDir *string) *cobra.Command {
 				w := newTable()
 				fmt.Fprintln(w, "TIME\tACTION\tIP\tORIGIN\tSCENARIO")
 				for _, e := range events {
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", formatTime(e.RecordedAt, "-"), e.Action, e.IP, e.Origin, e.Scenario)
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", formatTime(e.RecordedAt, "-"), printable(e.Action), printable(e.IP), printable(e.Origin), printable(e.Scenario))
 				}
 				return w.Flush()
 			})
