@@ -26,6 +26,20 @@ func newTestBouncer(t *testing.T, cfg *config.Config) *Bouncer {
 	return b
 }
 
+func TestNewMetricsServer_BoundsConnections(t *testing.T) {
+	srv := newMetricsServer("127.0.0.1:0")
+	for name, got := range map[string]time.Duration{
+		"ReadHeaderTimeout": srv.ReadHeaderTimeout,
+		"ReadTimeout":       srv.ReadTimeout,
+		"WriteTimeout":      srv.WriteTimeout,
+		"IdleTimeout":       srv.IdleTimeout,
+	} {
+		if got <= 0 {
+			t.Errorf("%s = %v, want a positive timeout", name, got)
+		}
+	}
+}
+
 func TestBouncer_New_RateLimiterNilWhenDisabled(t *testing.T) {
 	cfg := &config.Config{
 		UnifiSites:           []string{"default"},

@@ -306,16 +306,24 @@ func decisionSource(d *models.Decision) string {
 	return ""
 }
 
-// serveMetrics runs the Prometheus HTTP server.
-func (b *Bouncer) serveMetrics(ctx context.Context) error {
+// newMetricsServer builds the Prometheus HTTP server. The timeouts match the
+// health server so a stalled or slow client cannot hold a connection open.
+func newMetricsServer(addr string) *http.Server {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metricsHandler())
-	srv := &http.Server{
-		Addr:              b.cfg.MetricsAddr,
+	return &http.Server{
+		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+}
+
+// serveMetrics runs the Prometheus HTTP server.
+func (b *Bouncer) serveMetrics(ctx context.Context) error {
+	srv := newMetricsServer(b.cfg.MetricsAddr)
 
 	go func() {
 		<-ctx.Done()
