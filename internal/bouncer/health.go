@@ -20,7 +20,7 @@ import (
 // Health serves /healthz, /readyz and the status snapshot. It is started
 // before the firewall infrastructure loads, which can take minutes on a large
 // ban list, so /healthz answers for the whole startup. /readyz reports
-// "starting" until the first LAPI decision batch has been applied to UniFi.
+// "starting" until the first LAPI decision batch has been processed.
 type Health struct {
 	cfg      *config.Config
 	ctrl     controller.Controller

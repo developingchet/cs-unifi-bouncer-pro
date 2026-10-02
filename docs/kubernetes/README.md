@@ -66,6 +66,8 @@ If you use the Prometheus Operator, create a `ServiceMonitor` targeting port `90
 | Path     | Port | Description                                     |
 |----------|------|-------------------------------------------------|
 | /healthz | 8081 | Liveness: process is running                    |
-| /readyz  | 8081 | Readiness: first LAPI batch applied, UniFi controller reachable (Ping) |
+| /readyz  | 8081 | Readiness: first LAPI batch processed, UniFi controller reachable (Ping) |
+
+The pod stays unready until the first LAPI pull has been processed, which can take several minutes on a large ban list. The manifest raises `progressDeadlineSeconds` to 1200 so `kubectl rollout status` does not report a stalled rollout meanwhile; raise it, and any `helm --wait` or GitOps health timeout, further for larger lists.
 
 `/status/db` on the same port serves the ban database to `kubectl exec … status` inside the pod; it refuses requests without the token in `DATA_DIR/status.token`, so it does not need a Service port.

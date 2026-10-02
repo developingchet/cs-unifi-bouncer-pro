@@ -536,4 +536,4 @@ WEBHOOK_EVENTS=circuit_breaker_open,circuit_breaker_close,reconcile_drift
 | `HEALTH_ADDR` | `:8081` | Address for health endpoints (`/healthz`, `/readyz`) |
 | `JANITOR_INTERVAL` | `1h` | How often the background janitor lifts expired ban claims, records `expire` history events, and updates the `crowdsec_unifi_db_size_bytes` metric |
 | `SHUTDOWN_GRACE_PERIOD` | `30s` | Time given to in-flight goroutines to finish cleanly after a shutdown signal before the process exits forcefully. |
-| `HEALTH_CHECK_LAPI` | `true` | When `true`, `/readyz` checks both the UniFi controller and CrowdSec LAPI. Set to `false` to check only the controller. |
+| `HEALTH_CHECK_LAPI` | `true` | When `true`, `/readyz` checks both the UniFi controller and CrowdSec LAPI. Set to `false` to check only the controller. Either way `/readyz` returns 503 `starting` until the first LAPI decision batch has been processed, so it stays unready while the LAPI is unreachable at startup. |

@@ -42,7 +42,7 @@ type Bouncer struct {
 	resyncRejected map[string]struct{}
 	recorder       MetricsRecorder
 	limiter        *rate.Limiter // nil when rate limiting is disabled
-	// onStartupSynced run once, in order, after the first decision batch is applied.
+	// onStartupSynced callbacks run once, in order, after the first decision batch is applied.
 	onStartupSynced []func()
 }
 

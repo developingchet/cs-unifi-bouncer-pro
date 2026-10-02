@@ -107,18 +107,22 @@ func TestHealth_ServeAnswersHealthzBeforeSync(t *testing.T) {
 	go func() { served <- h.Serve(ctx, ln) }()
 
 	base := "http://" + ln.Addr().String()
-	for path, want := range map[string]int{
-		"/healthz": http.StatusOK,
-		"/readyz":  http.StatusServiceUnavailable,
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{"/healthz", http.StatusOK},
+		{"/readyz", http.StatusServiceUnavailable},
 	} {
-		resp, err := http.Get(base + path)
+		resp, err := client.Get(base + tc.path)
 		if err != nil {
-			t.Fatalf("GET %s: %v", path, err)
+			t.Fatalf("GET %s: %v", tc.path, err)
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode != want {
-			t.Errorf("GET %s = %d, want %d", path, resp.StatusCode, want)
+		if resp.StatusCode != tc.want {
+			t.Errorf("GET %s = %d, want %d", tc.path, resp.StatusCode, tc.want)
 		}
 	}
 

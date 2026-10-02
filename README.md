@@ -446,7 +446,7 @@ Available at `:8081` (configurable via `HEALTH_ADDR`):
 | Endpoint | Description |
 |----------|-------------|
 | `GET /healthz` | Liveness — returns 200 if the process is running |
-| `GET /readyz` | Readiness — returns 503 `starting` until the first CrowdSec decision batch is applied to UniFi, then 200 only if the UniFi controller (and the LAPI, with `HEALTH_CHECK_LAPI=true`) is reachable |
+| `GET /readyz` | Readiness — returns 503 `starting` until the first CrowdSec decision batch is processed, then 200 only if the UniFi controller (and the LAPI, with `HEALTH_CHECK_LAPI=true`) is reachable |
 
 ---
 

@@ -170,7 +170,7 @@ Use temporary directories for tests that write to disk. Clean them up with `t.Te
 - [ ] A test decision (`cscli decisions add -i 203.0.113.42 -t ban -d 1h`) appears in logs
 - [ ] Firewall group or zone policy is created/updated in the UniFi controller
 - [ ] `GET /healthz` returns 200
-- [ ] `GET /readyz` returns 200 once the first LAPI batch is applied (controller reachable)
+- [ ] `GET /readyz` returns 200 once the first LAPI batch is processed (controller reachable)
 - [ ] `dry_run=true` produces log output but no UniFi API calls
 
 ---
