@@ -80,6 +80,11 @@ Job `docker-push`, step **"Build and push multi-arch image"**
 - Default action: `SCMP_ACT_ERRNO` — all syscalls are denied unless explicitly
   listed.
 - Allowlist: the syscalls required by the Go runtime, bbolt, and TLS network I/O.
+- Namespaces: `clone` is allowed only when none of the namespace flags
+  (`CLONE_NEWNS`, `CLONE_NEWCGROUP`, `CLONE_NEWUTS`, `CLONE_NEWIPC`,
+  `CLONE_NEWUSER`, `CLONE_NEWPID`, `CLONE_NEWNET`) are set. `clone3` returns
+  `ENOSYS`, which makes the Go runtime fall back to `clone`; its flags are
+  passed in a struct that seccomp cannot inspect.
 
 CI validation runs on every push and pull request in two stages
 (`.github/workflows/ci.yml`):

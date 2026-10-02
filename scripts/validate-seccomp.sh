@@ -60,5 +60,19 @@ if [ ${#MISSING[@]} -gt 0 ]; then
   echo "(This may be intentional for a minimal profile — review before merging)"
 fi
 
+# Namespace-creating syscalls must not be allowed unconditionally. clone is
+# allowed only with an argument filter that rejects the namespace flags, and
+# clone3 (whose flags live in a struct seccomp cannot inspect) must be denied
+# so the Go runtime falls back to clone.
+UNFILTERED=$(jq -r '.syscalls[]
+  | select(.action == "SCMP_ACT_ALLOW" and ((.args // []) | length) == 0)
+  | .names[]
+  | select(. == "clone" or . == "clone3" or . == "unshare" or . == "setns")' "$PROFILE")
+if [ -n "$UNFILTERED" ]; then
+  echo "ERROR: these syscalls are allowed without an argument filter:"
+  echo "$UNFILTERED" | sed 's/^/  - /'
+  exit 1
+fi
+
 COUNT=$(jq '[.syscalls[] | select(.action == "SCMP_ACT_ALLOW") | .names | length] | add // 0' "$PROFILE")
 echo "OK: Profile valid — $COUNT syscall entries in allowlist (defaultAction: $DEFAULT_ACTION)"
