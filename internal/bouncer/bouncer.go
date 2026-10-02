@@ -40,8 +40,10 @@ type Bouncer struct {
 	// resyncRejected holds the sources of decisions the filter rejected on
 	// the last resync. Only the resync goroutine touches it.
 	resyncRejected map[string]struct{}
-	recorder       MetricsRecorder
-	limiter        *rate.Limiter // nil when rate limiting is disabled
+	// resyncDeleted tracks stream deletions that race with a resync.
+	resyncDeleted resyncDeletions
+	recorder      MetricsRecorder
+	limiter       *rate.Limiter // nil when rate limiting is disabled
 	// onStartupSynced callbacks run once, in order, after the first decision batch is applied.
 	onStartupSynced []func()
 }
@@ -251,6 +253,12 @@ func (b *Bouncer) applyDecision(ctx context.Context, d *models.Decision, action,
 	decisionID := decisionSource(d)
 	if decisionID == "" {
 		b.log.Warn().Str("ip", result.Value).Str("action", action).Msg("skipping CrowdSec decision without ID or UUID")
+		return true
+	}
+	if action == "delete" {
+		b.resyncDeleted.noteDeleted(decisionID)
+	} else if source == "resync" && b.resyncDeleted.wasDeleted(decisionID) {
+		b.log.Debug().Str("ip", result.Value).Msg("skipping resync decision deleted since the resync started")
 		return true
 	}
 	metricAction := "ban"

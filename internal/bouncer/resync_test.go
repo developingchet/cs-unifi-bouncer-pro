@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crowdsecurity/crowdsec/pkg/models"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 )
@@ -115,5 +116,100 @@ func TestDecodeDecisions_RejectsOversizedBody(t *testing.T) {
 	body := strings.NewReader("[" + strings.Repeat(" ", resyncMaxBody) + "]")
 	if _, err := decodeDecisions(body); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("err = %v, want size error", err)
+	}
+}
+
+func TestDecodeDecisions(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		want    []int64
+		wantErr string
+	}{
+		{name: "list", body: resyncDecisions, want: []int64{1, 2, 3}},
+		{name: "empty list", body: `[]`},
+		{name: "null", body: `null`},
+		{name: "surrounding whitespace", body: " \n[ {\"id\":7} ]\n", want: []int64{7}},
+		{name: "object instead of list", body: `{"id":1}`, wantErr: "decode"},
+		{name: "truncated list", body: `[{"id":1},{"id":2`, wantErr: "decode"},
+		{name: "invalid element", body: `[{"id":"x"}]`, wantErr: "decode"},
+		{name: "empty body", body: ``, wantErr: "decode"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := decodeDecisions(strings.NewReader(tt.body))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want it to mention %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("decoded %d decisions, want %d", len(got), len(tt.want))
+			}
+			for i, d := range got {
+				if d.ID != tt.want[i] {
+					t.Errorf("decision %d has id %d, want %d", i, d.ID, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// A decision the stream deletes after the resync has asked for its snapshot is
+// still in that snapshot. Applying it would bring back a ban CrowdSec has
+// already lifted.
+func TestResync_SkipsDecisionsDeletedDuringTheResync(t *testing.T) {
+	var b *Bouncer
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		action, scope, ip := "ban", "ip", "203.0.113.2"
+		deleted := &models.Decision{ID: 2, Type: &action, Scope: &scope, Value: &ip}
+		b.handleDecisionBlock(context.Background(), &models.DecisionsStreamResponse{Deleted: []*models.Decision{deleted}}, "stream")
+		_, _ = w.Write([]byte(resyncDecisions))
+	}))
+	defer srv.Close()
+	b = newTestBouncer(t, &config.Config{
+		UnifiSites:      []string{"default"},
+		BanTTL:          24 * time.Hour,
+		CrowdSecLAPIURL: srv.URL,
+		CrowdSecLAPIKey: "test-key",
+	})
+	var jobs []SyncJob
+	b.handler = func(_ context.Context, job SyncJob) error {
+		jobs = append(jobs, job)
+		return nil
+	}
+
+	if err := b.resync(context.Background()); err != nil {
+		t.Fatalf("resync: %v", err)
+	}
+	var banned []string
+	for _, job := range jobs {
+		if job.Action == "ban" {
+			banned = append(banned, job.Source)
+		}
+	}
+	if len(banned) != 1 || banned[0] != "crowdsec:id:1" {
+		t.Fatalf("resync banned %v, want only crowdsec:id:1", banned)
+	}
+}
+
+// Only deletions that happen during a resync matter: a later resync must
+// apply a decision that was deleted and then created again.
+func TestResync_DeletionsDoNotOutliveTheResync(t *testing.T) {
+	b, jobs, _ := newResyncBouncer(t, resyncDecisions, http.StatusOK)
+	action, scope, ip := "ban", "ip", "203.0.113.2"
+	deleted := &models.Decision{ID: 2, Type: &action, Scope: &scope, Value: &ip}
+	b.handleDecisionBlock(context.Background(), &models.DecisionsStreamResponse{Deleted: []*models.Decision{deleted}}, "stream")
+	*jobs = nil
+
+	if err := b.resync(context.Background()); err != nil {
+		t.Fatalf("resync: %v", err)
+	}
+	if len(*jobs) != 2 {
+		t.Fatalf("jobs = %+v, want bans for ids 1 and 2", *jobs)
 	}
 }
