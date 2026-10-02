@@ -138,6 +138,25 @@ func TestBouncer_DeletionOfWhitelistedBanReachesHandler(t *testing.T) {
 	}
 }
 
+func TestBouncer_NewDecisionOfDeleteTypeIsNotBanned(t *testing.T) {
+	cfg := &config.Config{UnifiSites: []string{"default"}, BanTTL: time.Hour, BlockWhitelist: []string{"203.0.113.0/24"}}
+	b := newTestBouncer(t, cfg)
+	var jobs []SyncJob
+	b.handler = func(_ context.Context, job SyncJob) error {
+		jobs = append(jobs, job)
+		return nil
+	}
+	action, scope, origin := "delete", "ip", "cscli"
+	for i, ip := range []string{"198.51.100.9", "203.0.113.7", "10.0.0.5"} {
+		value := ip
+		d := &models.Decision{ID: int64(i + 1), Type: &action, Scope: &scope, Value: &value, Origin: &origin}
+		b.handleDecisionBlock(context.Background(), &models.DecisionsStreamResponse{New: []*models.Decision{d}}, "stream")
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("non-ban decisions in the new list reached the handler: %+v", jobs)
+	}
+}
+
 func TestUserAgentVersionPrefix(t *testing.T) {
 	for in, want := range map[string]string{
 		"v1.2.3": "crowdsec-unifi-bouncer/v1.2.3",
