@@ -46,7 +46,7 @@ type unifiClient struct {
 	featureCache map[string]map[string]bool // site -> feature -> bool
 	cacheMu      sync.RWMutex
 	zoneIDCache  map[string]map[string]string // site key -> zone input -> zone UUID
-	siteIDCache  map[string]string            // site internalReference -> integration v1 UUID
+	siteIDCache  map[string]string            // site name passed by the caller -> integration v1 UUID
 	log          zerolog.Logger
 }
 
@@ -321,10 +321,9 @@ func (c *unifiClient) InvalidateZoneCache(site string) {
 	defer c.cacheMu.Unlock()
 	delete(c.zoneIDCache, site)
 	delete(c.featureCache, site)
-	// siteIDCache is keyed by internalReference, display name, and UUID — all of which may
-	// map to this site. We can't cheaply identify which keys belong to one site, so we
-	// clear the whole siteIDCache. It is small (one entry per site) and will be repopulated on
-	// the next call to GetSiteID.
+	// siteIDCache is keyed by the name the caller passed (internalReference, display
+	// name or UUID), so the keys that belong to one site can't be identified cheaply. Clear the
+	// whole siteIDCache; it is small and will be repopulated on the next call to GetSiteID.
 	c.siteIDCache = make(map[string]string)
 }
 
