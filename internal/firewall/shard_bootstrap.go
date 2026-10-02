@@ -281,8 +281,8 @@ func (sm *ShardManager) loadShardLocked(idx int, allGroups map[string]storage.Gr
 		} else {
 			// Restore cached members if a previously populated group has only
 			// the creation placeholder in UniFi.
-			shard.IPs.Replace(rec.Members)
-			members = rec.Members
+			members = sm.stillBanned(rec.Members)
+			shard.IPs.Replace(members)
 		}
 		if err := sm.store.SetGroup(cacheKey(sm.site, name), storage.GroupRecord{UnifiID: apiID, Site: sm.site, Index: idx, Members: members, IPv6: sm.ipv6}); err != nil {
 			return nil, fmt.Errorf("cache recovered shard %s: %w", name, err)
@@ -292,12 +292,36 @@ func (sm *ShardManager) loadShardLocked(idx int, allGroups map[string]storage.Gr
 	case cached:
 		// Allocate a Pending shard in-memory without creating in UniFi yet.
 		shard = sm.allocShard(idx)
-		if len(rec.Members) > 0 {
+		if members := sm.stillBanned(rec.Members); len(members) > 0 {
 			// Keep dirty so old members are restored on next sync tick.
-			shard.IPs.Replace(rec.Members)
+			shard.IPs.Replace(members)
 		}
 	}
 	return shard, nil
+}
+
+// stillBanned returns the members of a cached group record that the ban
+// database still holds. The record is a write-through cache and can be older
+// than the database, for example after a stop between a rebalance writing it
+// and the shards being flushed, so replaying it unchecked would block bans
+// that have expired or been lifted since. A member whose ban cannot be read
+// is kept: dropping it could leave a live ban unenforced.
+func (sm *ShardManager) stillBanned(members []string) []string {
+	kept := make([]string, 0, len(members))
+	dropped := 0
+	for _, ip := range members {
+		banned, err := sm.store.BanExists(ip)
+		if err != nil || banned {
+			kept = append(kept, ip)
+			continue
+		}
+		dropped++
+	}
+	if dropped > 0 {
+		sm.log.Warn().Str("site", sm.site).Int("dropped", dropped).
+			Msg("cached shard members are no longer in the ban database; not restoring them")
+	}
+	return kept
 }
 
 // assignOwnersLocked rebuilds ipOwner from the loaded shards, which must be
