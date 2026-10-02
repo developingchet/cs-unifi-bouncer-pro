@@ -130,7 +130,7 @@ func NewFeedManager(feeds []Feed, interval, maxOutage time.Duration, claims *ban
 	return &Manager{
 		feeds: feeds, interval: interval, claims: claims,
 		protected: protected, dryRun: dryRun, log: log,
-		client:    &http.Client{Timeout: timeout, CheckRedirect: feedhttp.CheckRedirect},
+		client:    feedhttp.NewClient(timeout),
 		maxOutage: maxOutage, lastGood: lastGood,
 	}
 }
