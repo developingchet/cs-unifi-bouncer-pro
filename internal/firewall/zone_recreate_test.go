@@ -99,7 +99,7 @@ func TestCloudflareAllowAddedAfterBlocksPrecedesThem(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	cf := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "v6") {
 			_, _ = w.Write([]byte("2606:4700::/32\n"))
 			return
@@ -107,7 +107,9 @@ func TestCloudflareAllowAddedAfterBlocksPrecedesThem(t *testing.T) {
 		_, _ = w.Write([]byte("173.245.48.0/20\n"))
 	}))
 	defer cf.Close()
-	wl := whitelist.NewManager(ctrl, []string{testSite}, whitelist.NewCloudflareProvider(cf.URL+"/v4", cf.URL+"/v6"), zerolog.Nop())
+	provider := whitelist.NewCloudflareProvider(cf.URL+"/v4", cf.URL+"/v6")
+	provider.HTTPClient = cf.Client()
+	wl := whitelist.NewManager(ctrl, []string{testSite}, provider, zerolog.Nop())
 	wl.SetBlockRecreator(zm)
 	pair := whitelist.ZonePairConfig{SrcName: "wan", DstName: "lan", SrcZoneID: "wan", DstZoneID: "lan"}
 	if err := wl.Sync(ctx, []whitelist.ZonePairConfig{pair}); err != nil {
