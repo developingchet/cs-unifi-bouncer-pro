@@ -12,6 +12,9 @@ spec:
   replicas: 1
   strategy:
     type: Recreate
+  # /readyz stays unready until the first LAPI pull is processed, which takes
+  # several minutes on a ban list of ~100k decisions.
+  progressDeadlineSeconds: 1200
   selector:
     matchLabels:
       app: cs-unifi-bouncer-pro
@@ -43,6 +46,14 @@ spec:
             - name: health
               containerPort: 8081
               protocol: TCP
+          # Opening a large ban database and logging in to the controller
+          # happen before the health server starts; allow up to 5 minutes.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /healthz

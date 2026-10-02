@@ -7,6 +7,7 @@ Common issues and solutions for cs-unifi-bouncer-pro.
 - [Container Won't Start](#container-wont-start)
   - [Configuration validation error](#configuration-validation-error)
   - [LAPI connection refused at startup](#lapi-connection-refused-at-startup)
+  - [`/readyz` returns `starting` for several minutes](#readyz-returns-starting-for-several-minutes)
   - [UniFi controller unreachable at startup](#unifi-controller-unreachable-at-startup)
   - [Storage fails to open on first start](#storage-fails-to-open-on-first-start)
     - [`permission denied` — volume ownership wrong](#permission-denied--volume-ownership-wrong)
@@ -102,6 +103,16 @@ Other settings checked at startup:
    ```bash
    docker logs cs-unifi-bouncer-pro
    ```
+
+---
+
+### `/readyz` returns `starting` for several minutes
+
+**Symptom:** `docker ps` shows the container as `healthy`, but `curl http://localhost:8081/readyz` returns 503 with the body `starting`; a Kubernetes pod stays `0/1 Ready`.
+
+**Cause:** `/readyz` stays unready until the first decision batch from the LAPI has been processed. On a ban list of ~100k decisions that pull takes several minutes. Docker's `HEALTHCHECK` probes `/healthz`, which answers as soon as the health server starts, so the container is healthy meanwhile. `HEALTH_CHECK_LAPI=false` does not skip this wait.
+
+**Fix:** None needed while the pull is in progress; `startup stream batch synced to UniFi` in the logs marks the end. If that line never appears, the LAPI is unreachable or rejecting the key: see [LAPI connection refused at startup](#lapi-connection-refused-at-startup) and [CrowdSec LAPI returns 401 or 403](#crowdsec-lapi-returns-401-or-403).
 
 ---
 
