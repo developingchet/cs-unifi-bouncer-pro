@@ -147,6 +147,10 @@ func (sm *ShardManager) createPendingShard(ctx context.Context, shard *Shard, ip
 	}
 	createdID, err := sm.doCreateUniFiGroup(ctx, shard.Name)
 	if err != nil {
+		var rl *controller.ErrRateLimit
+		if errors.As(err, &rl) && sm.onRateLimit != nil {
+			sm.onRateLimit(rl.RetryAfter)
+		}
 		sm.recordCreateFailure(shard, ipCount, err)
 		return false, err
 	}
