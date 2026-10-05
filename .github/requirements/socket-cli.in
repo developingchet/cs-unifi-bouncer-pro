@@ -3,4 +3,4 @@
 # (Python 3.12): pip-compile --generate-hashes --strip-extras --no-header
 #   --output-file=socket-cli.txt socket-cli.in
 # Dependabot keeps socket-cli.txt current.
-socketsecurity==2.10.2
+socketsecurity==2.10.7
