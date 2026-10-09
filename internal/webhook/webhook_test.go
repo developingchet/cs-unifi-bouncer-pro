@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -144,35 +146,48 @@ func TestNotifier_FireDoesNotBlock(t *testing.T) {
 	}
 }
 
+// 301, 302 and 303 would be followed as a GET and 307 and 308 would re-send
+// the event; none of them may reach the redirect target.
 func TestNotifier_DoesNotFollowRedirects(t *testing.T) {
-	target := &recorder{}
-	targetSrv := httptest.NewServer(target)
-	defer targetSrv.Close()
-
-	var mu sync.Mutex
-	var hits int
-	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		hits++
-		mu.Unlock()
-		http.Redirect(w, r, targetSrv.URL, http.StatusTemporaryRedirect)
-	}))
-	defer redirector.Close()
-
-	var logs bytes.Buffer
-	n := New(redirector.URL, nil, zerolog.New(&logs))
-	fireAndStop(t, n, func() { n.Fire("test", nil) })
-
-	mu.Lock()
-	defer mu.Unlock()
-	if hits != 1 {
-		t.Fatalf("webhook endpoint hit %d times, want 1", hits)
+	statuses := []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
 	}
-	if got := target.events(t); len(got) != 0 {
-		t.Fatalf("redirect target received %d events, want 0", len(got))
-	}
-	if !strings.Contains(logs.String(), "redirect not followed") {
-		t.Fatalf("log missing redirect warning: %s", logs.String())
+	for _, status := range statuses {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var targetHits atomic.Int32
+			targetSrv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				targetHits.Add(1)
+			}))
+			defer targetSrv.Close()
+
+			var hits atomic.Int32
+			redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				http.Redirect(w, r, targetSrv.URL, status)
+			}))
+			defer redirector.Close()
+
+			var logs bytes.Buffer
+			n := New(redirector.URL, nil, zerolog.New(&logs))
+			fireAndStop(t, n, func() { n.Fire("test", nil) })
+
+			if got := hits.Load(); got != 1 {
+				t.Fatalf("webhook endpoint hit %d times, want 1", got)
+			}
+			if got := targetHits.Load(); got != 0 {
+				t.Fatalf("redirect target received %d requests, want 0", got)
+			}
+			if !strings.Contains(logs.String(), "redirect not followed") {
+				t.Fatalf("log missing redirect warning: %s", logs.String())
+			}
+			if !strings.Contains(logs.String(), strconv.Itoa(status)) {
+				t.Fatalf("redirect warning does not name status %d: %s", status, logs.String())
+			}
+		})
 	}
 }
 

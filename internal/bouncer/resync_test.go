@@ -119,6 +119,23 @@ func TestDecodeDecisions_RejectsOversizedBody(t *testing.T) {
 	}
 }
 
+func TestDecodeDecisions_DecisionCountLimit(t *testing.T) {
+	list := func(n int) string {
+		return "[" + strings.TrimSuffix(strings.Repeat("{},", n), ",") + "]"
+	}
+	got, err := decodeDecisions(strings.NewReader(list(resyncMaxDecisions)))
+	if err != nil {
+		t.Fatalf("list at the limit: %v", err)
+	}
+	if len(got) != resyncMaxDecisions {
+		t.Fatalf("decoded %d decisions, want %d", len(got), resyncMaxDecisions)
+	}
+	if _, err := decodeDecisions(strings.NewReader(list(resyncMaxDecisions + 1))); err == nil ||
+		!strings.Contains(err.Error(), "more than") {
+		t.Fatalf("err = %v, want a decision count error", err)
+	}
+}
+
 func TestDecodeDecisions(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -134,6 +151,10 @@ func TestDecodeDecisions(t *testing.T) {
 		{name: "truncated list", body: `[{"id":1},{"id":2`, wantErr: "decode"},
 		{name: "invalid element", body: `[{"id":"x"}]`, wantErr: "decode"},
 		{name: "empty body", body: ``, wantErr: "decode"},
+		{name: "junk after list", body: `[{"id":1}] x`, wantErr: "decode"},
+		{name: "second list after list", body: `[{"id":1}] [{"id":2}]`, wantErr: "unexpected data"},
+		{name: "data after null", body: `null {}`, wantErr: "unexpected data"},
+		{name: "unterminated value after list", body: `[{"id":1}] {`, wantErr: "decode"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
