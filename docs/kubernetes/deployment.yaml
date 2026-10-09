@@ -82,10 +82,10 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 15
             failureThreshold: 3
-          # A periodic resync reads the whole LAPI decision list into memory,
-          # accepting a response of up to 256 MiB, and then decodes it. The
-          # limit must stay above that cap or a very large list is OOM-killed
-          # mid-resync; raise it further for lists that approach the cap.
+          # A periodic resync decodes the whole LAPI decision list into
+          # memory, accepting a response of up to 64 MiB and 500k decisions.
+          # A list near those caps can decode to around 200 MiB on top of the
+          # ban database, so keep the limit at 512Mi or more for large lists.
           resources:
             requests:
               cpu: 50m
