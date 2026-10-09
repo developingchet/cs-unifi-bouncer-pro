@@ -87,6 +87,65 @@ func TestClient_RedirectToHostResolvingToLoopbackIsRefused(t *testing.T) {
 	}
 }
 
+// refuseInternalDial sees the address a name resolved to, so it decides for
+// every redirect target whatever name led there.
+func TestRefuseInternalDial(t *testing.T) {
+	tests := []struct {
+		address string
+		refused bool
+	}{
+		{"127.0.0.1:80", true},
+		{"10.0.0.5:443", true},
+		{"169.254.169.254:80", true},
+		{"[::1]:443", true},
+		{"[::ffff:127.0.0.1]:80", true},
+		{"[fe80::1%eth0]:443", true},
+		{"0.0.0.0:80", true},
+		{"8.8.8.8:443", false},
+		{"[2606:4700::1111]:443", false},
+		{"not-an-address:80", true},
+		{"missing-port", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.address, func(t *testing.T) {
+			err := refuseInternalDial("tcp", tt.address, nil)
+			if (err != nil) != tt.refused {
+				t.Fatalf("refuseInternalDial(%s) = %v, want refused %v", tt.address, err, tt.refused)
+			}
+		})
+	}
+}
+
+// The guarded dial refuses private, metadata and IPv6 loopback targets before
+// any connection is attempted. CheckRedirect is removed so the dial check is
+// the only one in play, as it is for a name that resolves to these addresses.
+func TestClient_RedirectToInternalAddressIsRefusedAtDial(t *testing.T) {
+	targets := []string{
+		"http://10.0.0.5/",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://[::1]/",
+	}
+	for _, target := range targets {
+		t.Run(target, func(t *testing.T) {
+			redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target, http.StatusFound)
+			}))
+			defer redirector.Close()
+
+			client := NewClient(5 * time.Second)
+			client.CheckRedirect = nil
+			resp, err := client.Get(redirector.URL)
+			if err == nil {
+				resp.Body.Close()
+				t.Fatalf("redirect to %s was followed", target)
+			}
+			if !strings.Contains(err.Error(), "internal address") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 // A feed served from an internal host may redirect to another path on that
 // host: the operator chose the host, so the redirect adds no new exposure.
 func TestClient_RedirectWithinInternalHostIsFollowed(t *testing.T) {
