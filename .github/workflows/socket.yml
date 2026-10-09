@@ -28,11 +28,11 @@ jobs:
       contents: read
       pull-requests: write # PR alert comments
       issues: write
-    env:
-      SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_SECURITY_API_KEY }}
     steps:
       - name: Check for the Socket API key
         id: key
+        env:
+          SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_SECURITY_API_KEY }}
         run: |
           if [ -z "$SOCKET_SECURITY_API_KEY" ]; then
             echo "::notice::SOCKET_SECURITY_API_KEY is not set; skipping the Socket scan."
@@ -40,10 +40,18 @@ jobs:
           else
             echo "present=true" >> "$GITHUB_OUTPUT"
           fi
+      # The CLI is installed from the base commit, never from the pull
+      # request: installing a package can run its build hooks, so a pull
+      # request that edits the requirements file would otherwise choose code
+      # that runs alongside the API key. The pull request is checked out
+      # afterwards, replacing this copy, and the scanner only reads it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.key.outputs.present == 'true'
         with:
-          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: socket-cli
+          sparse-checkout: .github/requirements
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         if: steps.key.outputs.present == 'true'
         with:
@@ -51,10 +59,16 @@ jobs:
       - name: Install the Socket CLI
         if: steps.key.outputs.present == 'true'
         # Hash-locked (see .github/requirements/socket-cli.in); Dependabot updates it.
-        run: pip install --disable-pip-version-check --require-hashes --no-deps -r .github/requirements/socket-cli.txt
+        run: pip install --disable-pip-version-check --require-hashes --no-deps -r socket-cli/.github/requirements/socket-cli.txt
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.key.outputs.present == 'true'
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+          persist-credentials: false
       - name: Scan
         if: steps.key.outputs.present == 'true'
         env:
+          SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_SECURITY_API_KEY }}
           GH_API_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
