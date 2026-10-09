@@ -15,6 +15,7 @@ Common issues and solutions for cs-unifi-bouncer-pro.
   - [Seccomp profile blocks container startup](#seccomp-profile-blocks-container-startup)
 - [No Bans Being Applied](#no-bans-being-applied)
   - [No decisions in CrowdSec](#no-decisions-in-crowdsec)
+  - [CrowdSec decision resync failed](#crowdsec-decision-resync-failed)
   - [Decisions are being filtered](#decisions-are-being-filtered)
   - [My own address is banned](#my-own-address-is-banned)
 - [Authentication Errors](#authentication-errors)
@@ -325,6 +326,30 @@ after a restart returns every active decision.
 record of, logging `CrowdSec resync applied decisions the stream missed`.
 Lower the interval (minimum `5m`) to recover them sooner, or restart the
 bouncer.
+
+---
+
+### CrowdSec decision resync failed
+
+**Symptom:** Every `CROWDSEC_RESYNC_INTERVAL` the log shows a warning:
+
+```json
+{"level":"warn","error":"decision list exceeds 64 MiB","msg":"CrowdSec decision resync failed"}
+```
+
+or the error `decode decision list: decision list has more than 500000
+decisions`.
+
+**Cause:** The resync reads every active decision from the LAPI and refuses a
+response over 64 MiB or 500,000 decisions, which bounds the memory it needs.
+Nothing from a refused response is applied. The decision stream is not
+affected; only decisions the stream skipped are not recovered.
+
+**Fix:** Reduce the number of active decisions, for example by subscribing to
+fewer blocklists, or set `CROWDSEC_RESYNC_INTERVAL=0` to turn the resync off
+and restart the bouncer when you need to recover skipped decisions. The error
+`decode decision list: unexpected data after the decision list` means the LAPI
+response was malformed; check what sits between the bouncer and the LAPI.
 
 ---
 

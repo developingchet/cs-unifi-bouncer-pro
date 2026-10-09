@@ -77,7 +77,7 @@ The NetworkPolicy admits scrapes only from the `monitoring` namespace; change it
 
 ## Resources and Hardening
 
-The container limit is 512Mi. A periodic resync (`CROWDSEC_RESYNC_INTERVAL`) reads the whole LAPI decision list into memory, accepting a response of up to 256 MiB, and then decodes it, so the limit has to stay above that cap; raise it for lists that approach it.
+The container limit is 512Mi. A periodic resync (`CROWDSEC_RESYNC_INTERVAL`) decodes the whole LAPI decision list into memory, accepting a response of up to 64 MiB and 500,000 decisions. A list near those caps can decode to around 200 MiB on top of the ban database, so keep the limit at 512Mi or more for large lists.
 
 The pod runs with the runtime default seccomp profile, a read-only root filesystem, no capabilities, and no Kubernetes API token (`automountServiceAccountToken: false`).
 
