@@ -45,7 +45,7 @@ long-lived signing key exists. The signature is bound to the exact release
 workflow identity.
 
 ```bash
-cosign verify developingchet/cs-unifi-bouncer-pro:2.2.0 \
+cosign verify developingchet/cs-unifi-bouncer-pro:2.3.0 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 ```
@@ -59,7 +59,7 @@ provenance for the image digest and for the release binaries, signed through
 GitHub Actions OIDC. The image attestation is also pushed to the registry.
 
 ```bash
-gh attestation verify oci://developingchet/cs-unifi-bouncer-pro:2.2.0 \
+gh attestation verify oci://developingchet/cs-unifi-bouncer-pro:2.3.0 \
   --repo developingchet/cs-unifi-bouncer-pro
 gh attestation verify cs-unifi-bouncer-pro-linux-amd64 \
   --repo developingchet/cs-unifi-bouncer-pro
@@ -216,12 +216,12 @@ Independent verification of each supply chain claim:
 
 ```bash
 # Verify image signature
-cosign verify developingchet/cs-unifi-bouncer-pro:2.2.0 \
+cosign verify developingchet/cs-unifi-bouncer-pro:2.3.0 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 
 # Inspect SBOM attestation
-cosign verify-attestation developingchet/cs-unifi-bouncer-pro:2.2.0 \
+cosign verify-attestation developingchet/cs-unifi-bouncer-pro:2.3.0 \
   --type cyclonedx \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \

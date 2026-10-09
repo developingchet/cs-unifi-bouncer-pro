@@ -1,5 +1,30 @@
 # Upgrading
 
+## From 2.2 to 2.3
+
+The periodic LAPI resync (`CROWDSEC_RESYNC_INTERVAL`) now accepts a decision
+list of at most 64 MiB, down from 256 MiB, and at most 500,000 decisions.
+64 MiB holds about 300k decisions, twice a ~150k-decision community blocklist.
+Anything other than whitespace after the list is now an error; before, it was
+ignored. A response that breaks one of these limits is not applied: the
+bouncer logs `CrowdSec decision resync failed` at warn level with one of these
+errors and tries again at the next interval.
+
+- `decision list exceeds 64 MiB`
+- `decode decision list: decision list has more than 500000 decisions`
+- `decode decision list: unexpected data after the decision list`
+
+The decision stream is not affected, so new decisions are still applied; only
+the recovery of decisions the stream skipped stops. If your LAPI holds more
+active decisions than the caps allow, set `CROWDSEC_RESYNC_INTERVAL=0` to stop
+the warnings; a restart still delivers every active decision. The 512Mi memory
+limit in the example Kubernetes Deployment is unchanged and covers a list at
+the caps.
+
+Building from source now requires Go 1.27.2 or newer. The release images and
+binaries are built with Go 1.27.2, which includes the fixes for CVE-2026-78667
+and CVE-2026-97031.
+
 ## From 2.1 to 2.2
 
 The health server now starts before the firewall infrastructure is loaded, so
