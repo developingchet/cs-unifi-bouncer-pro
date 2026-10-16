@@ -61,6 +61,10 @@ type Manager interface {
 
 	// ZoneManager returns the underlying ZoneManager, or nil in legacy mode.
 	ZoneManager() *ZoneManager
+
+	// CheckModeChange returns a *ModeChangeError when a site loaded in legacy
+	// mode now needs zone mode. Other failures are retried on the next call.
+	CheckModeChange(ctx context.Context) error
 }
 
 // ManagerConfig holds all firewall manager configuration.
@@ -109,6 +113,15 @@ type managerImpl struct {
 	// Cached resolved mode per site (avoids repeated HasFeature API calls)
 	siteMode map[string]string
 	siteMu   sync.RWMutex
+	// convertedLeft marks zone sites where policies converted from legacy
+	// rules were kept at startup (guarded by siteMu).
+	convertedLeft map[string]bool
+
+	// The controller's Network version, read once at load (networkVersion).
+	versionMu    sync.Mutex
+	versionRead  bool
+	versionKnown bool
+	version      controller.NetworkVersion
 
 	// rateLimitUntil stores a time.Time; when set, SyncDirty skips all flushes
 	// until the deadline passes. Set when a shard sync returns ErrRateLimit.
@@ -135,17 +148,18 @@ func NewManager(cfg ManagerConfig, ctrl controller.Controller, store storage.Sto
 	zoneMgr := NewZoneManager(cfg.ZoneCfg, namer, ctrl, store, log)
 
 	return &managerImpl{
-		cfg:       cfg,
-		ctrl:      ctrl,
-		store:     store,
-		namer:     namer,
-		log:       log,
-		v4Mgrs:    make(map[string]*ShardManager),
-		v6Mgrs:    make(map[string]*ShardManager),
-		legacyMgr: legacyMgr,
-		zoneMgr:   zoneMgr,
-		siteMode:  make(map[string]string),
-		cb:        newCircuitBreaker(cfg.CircuitBreakerThreshold, cfg.CircuitBreakerResetInterval),
+		cfg:           cfg,
+		ctrl:          ctrl,
+		store:         store,
+		namer:         namer,
+		log:           log,
+		v4Mgrs:        make(map[string]*ShardManager),
+		v6Mgrs:        make(map[string]*ShardManager),
+		legacyMgr:     legacyMgr,
+		zoneMgr:       zoneMgr,
+		siteMode:      make(map[string]string),
+		convertedLeft: make(map[string]bool),
+		cb:            newCircuitBreaker(cfg.CircuitBreakerThreshold, cfg.CircuitBreakerResetInterval),
 	}
 }
 
@@ -184,6 +198,15 @@ func (m *managerImpl) RepairInfrastructure(ctx context.Context, sites []string) 
 			if err := m.tolerateShardFailures(site, m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr)); err != nil {
 				return fmt.Errorf("ensure zone policies for site %s: %w", site, err)
 			}
+			// The block policies exist now, so policies converted from
+			// legacy rules can go without a gap in enforcement.
+			if err := m.retireConvertedRules(ctx, site); err != nil {
+				m.log.Warn().Err(err).Str("site", site).
+					Msg("could not retire zone policies converted from legacy rules; retrying on the next reconcile")
+				m.siteMu.Lock()
+				m.convertedLeft[site] = true
+				m.siteMu.Unlock()
+			}
 		}
 	}
 	return nil
@@ -202,10 +225,16 @@ func (m *managerImpl) LoadInfrastructure(ctx context.Context, sites []string) er
 		v4Cap := m.cfg.GroupCapacityV4
 		v6Cap := m.cfg.GroupCapacityV6
 
+		// Logged before the mode is resolved, so a failed detection still
+		// shows which release the controller runs.
+		m.networkVersion(ctx, site)
 		// Determine effective mode first so shard backend uses the right API object type.
 		mode, err := m.resolveMode(ctx, site)
 		if err != nil {
 			return fmt.Errorf("resolve mode for site %s: %w", site, err)
+		}
+		if err := m.checkModeSupported(ctx, site, mode); err != nil {
+			return err
 		}
 
 		if mode == "zone" && len(m.cfg.ZoneCfg.ZonePairs) == 0 {
@@ -284,7 +313,7 @@ func (m *managerImpl) wireShardManager(site string, ipv6 bool, sm *ShardManager)
 	})
 	m.attachShardCallbacks(sm)
 	sm.SetMergeThreshold(m.cfg.ShardMergeThreshold)
-	sm.SetDrainCallback(func(ctx context.Context, shardIdx int, _ string) error {
+	sm.SetDrainCallback(func(ctx context.Context, shardIdx int, groupID string) error {
 		switch m.cachedMode(site) {
 		case "legacy":
 			if err := m.legacyMgr.DeleteRuleForShard(ctx, site, ipv6, shardIdx); err != nil {
@@ -293,6 +322,9 @@ func (m *managerImpl) wireShardManager(site string, ipv6 bool, sm *ShardManager)
 		case "zone":
 			if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, ipv6, shardIdx); err != nil {
 				return fmt.Errorf("delete policies for drained %s shard %d: %w", fam, shardIdx, err)
+			}
+			if err := m.deleteConvertedRulesForList(ctx, site, groupID); err != nil {
+				return fmt.Errorf("delete converted legacy rules for drained %s shard %d: %w", fam, shardIdx, err)
 			}
 		}
 		return nil
@@ -515,6 +547,10 @@ func (m *managerImpl) deleteOrphanedReferencingObjects(ctx context.Context, site
 					break
 				}
 			}
+		}
+		if err := m.deleteConvertedRulesFor(ctx, site, map[string]bool{groupID: true}, policies); err != nil {
+			m.log.Warn().Err(err).Str("site", site).Str("group_id", groupID).
+				Msg("failed to delete converted legacy rules referencing orphaned group (will continue)")
 		}
 	}
 }

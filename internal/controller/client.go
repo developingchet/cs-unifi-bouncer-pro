@@ -458,3 +458,7 @@ func (c *unifiClient) DeleteTrafficMatchingList(ctx context.Context, site string
 func (c *unifiClient) HasFeature(ctx context.Context, site string, feature string) (bool, error) {
 	return hasFeature(ctx, c, site, feature)
 }
+
+func (c *unifiClient) ApplicationVersion(ctx context.Context, site string) (string, error) {
+	return applicationVersion(ctx, c, site)
+}

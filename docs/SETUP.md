@@ -17,7 +17,7 @@ Pull the compose file, seccomp profile, and you're running in under 2 minutes.
 | Docker Engine | 20.10 or later |
 | Docker Compose | v2 or later (`docker compose` not `docker-compose`) |
 | CrowdSec | 1.4.0 or later, running and accessible |
-| UniFi controller | UniFi Network Application 7.x or later |
+| UniFi controller | UniFi Network 7.x or later; Network 11 and later need an API key (zone-based firewall only) |
 | UniFi credentials | API key (recommended) or local admin username/password |
 
 Verify CrowdSec is running:
@@ -107,7 +107,7 @@ For contributors, `.env.example` access, or local builds.
 | Docker Engine | 20.10 or later |
 | Docker Compose | v2 or later (`docker compose` not `docker-compose`) |
 | CrowdSec | 1.4.0 or later, running and accessible |
-| UniFi controller | UniFi Network Application 7.x or later |
+| UniFi controller | UniFi Network 7.x or later; Network 11 and later need an API key (zone-based firewall only) |
 | UniFi credentials | API key (recommended) or local admin username/password |
 | Git | Latest stable version |
 
@@ -203,11 +203,13 @@ UNIFI_PASSWORD=yourpassword
 # Leave UNIFI_API_KEY unset or commented out
 ```
 
-Username/password works with legacy firewall rules only. If the site uses the zone-based firewall, startup stops and asks for `UNIFI_API_KEY`; set one, or set `FIREWALL_MODE=legacy`.
+Username/password works with legacy firewall rules only. If the site uses the zone-based firewall, startup stops and asks for `UNIFI_API_KEY`; set one, or on UniFi Network 10.x and earlier set `FIREWALL_MODE=legacy`. UniFi Network 11 and later run every site on the zone-based firewall, so they need an API key.
 
 #### Self-hosted UniFi Network Application
 
 The bouncer also works with a self-hosted controller (for example the `linuxserver/unifi-network-application` Docker image). Point `UNIFI_URL` at its HTTPS port, usually `https://<host>:8443`. The bouncer detects the controller type on startup and logs `"layout":"standalone"`. Self-hosted controllers use a self-signed certificate by default, so set `UNIFI_CA_CERT` to its certificate, or `UNIFI_VERIFY_TLS=false` on a trusted network.
+
+The standalone Network Application ends at 10.6. UniFi Network 11 is self-hosted on UniFi OS Server, which the bouncer handles like a console (`"layout":"unifi-os"`, API keys under **Settings → Control Plane → Integrations**). See [Upgrading the controller to UniFi Network 11](UPGRADING.md#upgrading-the-controller-to-unifi-network-11) before moving a legacy-mode site.
 
 ### Step 4: Ensure Network Connectivity
 

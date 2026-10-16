@@ -32,6 +32,9 @@ type MockController struct {
 	// Preset feature detection results per site
 	features map[string]map[string]bool
 
+	// version is what ApplicationVersion reports.
+	version string
+
 	// Error injection: method -> next error (consumed on first call)
 	errors map[string]error
 
@@ -69,6 +72,7 @@ func NewMockController() *MockController {
 		features: make(map[string]map[string]bool),
 		errors:   make(map[string]error),
 		calls:    make(map[string]int),
+		version:  "10.6.106",
 	}
 }
 
@@ -122,6 +126,13 @@ func (m *MockController) SetHasFeature(site, feature string, val bool) {
 		m.features[site] = make(map[string]bool)
 	}
 	m.features[site][feature] = val
+}
+
+// SetVersion presets the UniFi Network version ApplicationVersion reports.
+func (m *MockController) SetVersion(version string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.version = version
 }
 
 // SetError injects an error to be returned on the next call to the named method.
@@ -368,6 +379,15 @@ func (m *MockController) HasFeature(ctx context.Context, site string, feature st
 		}
 	}
 	return false, nil
+}
+
+func (m *MockController) ApplicationVersion(ctx context.Context, site string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.track("ApplicationVersion"); err != nil {
+		return "", err
+	}
+	return m.version, nil
 }
 
 func (m *MockController) InvalidateZoneCache(site string) {

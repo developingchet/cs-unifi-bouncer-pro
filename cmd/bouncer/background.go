@@ -38,8 +38,23 @@ func every(ctx context.Context, interval time.Duration, fn func()) {
 	}
 }
 
-func runPeriodicReconcile(ctx context.Context, fwMgr firewall.Manager, sites []string, interval time.Duration, notifier *webhook.Notifier, log zerolog.Logger) {
+// runPeriodicReconcile reconciles every interval. Each tick first re-checks the
+// sites loaded in legacy mode; when one now needs zone mode (the controller was
+// upgraded to a zone-only release, or auto mode finds zones), the error is sent
+// on modeChanged and the loop stops, so the daemon exits and its supervisor
+// restarts it in the new mode.
+func runPeriodicReconcile(ctx context.Context, fwMgr firewall.Manager, sites []string, interval time.Duration,
+	notifier *webhook.Notifier, modeChanged chan<- error, log zerolog.Logger,
+) {
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
 	every(ctx, interval, func() {
+		if err := fwMgr.CheckModeChange(ctx); err != nil {
+			log.Error().Err(err).Msg("firewall mode changed; exiting so the bouncer restarts in the new mode")
+			modeChanged <- err
+			stop()
+			return
+		}
 		start := time.Now()
 		result, err := fwMgr.Reconcile(ctx, sites)
 		metrics.ReconcileDuration.WithLabelValues("periodic").Observe(time.Since(start).Seconds())

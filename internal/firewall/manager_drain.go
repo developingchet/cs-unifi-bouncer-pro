@@ -96,11 +96,17 @@ func (m *managerImpl) Drain(ctx context.Context, sites []string) error {
 			if err := m.drainZoneExtras(ctx, site); err != nil {
 				drainErrors = append(drainErrors, err)
 			}
+			if err := m.drainConvertedRules(ctx, site, groupIDs); err != nil {
+				drainErrors = append(drainErrors, err)
+			}
 			continue
 		}
 
 		// Rules and policies must be gone before their groups can be deleted.
-		policyErr := errors.Join(m.zoneMgr.DeletePolicies(ctx, site), m.legacyMgr.DeleteRules(ctx, site))
+		// Converted legacy rules go first: they are recognised by the legacy
+		// rule records that DeleteRules removes.
+		policyErr := errors.Join(m.drainConvertedRules(ctx, site, groupIDs),
+			m.zoneMgr.DeletePolicies(ctx, site), m.legacyMgr.DeleteRules(ctx, site))
 		if policyErr != nil {
 			drainErrors = append(drainErrors, fmt.Errorf("delete policies for site %s: %w", site, policyErr))
 			continue

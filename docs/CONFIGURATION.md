@@ -41,7 +41,7 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `UNIFI_URL` | — | **Yes** | Controller URL including scheme, e.g. `https://192.168.1.1` or `https://unifi.local:8443`. Must not contain a username or password (`https://user:pass@host` stops startup); use `UNIFI_USERNAME`/`UNIFI_PASSWORD` instead. |
-| `UNIFI_API_KEY` | — | One of API key or user/pass | UniFi API key. Takes precedence over username/password. `_FILE` variant supported. Keys are created under Settings > Control Plane > Integrations, which UniFi OS consoles and UniFi OS Server provide; the standalone self-hosted Network Application has no such page, so use a username and password there (legacy mode). |
+| `UNIFI_API_KEY` | — | One of API key or user/pass | UniFi API key. Takes precedence over username/password. `_FILE` variant supported. Keys are created under Settings > Control Plane > Integrations, which UniFi OS consoles and UniFi OS Server provide; the standalone self-hosted Network Application (10.6 and earlier) has no such page, so use a username and password there (legacy mode). Required on UniFi Network 11 and later, which run every site on the zone-based firewall. |
 | `UNIFI_USERNAME` | — | One of API key or user/pass | Local admin username. `_FILE` variant supported. |
 | `UNIFI_PASSWORD` | — | One of API key or user/pass | Local admin password. `_FILE` variant supported. |
 | `UNIFI_VERIFY_TLS` | `true` | No | Verify the controller's TLS certificate. Use `UNIFI_CA_CERT` for a private CA. |
@@ -55,11 +55,13 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 
 API key authentication is preferred. If `UNIFI_API_KEY` is set, username/password fields are ignored. API key authentication is available in UniFi Network ≥ 8.1.
 
-Username/password authentication supports legacy firewall mode only. The zone-based firewall and the Cloudflare whitelist use the UniFi integration API, which rejects session logins, so they require `UNIFI_API_KEY`.
+Username/password authentication supports legacy firewall mode only. The zone-based firewall and the Cloudflare whitelist use the UniFi integration API, which rejects session logins, so they require `UNIFI_API_KEY`. UniFi Network 11 and later apply only the zone-based firewall, so a username and password cannot manage them.
 
 ### Controller type
 
-The bouncer supports both UniFi OS consoles (UDM, UCG, Cloud Key Gen2+, UniFi OS Server) and the self-hosted UniFi Network Application (Docker images such as `linuxserver/unifi-network-application`, or a package install). It detects which one `UNIFI_URL` points at on startup and logs it as `"layout":"unifi-os"` or `"layout":"standalone"`. The two use different login paths (`/api/auth/login` and `/api/login`) and API prefixes. Self-hosted controllers usually listen on port 8443, e.g. `UNIFI_URL=https://unifi.local:8443`.
+The bouncer supports both UniFi OS consoles (UDM, UCG, Cloud Key Gen2+, UniFi OS Server) and the self-hosted UniFi Network Application (Docker images such as `linuxserver/unifi-network-application`, or a package install). It detects which one `UNIFI_URL` points at on startup and logs it as `"layout":"unifi-os"` or `"layout":"standalone"`. The two use different login paths (`/api/auth/login` and `/api/login`) and API prefixes. Self-hosted controllers usually listen on port 8443, e.g. `UNIFI_URL=https://unifi.local:8443`. The standalone Network Application ends at 10.6; UniFi Network 11 runs only on UniFi OS consoles and UniFi OS Server.
+
+The startup log also reports the controller's release, read from the integration API's `/integration/v1/info` with an API key or from the site's `stat/sysinfo` with a username and password: `detected UniFi Network version` with `network_version` and `zone_only` (true from Network 11). `diagnose` shows it in the `unifi_version` row. If it cannot be read, startup logs a warning and continues.
 
 ---
 
@@ -87,7 +89,7 @@ UNIFI_SITES=default,homelab,iot
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `FIREWALL_MODE` | `auto` | No | `auto`, `legacy`, or `zone`. `auto` checks each site for firewall zones on startup: with an API key it asks the integration API; with username/password it reads the site's zone list. A site without zones uses legacy mode. A site with zones but no API key stops startup with an error asking for `UNIFI_API_KEY` or `FIREWALL_MODE=legacy`. |
+| `FIREWALL_MODE` | `auto` | No | `auto`, `legacy`, or `zone`. `auto` checks each site for firewall zones on startup: with an API key it asks the integration API; with username/password it reads the site's zone list. A site without zones uses legacy mode. A site with zones but no API key stops startup with an error asking for `UNIFI_API_KEY` (or, on UniFi Network 10.x and earlier, `FIREWALL_MODE=legacy`). On UniFi Network 11 and later, legacy mode stops startup, whether set or detected. |
 | `FIREWALL_BLOCK_ACTION` | `drop` | No | Block action for legacy rules: `drop` or `reject` |
 | `FIREWALL_ENABLE_IPV6` | `true` | No | Create separate IPv6 firewall groups and rules. Distinct from `ENABLE_IPV6` which controls HTTP client IPv6 dialing. Setting it to `false` stops IPv6 enforcement: startup removes the IPv6 rules or policies but leaves the IPv6 groups and their members, so setting it back to `true` restores them. Run `drain` to remove the groups too. |
 | `FIREWALL_GROUP_CAPACITY` | `10000` | No | Maximum IPs per firewall group shard (used if family-specific overrides are not set). Capped at `SHARD_LIMIT`. |
@@ -97,7 +99,7 @@ UNIFI_SITES=default,homelab,iot
 | `FIREWALL_LOG_DROPS` | `false` | No | Enable logging on managed firewall rules and zone policies. Existing zone policies are updated on reconcile. |
 | `FIREWALL_CONNECTION_STATES` | `NEW,INVALID` | No | Connection states matched by zone block policies. Allowed values: `NEW`, `INVALID`, `ESTABLISHED`, or `ALL` for unrestricted matching. `ALL` can block replies to outbound connections. |
 | `FIREWALL_RECONCILE_ON_START` | `true` | No | Run a full reconcile on startup, once the first CrowdSec stream batch has been applied |
-| `FIREWALL_RECONCILE_INTERVAL` | `10m` | No | Periodically repair shard membership (including groups edited by hand in UniFi) and missing policies/rules. Set `0s` to disable periodic reconcile; negative values are rejected. |
+| `FIREWALL_RECONCILE_INTERVAL` | `10m` | No | Periodically repair shard membership (including groups edited by hand in UniFi) and missing policies/rules. Each reconcile first re-checks the sites loaded in legacy mode, and the bouncer exits for its restart policy to start it in zone mode once the controller runs UniFi Network 11 or `auto` finds zones (see [Firewall mode details](#firewall-mode-details)). Set `0s` to disable periodic reconcile and the re-check; negative values are rejected. |
 
 `FIREWALL_FLUSH_CONCURRENCY` is no longer used: shards are written one at a time. Setting it logs a warning at startup.
 
@@ -113,9 +115,11 @@ UNIFI_SITES=default,homelab,iot
 
 ### Firewall mode details
 
-**`auto`** (recommended): The bouncer queries the UniFi controller to detect whether zone-based firewall policies are supported. Controllers running UniFi Network ≥ 8.x use zone mode; older versions use legacy mode. The detected mode is logged at startup. If the probe fails for any reason other than the zone API being absent, startup stops instead of guessing a mode.
+**`auto`** (recommended): The bouncer queries the UniFi controller to detect whether zone-based firewall policies are supported. Controllers running UniFi Network ≥ 8.x use zone mode; older versions use legacy mode. The detected mode is logged at startup. If the probe fails for any reason other than the zone API being absent, startup stops instead of guessing a mode. UniFi Network 11 and later move every site to the zone-based firewall, so a site there without zones (no UniFi gateway adopted) stops startup rather than falling back to legacy rules that would not be applied.
 
-**`legacy`**: Creates `WAN_IN` and `WANv6_IN` drop rules that reference managed address-group shards. Works with all UniFi Network versions.
+**`legacy`**: Creates `WAN_IN` and `WANv6_IN` drop rules that reference managed address-group shards. Works with UniFi Network 10.x and earlier, on sites that have not moved to the zone-based firewall. Refused on UniFi Network 11 and later, which ignore these rules.
+
+**Switching while running:** the mode is chosen when the bouncer starts. Each periodic reconcile re-checks the sites loaded in legacy mode, and when the controller now runs UniFi Network 11, or `auto` now finds zones on the site, the bouncer logs `firewall mode changed` and exits with an error so its restart policy starts it in zone mode. Without a restart policy (`restart: unless-stopped`, `Restart=on-failure`, a Kubernetes Deployment) it stays stopped and blocks nothing until started again. In zone mode it then removes the zone policies the controller converted from its legacy rules, once its own block policies cover the same lists. See [Upgrading the controller to UniFi Network 11](UPGRADING.md#upgrading-the-controller-to-unifi-network-11).
 
 **`zone`**: Creates zone-based firewall policies for each pair in `ZONE_PAIRS`. Requires UniFi Network ≥ 8.x and `UNIFI_API_KEY`: zone policies are managed through the integration API, which does not accept a username and password, so validation rejects `FIREWALL_MODE=zone` without a key. Specify at least one zone pair.
 

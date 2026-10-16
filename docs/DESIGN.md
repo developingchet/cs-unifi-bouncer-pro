@@ -25,7 +25,7 @@ Rationale and architectural decisions for cs-unifi-bouncer-pro.
 
 1. **Correctness** — bans must be applied idempotently and survive container restarts without re-banning or double-banning IPs
 2. **Performance** — handle large ban waves without overwhelming the UniFi API or blocking the CrowdSec stream
-3. **Compatibility** — support both legacy WAN_IN firewall rules (UniFi Network < 8.x) and zone-based policies (≥ 8.x) from a single binary
+3. **Compatibility** — support both legacy WAN_IN firewall rules (sites without firewall zones, up to UniFi Network 10.x) and zone-based policies (≥ 8.x, the only firewall from 11) from a single binary
 4. **Operability** — provide enough observability (metrics, health endpoints, structured logs) to diagnose problems without attaching a debugger
 5. **Security** — the bouncer handles credentials; it must not leak them and must run with minimum privilege
 
@@ -112,6 +112,7 @@ type Manager interface {
     SyncDirty(ctx context.Context, sites []string) error
     Drain(ctx context.Context, sites []string) error
     ZoneManager() *ZoneManager
+    CheckModeChange(ctx context.Context) error
 }
 ```
 
@@ -125,6 +126,15 @@ The manager delegates controller operations to two mode-specific components:
 The `managerImpl` wraps both and selects based on the detected or configured mode. In `auto` mode, feature detection (`internal/controller/features.go`) checks each site for firewall zones and caches the result. With an API key it lists zones through the integration v1 API; with a session login, which that API rejects, it reads `/v2/api/site/<site>/firewall/zone`. A site with no zones, or a controller without the endpoint (HTTP 404 or an HTML fallback page), is treated as legacy. A session-authenticated site that has zones stops startup with an error asking for an API key, because zone policies can only be written through the integration API. Any other probe error also stops startup rather than guessing the mode.
 
 Before feature detection, `internal/controller/layout.go` detects the controller layout from `GET /`: UniFi OS consoles answer it directly, while the self-hosted Network Application redirects to `/manage`. The layout selects the login path (`/api/auth/login` or `/api/login`) and the prefix for classic and v2 API calls (`/proxy/network` or none). The integration API path is the same on both.
+
+#### UniFi Network 11
+
+Network 11 moves every site to the zone-based firewall on upgrade and stops applying legacy rules. Four pieces handle that:
+
+1. **Version**: `Controller.ApplicationVersion` reads `applicationVersion` from `/integration/v1/info` with an API key, or `version` from the site's `stat/sysinfo` with a session. `LoadInfrastructure` reads it once, logs it, and `controller.NetworkVersion.ZoneOnly()` is true from major version 11. A version that cannot be read is logged and treated as a release that still applies legacy rules, so a controller that hides it is not refused.
+2. **Refusal**: on a zone-only release, a site that resolves to legacy mode (explicitly, or `auto` with no zones) stops startup, because its rules would be accepted but never enforced.
+3. **Re-check**: the mode is resolved once, and shard managers, rules and policies are built for it. `CheckModeChange` runs before each periodic reconcile for the sites loaded in legacy mode. It reads the version again and, in `auto` mode, clears the site's feature cache and checks for zones again. A zone-only release or newly found zones return a `ModeChangeError`, and the daemon exits so its supervisor restarts it in zone mode. Rebuilding the managers in place would need every component that holds them to be restarted anyway. A failed check (the controller restarting mid-upgrade) is retried on the next tick.
+4. **Converted rules**: the migration converts legacy rules into zone policies, and a converted bouncer rule is expected to keep the rule's name and block the same shard list. The shard lists are the same objects in both APIs (a classic address group is an integration traffic matching list) and are adopted by name. Zone mode does not own those policies (wrong name prefix, no `zone` cache record), and UniFi refuses to delete a list a policy references. `RepairInfrastructure` therefore deletes, after `EnsurePolicies`, every BLOCK or REJECT policy named like a legacy rule (a `legacy` cache record of the site, or the rule prefix) whose source is a managed shard list, but only when every managed list it blocks is the source of an enabled block policy the bouncer owns. Once none are left it drops the site's `legacy` cache records. Kept policies mark the site: each reconcile retries the retirement after re-ensuring the block policies, and pruning, shard draining and orphan cleanup then delete the converted policies of a list before deleting the list; `drain` always does.
 
 #### Zone policy portFilter constraint
 
@@ -141,6 +151,7 @@ The UniFi zone policy API has these filter constraints:
 When a zone pair is removed from `ZONE_PAIRS` or `CLOUDFLARE_ZONE_PAIRS`, previously managed firewall objects are automatically cleaned up:
 
 - **Block policies**: at `EnsurePolicies` time, two complementary sweeps run. Pass 1 (bbolt-based) deletes a tracked policy no longer expected by the current config when its API ID, name, and `BLOCK` action match the cache record. Pass 2 (API-based) deletes an orphan without a cache record only when its name has the configured policy prefix, its description matches the managed description, and its action is `BLOCK`.
+- **Converted legacy rules**: on a zone-mode site, zone policies converted from the bouncer's legacy rules are deleted once its own block policies cover their lists (see [UniFi Network 11](#unifi-network-11)).
 - **Legacy rules**: at `EnsureRules` time, the API-level orphan sweep deletes any pre-existing rule whose `Description`, `Action`, `Ruleset`, and non-empty `SrcFirewallGroupIDs` all match what the bouncer creates, but whose name is not in the currently-expected shard name set.
 - **Block port TMLs**: at `Bootstrap` time, Traffic Matching Lists named `crowdsec-ports-src-*`, `crowdsec-ports-dst-*`, `crowdsec-dstips-v4-*`, and `crowdsec-dstips-v6-*` not required by any current zone pair are deleted.
 - **Cloudflare ALLOW policies**: at each Cloudflare sync, policies with the `crowdsec-whitelist-cloudflare-` prefix not in the current `CLOUDFLARE_ZONE_PAIRS` set are deleted. Policies with our managed description or an empty description (old policies created before description support) are considered bouncer-owned. UniFi's auto-created `(Return)` mirror policies are cleaned up when their corresponding forward policy is orphaned. When `CLOUDFLARE_WHITELIST_ENABLED=false`, `Manager.Drain()` removes all `crowdsec-whitelist-cloudflare-*` policies and TMLs at startup.

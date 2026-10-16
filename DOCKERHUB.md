@@ -42,7 +42,7 @@ For full setup including CrowdSec registration, TLS, multi-site, and Docker Secr
 
 ## Features
 
-- **Dual firewall modes** — auto-detects zone-based (UniFi ≥ 8.x) or legacy WAN_IN; no manual config required
+- **Dual firewall modes** — auto-detects zone-based (UniFi ≥ 8.x) or legacy WAN_IN; no manual config required. UniFi Network 11 is zone-based only: legacy sites switch to zone mode after the controller upgrade
 - **Multi-site** — bans applied to all configured UniFi sites simultaneously from a single instance
 - **Batch sync with bin-packing** — fills shards before creating new ones; dirty shards flushed immediately after each decision batch
 - **Shard rebalance** — collapses under-filled TMLs automatically after expiry (`SHARD_MERGE_THRESHOLD`)

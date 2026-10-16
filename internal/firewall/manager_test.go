@@ -951,6 +951,10 @@ func (pc *PanicController) HasFeature(ctx context.Context, site string, feature 
 	return false, nil
 }
 
+func (pc *PanicController) ApplicationVersion(ctx context.Context, site string) (string, error) {
+	return "10.6.106", nil
+}
+
 func (pc *PanicController) Ping(ctx context.Context) error {
 	return nil
 }

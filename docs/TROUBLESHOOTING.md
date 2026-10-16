@@ -28,6 +28,10 @@ Common issues and solutions for cs-unifi-bouncer-pro.
   - [Port filter TML not applied to whitelist policy](#port-filter-tml-not-applied-to-whitelist-policy)
 - [Firewall Objects Not Created](#firewall-objects-not-created)
   - [Wrong firewall mode detected](#wrong-firewall-mode-detected)
+  - [Startup fails: "uses the zone-based firewall, which requires UNIFI_API_KEY"](#startup-fails-uses-the-zone-based-firewall-which-requires-unifi_api_key)
+  - [Startup fails: "applies only the zone-based firewall"](#startup-fails-applies-only-the-zone-based-firewall)
+  - [Log warns "could not read the UniFi Network version"](#log-warns-could-not-read-the-unifi-network-version)
+  - [Login fails against a self-hosted controller](#login-fails-against-a-self-hosted-controller)
   - [Zone names do not match](#zone-names-do-not-match)
   - [Invalid port in ZONE_PAIRS or CLOUDFLARE_ZONE_PAIRS](#invalid-port-in-zone_pairs-or-cloudflare_zone_pairs)
 - [State and Reconcile Issues](#state-and-reconcile-issues)
@@ -38,6 +42,8 @@ Common issues and solutions for cs-unifi-bouncer-pro.
   - [Stale policies after removing a zone pair](#stale-policies-after-removing-a-zone-pair)
   - [Duplicate firewall groups after rename](#duplicate-firewall-groups-after-rename)
   - [Log warns that objects exist that the database has no record of](#log-warns-that-objects-exist-that-the-database-has-no-record-of)
+  - [The bouncer exits with "firewall mode changed"](#the-bouncer-exits-with-firewall-mode-changed)
+  - [Policies named like legacy rules after a controller upgrade](#policies-named-like-legacy-rules-after-a-controller-upgrade)
 - [Performance Issues](#performance-issues)
   - [API rate gate triggered](#api-rate-gate-triggered)
   - [Worker queue full — jobs dropped](#worker-queue-full--jobs-dropped)
@@ -550,7 +556,22 @@ The startup log line shows the detected or configured mode.
 
 **Cause:** The site has firewall zones, but the bouncer is logging in with `UNIFI_USERNAME`/`UNIFI_PASSWORD`. Zone policies can only be managed through the UniFi integration API, which does not accept username/password sessions.
 
-**Fix:** Create an API key (**Settings → Control Plane → Integrations**) and set `UNIFI_API_KEY`. To keep username/password and use legacy WAN_IN rules instead, set `FIREWALL_MODE=legacy`.
+**Fix:** Create an API key (**Settings → Control Plane → Integrations**) and set `UNIFI_API_KEY`. On UniFi Network 10.x and earlier, a site that still enforces legacy rules can keep username/password with `FIREWALL_MODE=legacy`. UniFi Network 11 and later apply only the zone-based firewall, so there an API key is the only option.
+
+### Startup fails: "applies only the zone-based firewall"
+
+**Cause:** The controller runs UniFi Network 11 or later, which moves every site to the zone-based firewall and ignores legacy `WAN_IN`/`WANv6_IN` rules. The bouncer refuses to create rules that would block nothing. There are two variants:
+
+- `FIREWALL_MODE=legacy: UniFi Network 11.x applies only the zone-based firewall` — legacy mode was set explicitly.
+- `site ... has no firewall zones, and UniFi Network 11.x applies only the zone-based firewall` — `FIREWALL_MODE=auto` found no zones, which happens when no UniFi gateway is adopted on the site.
+
+**Fix:** Set `UNIFI_API_KEY` and `ZONE_PAIRS`, and use `FIREWALL_MODE=auto` or `zone`. A site without a gateway has no firewall for the bouncer to manage; remove it from `UNIFI_SITES`. See [Upgrading the controller to UniFi Network 11](UPGRADING.md#upgrading-the-controller-to-unifi-network-11).
+
+### Log warns "could not read the UniFi Network version"
+
+**Cause:** The bouncer reads the version from the integration API (`/integration/v1/info`) with an API key, or from the site's `stat/sysinfo` with a username and password. The read failed or returned no version, so the bouncer starts as it would on a release that still applies legacy rules.
+
+**Check:** `diagnose` shows the same error in its `unifi_version` row. A controller that is still starting answers 404 for a while; a restart once it is up clears the warning.
 
 ### Login fails against a self-hosted controller
 
@@ -693,6 +714,22 @@ The cleanup requires ownership evidence from the cache or a static name prefix a
 
 - After a lost database the warning is informational: the bouncer adopts the objects and reconciles them against the CrowdSec decisions. It appears once.
 - With two instances on one site, each must use distinct `GROUP_NAME_TEMPLATE`, `RULE_NAME_TEMPLATE` and `POLICY_NAME_TEMPLATE` values (see [Object Naming Templates](CONFIGURATION.md#object-naming-templates)). Instances that share names adopt, rewrite and delete each other's groups, rules and policies. Set the templates before the second instance first starts; changing them later renames objects (see [Duplicate firewall groups after rename](#duplicate-firewall-groups-after-rename)).
+
+### The bouncer exits with "firewall mode changed"
+
+**Symptom:** `firewall mode changed; exiting so the bouncer restarts in the new mode`, with `site ... was loaded in legacy mode, but ...`, and the container restarts.
+
+**Cause:** Each periodic reconcile re-checks the sites loaded in legacy mode. The bouncer exits when the controller now runs UniFi Network 11 or later, or when `FIREWALL_MODE=auto` now finds firewall zones on the site, because its shards and rules were built for legacy mode. This is expected once after the controller is upgraded.
+
+**Fix:** None when the restart policy (`restart: unless-stopped`, `Restart=on-failure`, a Kubernetes Deployment) starts it again: the next start loads the site in zone mode. A bouncer started without a restart policy stays stopped; start it again by hand and add one. If startup then fails with "uses the zone-based firewall, which requires UNIFI_API_KEY" or "applies only the zone-based firewall", set `UNIFI_API_KEY` and `ZONE_PAIRS`. If the bouncer keeps exiting with the same message, the controller is answering differently between checks; run `diagnose` and include its output in a bug report.
+
+### Policies named like legacy rules after a controller upgrade
+
+**Symptom:** After the site moved to the zone-based firewall, zone policies named like the bouncer's legacy rules (`crowdsec-drop-v4-0`, ...) block the shard lists.
+
+**Cause:** Moving a site to the zone-based firewall converts its legacy rules into zone policies. The bouncer treats a BLOCK or REJECT policy as one of its converted rules when its name is a legacy rule the database records, or starts with the `RULE_NAME_TEMPLATE` prefix, and it blocks one of the bouncer's shard lists.
+
+**Fix:** None. On startup in zone mode, once the bouncer's own block policies (`crowdsec-policy-*`) cover a list, it deletes the converted policies that block it and logs `deleted zone policy converted from a legacy rule`. A converted policy whose list has no enabled block policy of the bouncer's yet is kept, with `keeping a zone policy converted from a legacy rule`, and retried on each periodic reconcile. Pruning and `drain` delete converted policies together with the list they block. Policies that block other lists, or that are named otherwise, are never touched.
 
 ---
 
@@ -962,6 +999,6 @@ If the problem persists after following these steps, open an issue at https://gi
 - Output of `docker inspect cs-unifi-bouncer-pro` (sanitise credentials)
 - Output of `docker exec crowdsec cscli bouncers list`
 - Your Docker and Docker Compose versions
-- UniFi Network Application version
+- UniFi Network version (the `unifi_version` row of `diagnose`)
 - The firewall mode you are using
 - A description of expected vs. actual behaviour

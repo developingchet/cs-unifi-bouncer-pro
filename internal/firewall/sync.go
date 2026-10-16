@@ -350,7 +350,9 @@ func (m *managerImpl) pruneEmptyTailShards(ctx context.Context, site string, v4,
 					break pruneLoop // stop pruning on error to avoid orphaning the group
 				}
 			case "zone":
-				if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, e.ipv6, shardIdx); err != nil {
+				err := errors.Join(m.zoneMgr.DeletePoliciesForShard(ctx, site, e.ipv6, shardIdx),
+					m.deleteConvertedRulesForList(ctx, site, unifiID))
+				if err != nil {
 					m.log.Error().Err(err).Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
 						Msg("failed to delete policies for pruned shard; aborting group delete to avoid orphans")
 					break pruneLoop // stop pruning on error to avoid orphaning the group

@@ -63,11 +63,12 @@ func runDaemon() error {
 	if err != nil {
 		return err
 	}
-	// The health server, the infrastructure repair and the bouncer can each
-	// end the daemon, so done has room for all three. Only failures are sent:
-	// a nil from a component stopped by the signal would end the shutdown
-	// wait before the bouncer has stopped.
-	done := make(chan error, 3)
+	// The health server, the infrastructure repair, the periodic reconcile
+	// (on a firewall mode change) and the bouncer can each end the daemon, so
+	// done has room for all four. Only failures are sent: a nil from a
+	// component stopped by the signal would end the shutdown wait before the
+	// bouncer has stopped.
+	done := make(chan error, 4)
 	go func() {
 		if err := health.Serve(ctx, healthLn); err != nil {
 			done <- err
@@ -166,7 +167,7 @@ func runDaemon() error {
 				runStartupReconcile(ctx, fwMgr, cfg.UnifiSites, log)
 			}
 			if cfg.FirewallReconcileInterval > 0 {
-				runPeriodicReconcile(ctx, fwMgr, cfg.UnifiSites, cfg.FirewallReconcileInterval, notifier, log)
+				runPeriodicReconcile(ctx, fwMgr, cfg.UnifiSites, cfg.FirewallReconcileInterval, notifier, done, log)
 			}
 		}()
 	}, log)

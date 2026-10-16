@@ -82,6 +82,10 @@ func (m *mockFirewallManager) ZoneManager() *firewall.ZoneManager {
 	return nil
 }
 
+func (m *mockFirewallManager) CheckModeChange(_ context.Context) error {
+	return nil
+}
+
 func newTestHandler(store storage.Store, fwMgr firewall.Manager, cfg *config.Config) JobHandler {
 	return makeJobHandler(store, banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun), cfg, nopRecorder{}, zerolog.Nop())
 }

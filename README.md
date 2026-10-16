@@ -18,8 +18,8 @@ Automatically translates CrowdSec ban decisions into UniFi firewall rules — bl
 
 ## Features
 
-- **Dual firewall modes** — Auto-detects zone-based (UniFi Network ≥ 8.x) or legacy WAN_IN rules; no manual configuration required in most deployments
-- **UniFi OS and self-hosted controllers** — Works with UniFi OS consoles and the self-hosted UniFi Network Application; the controller type is detected on startup
+- **Dual firewall modes** — Auto-detects zone-based (UniFi Network ≥ 8.x) or legacy WAN_IN rules; no manual configuration required in most deployments. UniFi Network 11 is zone-based only: legacy mode is refused there, legacy sites switch to zone mode after the controller upgrade, and policies converted from the old rules are cleaned up
+- **UniFi OS and self-hosted controllers** — Works with UniFi OS consoles, UniFi OS Server and the self-hosted UniFi Network Application (10.6 and earlier); the controller type and Network version are detected on startup
 - **Multi-site** — Apply bans to multiple UniFi sites simultaneously with a single bouncer instance
 - **Batch sync** — IP changes are flushed after decision batches and retried at configurable intervals (default 30s), with bin-packing to fill shards before creating new ones
 - **Shard management** — Automatic creation of multiple Firewall Groups / Traffic Matching Lists when IP count exceeds capacity (10,000 per shard)
@@ -99,7 +99,7 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 | `UNIFI_API_DEBUG` | `false` | Log each UniFi API call's method, URL, status and timing plus connection trace events, at `debug` level (needs `LOG_LEVEL=debug` or `trace`). Headers, cookies, tokens, API keys and bodies are never logged; the login request is not traced |
 | `ENABLE_IPV6` | `false` | Enable IPv6 TCP dialing to the UniFi controller. Leave `false` unless your controller is reachable over IPv6. This is separate from `FIREWALL_ENABLE_IPV6` which controls IPv6 firewall rule creation. |
 
-¹ Provide either `UNIFI_API_KEY` **or** both `UNIFI_USERNAME` + `UNIFI_PASSWORD`. Username/password supports legacy firewall rules only; the zone-based firewall and the Cloudflare whitelist require an API key.
+¹ Provide either `UNIFI_API_KEY` **or** both `UNIFI_USERNAME` + `UNIFI_PASSWORD`. Username/password supports legacy firewall rules only; the zone-based firewall and the Cloudflare whitelist require an API key, and so does UniFi Network 11 and later.
 
 ### CrowdSec
 
@@ -258,7 +258,7 @@ Imports a list from [borestad/blocklist-abuseipdb](https://github.com/borestad/b
 
 ### Auto (recommended)
 
-Queries the UniFi controller at startup to detect zone-based firewall support. Uses zone policies on UniFi Network ≥ 8.x and legacy WAN_IN rules on older firmware. The detected mode is logged:
+Queries the UniFi controller at startup to detect zone-based firewall support. Uses zone policies on sites with firewall zones (UniFi Network ≥ 8.x) and legacy WAN_IN rules elsewhere. UniFi Network 11 moves every site to the zone-based firewall, so there legacy mode is refused and the bouncer needs an API key. Each periodic reconcile re-checks legacy sites and restarts the bouncer in zone mode once the controller is upgraded; see [Upgrading the controller to UniFi Network 11](docs/UPGRADING.md#upgrading-the-controller-to-unifi-network-11). The detected mode is logged:
 
 ```json
 {"level":"info","firewall_mode":"zone","msg":"firewall mode resolved"}
@@ -266,7 +266,7 @@ Queries the UniFi controller at startup to detect zone-based firewall support. U
 
 ### Legacy Mode
 
-Creates `WAN_IN` and `WANv6_IN` drop rules referencing managed address-group shards. Compatible with all UniFi Network versions.
+Creates `WAN_IN` and `WANv6_IN` drop rules referencing managed address-group shards. Works with UniFi Network 10.x and earlier; Network 11 no longer applies these rules.
 
 ```bash
 FIREWALL_MODE=legacy

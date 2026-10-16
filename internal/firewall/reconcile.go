@@ -210,6 +210,8 @@ func (m *managerImpl) reconcileWrites(ctx context.Context, site string, v4Mgr, v
 	case "zone":
 		if err := m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr); err != nil {
 			errs = append(errs, fmt.Errorf("ensure zone policies for site %s: %w", site, err))
+		} else if err := m.retryConvertedRules(ctx, site); err != nil {
+			errs = append(errs, fmt.Errorf("retire converted legacy rules for site %s: %w", site, err))
 		}
 	case "legacy":
 		if err := m.legacyMgr.EnsureRules(ctx, site, v4Mgr, v6Mgr); err != nil {

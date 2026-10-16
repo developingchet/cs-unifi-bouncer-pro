@@ -1,5 +1,50 @@
 # Upgrading
 
+## Upgrading the controller to UniFi Network 11
+
+UniFi Network 11 moves every site to the zone-based firewall during the
+upgrade and no longer applies legacy `WAN_IN`/`WANv6_IN` rules. It needs
+UniFi OS 6.0 or newer. The standalone self-hosted Network Application ends at
+10.6; self-hosted installs move to UniFi OS Server, which the bouncer treats
+like a console (`"layout":"unifi-os"`).
+
+Before upgrading a controller that the bouncer manages in legacy mode:
+
+- Create an API key (**Settings → Control Plane → Integrations**) and set
+  `UNIFI_API_KEY`. Zone policies are managed through the integration API,
+  which does not accept a username and password.
+- Set `ZONE_PAIRS` to the zones the block policies should cover, for example
+  `External->Internal`.
+- Leave `FIREWALL_MODE` at `auto`, or set `zone`. On Network 11 the bouncer
+  refuses to start with `FIREWALL_MODE=legacy`, because the rules would be
+  created but block nothing.
+- Make sure something restarts the bouncer when it exits with an error:
+  `restart: unless-stopped` in Compose, `--restart unless-stopped` for
+  `docker run`, `Restart=on-failure` under systemd, or a Kubernetes
+  Deployment. The bouncer exits on its own when it sees the site move to
+  zones (below). A container or binary started without a restart policy
+  stays stopped, and nothing is blocked until it is started again.
+
+During and after the upgrade:
+
+- The startup log reports the controller's release (`detected UniFi Network
+  version`, with `network_version` and `zone_only`), and `diagnose` shows it
+  in the `unifi_version` row.
+- A bouncer that keeps running through the upgrade re-checks its legacy sites
+  on every periodic reconcile. Once the controller reports Network 11, or
+  `FIREWALL_MODE=auto` finds zones on the site, it logs `firewall mode
+  changed` and exits with an error, and the restart policy starts it again in
+  zone mode. With `FIREWALL_RECONCILE_INTERVAL=0` nothing is re-checked;
+  restart the bouncer once the upgrade has finished.
+- The shard lists keep their names through the migration, and zone mode picks
+  them up with their members. The migration turns the bouncer's legacy rules
+  into zone policies. The bouncer recognises those by name (a rule its
+  database records, or the `RULE_NAME_TEMPLATE` prefix, `crowdsec-drop-` by
+  default) and by blocking one of its shard lists. Once its own block
+  policies (`crowdsec-policy-*`) cover a list, it deletes the converted
+  policies that block that list, then forgets the old rules. A converted
+  policy whose list has no block policy yet is kept, so bans stay enforced.
+
 ## From 2.2 to 2.3
 
 The periodic LAPI resync (`CROWDSEC_RESYNC_INTERVAL`) now accepts a decision

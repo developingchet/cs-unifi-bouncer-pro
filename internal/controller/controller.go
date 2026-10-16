@@ -111,6 +111,11 @@ type Controller interface {
 	// Feature Detection
 	HasFeature(ctx context.Context, site string, feature string) (bool, error)
 
+	// ApplicationVersion reports the UniFi Network application version, such
+	// as "10.6.106". site is used only by session logins, which read it from
+	// that site's sysinfo.
+	ApplicationVersion(ctx context.Context, site string) (string, error)
+
 	// Session
 	Ping(ctx context.Context) error
 	Close() error
