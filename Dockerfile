@@ -2,7 +2,7 @@
 # Stage 1: Build
 # Use --platform=$BUILDPLATFORM so the builder always runs natively on the CI host (amd64).
 # TARGETARCH/TARGETOS/TARGETVARIANT are injected by BuildKit for cross-compilation via GOOS/GOARCH below.
-FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS builder
 
 RUN apk add --no-cache git ca-certificates tzdata
 
