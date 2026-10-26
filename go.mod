@@ -1,12 +1,12 @@
 module github.com/developingchet/cs-unifi-bouncer-pro
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/crowdsecurity/crowdsec v1.8.1
 	github.com/crowdsecurity/go-cs-bouncer v0.0.21
 	github.com/knadh/koanf/providers/env v1.1.0
-	github.com/knadh/koanf/v2 v2.3.8
+	github.com/knadh/koanf/v2 v2.4.1
 	github.com/prometheus/client_golang v1.25.0
 	github.com/rs/zerolog v1.35.1
 	github.com/sirupsen/logrus v1.10.2
