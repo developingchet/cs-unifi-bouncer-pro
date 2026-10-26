@@ -6,7 +6,8 @@ UniFi Network 11 moves every site to the zone-based firewall during the
 upgrade and no longer applies legacy `WAN_IN`/`WANv6_IN` rules. It needs
 UniFi OS 6.0 or newer. The standalone self-hosted Network Application ends at
 10.6; self-hosted installs move to UniFi OS Server, which the bouncer treats
-like a console (`"layout":"unifi-os"`).
+like a console (`"layout":"unifi-os"`). Network 11 also drops the USG: keep a
+controller whose sites use a USG on 10.6, where legacy mode still works.
 
 Before upgrading a controller that the bouncer manages in legacy mode:
 
