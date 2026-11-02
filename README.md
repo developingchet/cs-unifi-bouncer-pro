@@ -19,6 +19,7 @@ Automatically translates CrowdSec ban decisions into UniFi firewall rules — bl
 ## Features
 
 - **Dual firewall modes** — Auto-detects zone-based (UniFi Network ≥ 8.x) or legacy WAN_IN rules; no manual configuration required in most deployments. UniFi Network 11 is zone-based only: legacy mode is refused there, legacy sites switch to zone mode after the controller upgrade, and policies converted from the old rules are cleaned up
+- **Egress blocking** — Optional `EGRESS_ZONE_PAIRS` blocks hosts in zones such as a DMZ or IoT network from connecting out to banned addresses, reusing the same ban lists
 - **UniFi OS and self-hosted controllers** — Works with UniFi OS consoles, UniFi OS Server and the self-hosted UniFi Network Application (10.6 and earlier); the controller type and Network version are detected on startup
 - **Multi-site** — Apply bans to multiple UniFi sites simultaneously with a single bouncer instance
 - **Batch sync** — IP changes are flushed after decision batches and retried at configurable intervals (default 30s), with bin-packing to fill shards before creating new ones
@@ -161,6 +162,8 @@ Sensitive variables (`UNIFI_API_KEY`, `UNIFI_PASSWORD`, `CROWDSEC_LAPI_KEY`) add
 |----------|---------|-------------|
 | `ZONE_PAIRS` | `External->Dmz` | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. Zone names are auto-resolved to UUIDs at startup; standard UUIDs and MongoDB ObjectIDs are accepted directly. `External`/`Internal` are the default UniFi 8.x names — check Settings → Firewall → Zones if you renamed them. Optional colon-separated port lists restrict which ports the block policies match (empty = any). Optional `@ip1,ip2,...` suffix on the destination side scopes the policy to specific destination hosts or subnets. |
 | `ZONE_PAIRS_SCENARIO_MAP` | — | Unsupported; configuration validation rejects it because separate firewall policies are not provisioned. |
+| `EGRESS_ZONE_PAIRS` | — | Zone pairs (`src[:sport,...]->dst[:dport,...]`, no `@` destination list) whose block policies match banned addresses as the **destination**, so hosts in the source zone cannot connect out to them, e.g. `Dmz->External;IoT->External`. Reuses the inbound shards; adds one policy per pair, shard and family. Requires `UNIFI_API_KEY`. See [Egress blocking](docs/CONFIGURATION.md#egress-blocking). |
+| `EGRESS_CONNECTION_STATES` | `NEW` | Connection states matched by egress block policies; same values as `FIREWALL_CONNECTION_STATES`. |
 
 ### Cloudflare whitelist
 

@@ -277,6 +277,27 @@ src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]
 
 IPv4 and IPv6 destination IPs are split into separate Traffic Matching Lists (`crowdsec-dstips-v4-{Src}-{Dst}` and `crowdsec-dstips-v6-{Src}-{Dst}`), and each policy uses the list of its own family. When the destination IPs are all one family, the pair gets policies for that family only: UniFi rejects a policy whose destination list is of the other family (HTTP 500), and traffic of that family cannot reach those destinations anyway. A policy of the other family left from an earlier version or configuration is removed. The same applies to Cloudflare ALLOW policies. The UniFi PUT endpoint drops port and destination filters, so a filtered policy is never updated in place: any change to it, including its filters, replaces it with a new policy.
 
+### Egress blocking
+
+`ZONE_PAIRS` policies match banned addresses as the **source**, so banned hosts cannot reach yours, but your hosts can still connect out to them. A compromised host in a DMZ or IoT zone can then still call back to an address CrowdSec has banned, for example to open a reverse shell, fetch a payload or check in. Egress pairs close that path. Their block policies match the same ban lists as the **destination**.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EGRESS_ZONE_PAIRS` | — | Zone pairs in `src[:sport,...]->dst[:dport,...]` format, for example `Dmz->External;IoT->External`. A block policy is created for each pair, shard and address family, with the shard list as its destination filter. Port lists work as in `ZONE_PAIRS`. A destination IP list (`@...`) is rejected, because the ban list is the destination filter. Requires the zone-based firewall and `UNIFI_API_KEY`; validation rejects it with `FIREWALL_MODE=legacy`. Each pair may appear only once. Reloaded on SIGHUP together with `ZONE_PAIRS`. |
+| `EGRESS_CONNECTION_STATES` | `NEW` | Connection states matched by egress block policies. Same values as `FIREWALL_CONNECTION_STATES`. The default matches only new connections, so replies to inbound connections that `ZONE_PAIRS` allows are never cut. |
+
+```bash
+# Stop the DMZ and IoT zones from connecting to banned addresses
+EGRESS_ZONE_PAIRS=Dmz->External;IoT->External
+
+# Only outbound web traffic
+EGRESS_ZONE_PAIRS=IoT->External:80,443
+```
+
+Egress pairs reuse the inbound shards and lists, so they need no extra groups, but each pair adds one policy per shard and family: with 13 v4 shards, two egress pairs add 26 policies. Egress policies are named with `egress-` after the policy prefix (`crowdsec-policy-egress-Dmz-External-v4-0` for `Dmz->External` with the default template), and their port lists with `egress-` after the list prefix (`crowdsec-ports-dst-egress-IoT-External`), so they never collide with an inbound pair over the same zones. The `crowdsec_unifi_zone_block_policies` metric counts the policies per site and direction (`inbound` or `egress`).
+
+The controller evaluates policies in order, and an ALLOW policy for the same zones that comes before an egress block lets its traffic through to banned addresses. The bouncer logs a warning naming each such ALLOW (`an ALLOW policy is evaluated before an egress block policy for the same zones`) and repeats it only when the set changes. It cannot fix the order itself, because recreating its block would move it further back. Move the ALLOW after the block policies in the UniFi policy list.
+
 ---
 
 ## Cloudflare Whitelist

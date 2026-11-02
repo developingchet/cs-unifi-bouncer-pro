@@ -51,6 +51,7 @@ For full setup including CrowdSec registration, TLS, multi-site, and Docker Secr
 - **24 Prometheus metrics** — decisions, API calls, active bans, shard occupancy, decision latency, circuit breaker state
 - **Decision latency histogram** — end-to-end timing from CrowdSec filter pipeline to successful UniFi write
 - **CrowdSec usage-metrics** — decision telemetry pushed to LAPI `/v1/usage-metrics` (default: 30 min; configurable)
+- **Egress blocking** — optional `EGRESS_ZONE_PAIRS` stops hosts in zones such as a DMZ or IoT network from connecting out to banned addresses, using the same ban lists
 - **Cloudflare whitelist sync** — ALLOW policies for Cloudflare IP ranges, auto-refreshed on a configurable schedule; block policies created before the allow are recreated behind it so it takes effect
 - **Ban history audit trail** — ring-buffer event log (up to 10,000 entries) for every ban, unban, and expiry; queryable via `status bans`, `status ip`, `status history`, also against the running bouncer via `docker exec`
 - **External blocklist import** — fetch plain-text IP/CIDR lists from external URLs on a configurable interval; bans auto-expire if the feed goes offline

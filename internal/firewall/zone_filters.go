@@ -30,8 +30,22 @@ const (
 	filterDstIPsV6Prefix = "crowdsec-dstips-v6-"
 )
 
+// filterTMLName names a filter list of pair. An egress pair's lists carry
+// egressMarker, so an inbound and an egress pair over the same zones can
+// filter different ports.
 func filterTMLName(prefix string, pair config.ZonePair) string {
+	if pair.Egress {
+		return prefix + egressMarker + pair.Src + "-" + pair.Dst
+	}
 	return prefix + pair.Src + "-" + pair.Dst
+}
+
+// filterKey indexes a site's filter list IDs by pair.
+func filterKey(pair config.ZonePair) string {
+	if pair.Egress {
+		return egressMarker + pair.Src + ":" + pair.Dst
+	}
+	return pair.Src + ":" + pair.Dst
 }
 
 // isFilterTMLName reports whether name belongs to a per-pair filter list,
@@ -73,7 +87,7 @@ func (zm *ZoneManager) ensurePortTMLs(ctx context.Context, site string, pairs []
 	}
 
 	for _, pair := range pairs {
-		key := pair.Src + ":" + pair.Dst
+		key := filterKey(pair)
 		ids := portTMLIDs{}
 
 		if len(pair.SrcPorts) > 0 {

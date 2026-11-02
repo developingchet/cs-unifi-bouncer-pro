@@ -146,6 +146,16 @@ The UniFi zone policy API has these filter constraints:
 4. **Address family**: a destination IP list must match the policy's IP version; UniFi answers HTTP 500 to an IPv6 policy with an IPv4 destination list. A pair whose destination IPs are all one family gets policies for that family only.
 5. **Order**: policies created through the integration API are evaluated in creation order and cannot be moved with the ordering endpoint. After each Cloudflare sync, a managed block policy that precedes an ALLOW of the same pair and family is replaced the same way as in item 3 (`ZoneManager.RecreatePolicies`), which puts it behind the ALLOW without uncovering the shard. Block policies the bouncer does not own are reported, never touched.
 
+#### Egress policies
+
+`EGRESS_ZONE_PAIRS` pairs are appended to the zone manager's pair list with `ZonePair.Egress` set, so zone resolution, port lists, the orphan sweep, shard pruning, SIGHUP reload and drain handle them like inbound pairs. Their block policy differs in three ways:
+
+- **Address filter**: the shard list is the destination `ipAddressFilter` and the source carries no address filter. Code that needs the list a block policy matches reads it through `policyListID`, which returns the source list or, for an egress policy, the destination list. A policy with a destination filter is never updated with a PUT (item 3 above), so every change to an egress policy replaces it through a staged copy.
+- **Names**: `Namer.EgressPolicyName` puts `egress-` after the policy template's literal prefix, and the pair's port lists get the same marker, so an inbound and an egress pair over the same zones never share a policy or a list. The names keep the prefix, so ownership checks treat them like inbound policies.
+- **Connection states**: `EGRESS_CONNECTION_STATES`, `NEW` by default, so replies to allowed inbound connections pass.
+
+Order works against egress: an ALLOW for the same zones evaluated earlier lets its traffic through, and recreating the block only moves it further back. After `EnsurePolicies`, such ALLOW policies are logged as a warning, once per change, and the `crowdsec_unifi_zone_block_policies` gauge records the inbound and egress policy counts per site.
+
 #### Orphan cleanup
 
 When a zone pair is removed from `ZONE_PAIRS` or `CLOUDFLARE_ZONE_PAIRS`, previously managed firewall objects are automatically cleaned up:
@@ -288,11 +298,11 @@ This design allows:
 
 ### Prometheus metrics
 
-24 metrics under the `crowdsec_unifi_` namespace cover the full lifecycle:
+25 metrics under the `crowdsec_unifi_` namespace cover the full lifecycle:
 
 - **Counters**: decisions processed/filtered, API calls, auth errors, successful logins (reauth), shard syncs, shard create failures, shards rebalanced, Cloudflare whitelist sync errors
 - **Histograms**: API call duration (per endpoint), reconcile duration (per trigger), shard sync duration, decision latency (decision received → recorded in bbolt and the in-memory shard, before the controller write)
-- **Gauges**: active bans (per site/family), unsynced IPs, firewall group size, DB size, dirty shards, last sync timestamp, shard IP count, shard occupancy ratio, circuit breaker state, reconcile delta, decisions in flight
+- **Gauges**: active bans (per site/family), unsynced IPs, firewall group size, DB size, dirty shards, last sync timestamp, shard IP count, shard occupancy ratio, circuit breaker state, reconcile delta, decisions in flight, zone block policies (per site/direction)
 
 ### CrowdSec usage metrics
 
@@ -377,7 +387,7 @@ The race detector (`go test -race ./...`) is run in CI for all packages. Concurr
 | Multi-site | No | Yes |
 | Firewall mode | Legacy only | Auto / legacy / zone |
 | Object naming | Hardcoded strings | Go templates |
-| Prometheus metrics | None | 24 `crowdsec_unifi_*` metrics |
+| Prometheus metrics | None | 25 `crowdsec_unifi_*` metrics |
 | Log redaction | None | `RedactWriter` (regex-based) |
 | Dry-run mode | No | Yes |
 | Startup reconcile | No | Yes |

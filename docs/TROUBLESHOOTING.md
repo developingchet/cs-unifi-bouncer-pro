@@ -44,6 +44,7 @@ Common issues and solutions for cs-unifi-bouncer-pro.
   - [Log warns that objects exist that the database has no record of](#log-warns-that-objects-exist-that-the-database-has-no-record-of)
   - [The bouncer exits with "firewall mode changed"](#the-bouncer-exits-with-firewall-mode-changed)
   - [Policies named like legacy rules after a controller upgrade](#policies-named-like-legacy-rules-after-a-controller-upgrade)
+  - [Log warns that an ALLOW policy is evaluated before an egress block policy](#log-warns-that-an-allow-policy-is-evaluated-before-an-egress-block-policy)
 - [Performance Issues](#performance-issues)
   - [API rate gate triggered](#api-rate-gate-triggered)
   - [Worker queue full — jobs dropped](#worker-queue-full--jobs-dropped)
@@ -730,6 +731,14 @@ The cleanup requires ownership evidence from the cache or a static name prefix a
 **Cause:** Moving a site to the zone-based firewall converts its legacy rules into zone policies. The bouncer treats a BLOCK or REJECT policy as one of its converted rules when its name is a legacy rule the database records, or starts with the `RULE_NAME_TEMPLATE` prefix, and it blocks one of the bouncer's shard lists.
 
 **Fix:** None. On startup in zone mode, once the bouncer's own block policies (`crowdsec-policy-*`) cover a list, it deletes the converted policies that block it and logs `deleted zone policy converted from a legacy rule`. A converted policy whose list has no enabled block policy of the bouncer's yet is kept, with `keeping a zone policy converted from a legacy rule`, and retried on each periodic reconcile. Pruning and `drain` delete converted policies together with the list they block. Policies that block other lists, or that are named otherwise, are never touched.
+
+### Log warns that an ALLOW policy is evaluated before an egress block policy
+
+**Symptom:** `an ALLOW policy is evaluated before an egress block policy for the same zones; hosts it allows can still connect to banned addresses until the ALLOW is moved after the block`, with `allow` and `block` naming the two policies.
+
+**Cause:** The controller evaluates policies in order. An ALLOW for an `EGRESS_ZONE_PAIRS` pair's zones that comes before the bouncer's egress block lets matching traffic out to banned addresses. Unlike a Cloudflare ALLOW, the bouncer cannot fix this by recreating its block, which would only move the block further back.
+
+**Fix:** Move the ALLOW after the `crowdsec-policy-egress-*` policies in **Settings → Policy Table**, or narrow it so it no longer matches the traffic the egress pair should block. The warning is logged again only when the set of such ALLOW policies changes.
 
 ---
 

@@ -62,6 +62,21 @@ func (n *Namer) PolicyName(d NameData) (string, error) {
 	return render(n.policyTmpl, d)
 }
 
+// egressMarker sets egress block policies apart from inbound ones for the
+// same zones; it follows the policy prefix.
+const egressMarker = "egress-"
+
+// EgressPolicyName renders the name of an egress zone policy: the policy
+// name with egressMarker after the template's literal prefix, so it still
+// carries that prefix and never collides with an inbound policy.
+func (n *Namer) EgressPolicyName(d NameData) (string, error) {
+	name, err := render(n.policyTmpl, d)
+	if err != nil {
+		return "", err
+	}
+	return n.policyPrefix + egressMarker + strings.TrimPrefix(name, n.policyPrefix), nil
+}
+
 func (n *Namer) PolicyPrefix() string {
 	return n.policyPrefix
 }

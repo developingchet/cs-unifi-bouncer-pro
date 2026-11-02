@@ -16,11 +16,14 @@ import (
 
 // ZoneConfig holds configuration for zone-based firewall mode.
 type ZoneConfig struct {
-	ZonePairs        []config.ZonePair
-	Description      string
-	LogDrops         bool
-	ConnectionStates []string
-	APIWriteDelay    time.Duration
+	// ZonePairs holds the inbound pairs followed by the egress pairs
+	// (ZonePair.Egress).
+	ZonePairs              []config.ZonePair
+	Description            string
+	LogDrops               bool
+	ConnectionStates       []string
+	EgressConnectionStates []string
+	APIWriteDelay          time.Duration
 }
 
 // errNoZonePairs is returned instead of acting on an empty zone pair set:
@@ -39,7 +42,10 @@ type ZoneManager struct {
 
 	mu           sync.RWMutex
 	zoneCache    map[string]map[string]string     // site -> zone name -> zone ID
-	portTMLCache map[string]map[string]portTMLIDs // site -> "SrcName:DstName" -> port TML IDs
+	portTMLCache map[string]map[string]portTMLIDs // site -> filterKey(pair) -> port TML IDs
+	// egressOrderReported holds, per site, the ALLOW policies last reported
+	// as evaluated before an egress block.
+	egressOrderReported map[string]string
 }
 
 // NewZoneManager constructs a ZoneManager.
@@ -315,16 +321,8 @@ func (zm *ZoneManager) cleanupOrphanedBlockPolicies(ctx context.Context, site st
 func (zm *ZoneManager) DeletePoliciesForShard(ctx context.Context, site string, ipv6 bool, shardIdx int) error {
 	zm.opMu.Lock()
 	defer zm.opMu.Unlock()
-	family := Family(ipv6)
-
 	for _, pair := range zm.cfg.ZonePairs {
-		policyName, err := zm.namer.PolicyName(NameData{
-			Family:  family,
-			Index:   shardIdx,
-			Site:    site,
-			SrcZone: pair.Src,
-			DstZone: pair.Dst,
-		})
+		policyName, err := zm.policyName(site, pair, ipv6, shardIdx)
 		if err != nil {
 			return err
 		}

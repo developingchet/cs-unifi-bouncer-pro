@@ -99,11 +99,15 @@ func buildFWManager(cfg *config.Config,
 
 	v4Cap, v6Cap := resolveCapacities(cfg)
 
-	zonePairs, err := cfg.ParseZonePairs()
+	zonePairs, err := cfg.ManagedZonePairs()
 	if err != nil {
 		return nil, fmt.Errorf("parse zone pairs: %w", err)
 	}
 	connectionStates, err := cfg.ParseFirewallConnectionStates()
+	if err != nil {
+		return nil, err
+	}
+	egressStates, err := cfg.ParseEgressConnectionStates()
 	if err != nil {
 		return nil, err
 	}
@@ -131,11 +135,12 @@ func buildFWManager(cfg *config.Config,
 			APIWriteDelay:    cfg.FirewallAPIShardDelay,
 		},
 		ZoneCfg: firewall.ZoneConfig{
-			ZonePairs:        zonePairs,
-			Description:      cfg.ObjectDescription,
-			LogDrops:         cfg.FirewallLogDrops,
-			ConnectionStates: connectionStates,
-			APIWriteDelay:    cfg.FirewallAPIShardDelay,
+			ZonePairs:              zonePairs,
+			Description:            cfg.ObjectDescription,
+			LogDrops:               cfg.FirewallLogDrops,
+			ConnectionStates:       connectionStates,
+			EgressConnectionStates: egressStates,
+			APIWriteDelay:          cfg.FirewallAPIShardDelay,
 		},
 	}, ctrl, store, namer, log), nil
 }

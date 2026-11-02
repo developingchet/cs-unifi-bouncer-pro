@@ -75,6 +75,11 @@ type Config struct {
 
 	// Zone-Based Firewall Mode
 	ZonePairs []string `koanf:"zone_pairs"`
+	// EgressZonePairs are zone pairs whose block policies match banned
+	// addresses as the destination, stopping hosts in the source zone from
+	// connecting out to them.
+	EgressZonePairs        []string `koanf:"egress_zone_pairs"`
+	EgressConnectionStates string   `koanf:"egress_connection_states"`
 
 	// Circuit Breaker
 	CircuitBreakerThreshold     int           `koanf:"circuit_breaker_threshold"`
@@ -165,6 +170,9 @@ type ZonePair struct {
 	SrcPorts []int    // empty = any source ports
 	DstPorts []int    // empty = any destination ports
 	DstIPs   []string // empty = any destination IPs; CIDRs or plain IPs, IPv4 or IPv6
+	// Egress marks a pair from EGRESS_ZONE_PAIRS: its block policies match
+	// the ban list as the destination instead of the source.
+	Egress bool
 }
 
 // parseZoneSide parses "zoneName[:port1,port2,...]" and returns the zone name
@@ -263,16 +271,58 @@ func (c *Config) ParseCloudflareZonePairs() ([]ZonePair, error) {
 	return parseZonePairList(c.CloudflareZonePairs)
 }
 
+// ParseEgressZonePairs parses EGRESS_ZONE_PAIRS in "src[:port,...]->dst[:port,...]"
+// format and marks each pair as egress. A destination IP list ("@...") is
+// rejected: the ban list is the destination filter of an egress policy.
+func (c *Config) ParseEgressZonePairs() ([]ZonePair, error) {
+	pairs, err := parseZonePairList(c.EgressZonePairs)
+	if err != nil {
+		return nil, err
+	}
+	for i := range pairs {
+		if len(pairs[i].DstIPs) > 0 {
+			return nil, fmt.Errorf("invalid zone pair %q: an egress pair matches banned addresses as the destination and cannot take a destination IP list", c.EgressZonePairs[i])
+		}
+		pairs[i].Egress = true
+	}
+	return pairs, nil
+}
+
+// ManagedZonePairs returns the ZONE_PAIRS pairs followed by the
+// EGRESS_ZONE_PAIRS pairs: every pair the zone manager keeps block policies for.
+func (c *Config) ManagedZonePairs() ([]ZonePair, error) {
+	pairs, err := c.ParseZonePairs()
+	if err != nil {
+		return nil, fmt.Errorf("ZONE_PAIRS: %w", err)
+	}
+	egress, err := c.ParseEgressZonePairs()
+	if err != nil {
+		return nil, fmt.Errorf("EGRESS_ZONE_PAIRS: %w", err)
+	}
+	return append(pairs, egress...), nil
+}
+
 // ParseFirewallConnectionStates returns the zone block policy state filter.
 // ALL preserves UniFi's unrestricted-state behavior for installations that
 // intentionally want to block established and related traffic as well.
 func (c *Config) ParseFirewallConnectionStates() ([]string, error) {
-	raw := strings.TrimSpace(c.FirewallConnectionStates)
+	return parseConnectionStates("FIREWALL_CONNECTION_STATES", c.FirewallConnectionStates)
+}
+
+// ParseEgressConnectionStates returns the state filter of egress block
+// policies. The default, NEW, leaves replies to allowed inbound connections
+// untouched.
+func (c *Config) ParseEgressConnectionStates() ([]string, error) {
+	return parseConnectionStates("EGRESS_CONNECTION_STATES", c.EgressConnectionStates)
+}
+
+func parseConnectionStates(setting, value string) ([]string, error) {
+	raw := strings.TrimSpace(value)
 	if strings.EqualFold(raw, "ALL") {
 		return nil, nil
 	}
 	if raw == "" {
-		return nil, fmt.Errorf("FIREWALL_CONNECTION_STATES must be ALL or a comma-separated list of NEW,INVALID,ESTABLISHED")
+		return nil, fmt.Errorf("%s must be ALL or a comma-separated list of NEW,INVALID,ESTABLISHED", setting)
 	}
 	allowed := map[string]bool{"NEW": true, "INVALID": true, "ESTABLISHED": true}
 	seen := make(map[string]bool)
@@ -280,7 +330,7 @@ func (c *Config) ParseFirewallConnectionStates() ([]string, error) {
 	for _, part := range strings.Split(raw, ",") {
 		state := strings.ToUpper(strings.TrimSpace(part))
 		if !allowed[state] || seen[state] {
-			return nil, fmt.Errorf("FIREWALL_CONNECTION_STATES contains invalid or duplicate state %q", part)
+			return nil, fmt.Errorf("%s contains invalid or duplicate state %q", setting, part)
 		}
 		seen[state] = true
 		states = append(states, state)
@@ -303,6 +353,7 @@ func (c *Config) sanitise() {
 	c.FirewallMode = stripEnvQuotes(c.FirewallMode)
 	c.FirewallBlockAction = stripEnvQuotes(c.FirewallBlockAction)
 	c.FirewallConnectionStates = stripEnvQuotes(c.FirewallConnectionStates)
+	c.EgressConnectionStates = stripEnvQuotes(c.EgressConnectionStates)
 	c.LegacyRulesetV4 = stripEnvQuotes(c.LegacyRulesetV4)
 	c.LegacyRulesetV6 = stripEnvQuotes(c.LegacyRulesetV6)
 	c.GroupNameTemplate = stripEnvQuotes(c.GroupNameTemplate)
@@ -338,6 +389,9 @@ func (c *Config) sanitise() {
 	for i, s := range c.CloudflareZonePairs {
 		c.CloudflareZonePairs[i] = stripEnvQuotes(s)
 	}
+	for i, s := range c.EgressZonePairs {
+		c.EgressZonePairs[i] = stripEnvQuotes(s)
+	}
 }
 
 // defaults sets sensible default values.
@@ -353,6 +407,7 @@ func defaults() map[string]interface{} {
 		"firewall_group_capacity":        10000,
 		"firewall_api_shard_delay":       "250ms",
 		"firewall_connection_states":     "NEW,INVALID",
+		"egress_connection_states":       "NEW",
 		"firewall_reconcile_on_start":    true,
 		"firewall_reconcile_interval":    "10m",
 		"sync_interval":                  "30s",
@@ -470,6 +525,7 @@ func Load() (*Config, error) {
 	cfg.BlockWhitelist = splitCSV(k.String("block_whitelist"))
 	cfg.ZonePairs = splitZonePairList(k.String("zone_pairs"))
 	cfg.CloudflareZonePairs = splitZonePairList(k.String("cloudflare_zone_pairs"))
+	cfg.EgressZonePairs = splitZonePairList(k.String("egress_zone_pairs"))
 	cfg.BlocklistURLs = splitCSV(k.String("blocklist_urls"))
 	cfg.AbuseIPDBCountryInclude = splitCountryCodes(k.String("abuseipdb_country_include"))
 	cfg.AbuseIPDBCountryExclude = splitCountryCodes(k.String("abuseipdb_country_exclude"))
@@ -585,6 +641,9 @@ func (c *Config) validateFirewall() error {
 	if _, err := c.ParseFirewallConnectionStates(); err != nil {
 		return err
 	}
+	if err := c.validateEgress(); err != nil {
+		return err
+	}
 
 	for _, pair := range []struct{ name, tmpl string }{
 		{"GROUP_NAME_TEMPLATE", c.GroupNameTemplate},
@@ -607,6 +666,37 @@ func (c *Config) validateFirewall() error {
 		if c.FirewallMode == "zone" && len(pairs) == 0 {
 			return fmt.Errorf("ZONE_PAIRS must name at least one src->dst zone pair when FIREWALL_MODE=zone")
 		}
+	}
+	return nil
+}
+
+// validateEgress checks EGRESS_ZONE_PAIRS and EGRESS_CONNECTION_STATES. Egress
+// policies are zone policies, so they need the zone-based firewall and the
+// integration API.
+func (c *Config) validateEgress() error {
+	if _, err := c.ParseEgressConnectionStates(); err != nil {
+		return err
+	}
+	pairs, err := c.ParseEgressZonePairs()
+	if err != nil {
+		return fmt.Errorf("EGRESS_ZONE_PAIRS: %w", err)
+	}
+	if len(pairs) == 0 {
+		return nil
+	}
+	if c.FirewallMode == "legacy" {
+		return fmt.Errorf("EGRESS_ZONE_PAIRS needs the zone-based firewall; it cannot be used with FIREWALL_MODE=legacy")
+	}
+	if c.UnifiAPIKey == "" {
+		return fmt.Errorf("EGRESS_ZONE_PAIRS requires UNIFI_API_KEY; zone policies are managed through the integration API")
+	}
+	seen := make(map[string]bool, len(pairs))
+	for _, p := range pairs {
+		key := p.Src + "->" + p.Dst
+		if seen[key] {
+			return fmt.Errorf("EGRESS_ZONE_PAIRS names %s more than once", key)
+		}
+		seen[key] = true
 	}
 	return nil
 }

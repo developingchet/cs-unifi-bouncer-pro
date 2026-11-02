@@ -22,6 +22,14 @@ var (
 		Help:      "Decisions rejected per filter stage.",
 	}, []string{"stage", "reason"})
 
+	// ZoneBlockPolicies counts the zone block policies the bouncer keeps on the
+	// controller, by direction: inbound (ZONE_PAIRS) or egress (EGRESS_ZONE_PAIRS).
+	ZoneBlockPolicies = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "zone_block_policies",
+		Help:      "Zone block policies the bouncer keeps on the controller, by direction (inbound or egress) and site.",
+	}, []string{"direction", "site"})
+
 	// APICalls counts raw UniFi API calls.
 	APICalls = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,

@@ -240,6 +240,10 @@ func (m *managerImpl) LoadInfrastructure(ctx context.Context, sites []string) er
 		if mode == "zone" && len(m.cfg.ZoneCfg.ZonePairs) == 0 {
 			return fmt.Errorf("site %s: %w", site, errNoZonePairs)
 		}
+		if mode == "legacy" && hasEgressPairs(m.cfg.ZoneCfg.ZonePairs) {
+			m.log.Warn().Str("site", site).
+				Msg("EGRESS_ZONE_PAIRS has no effect on this site: it uses legacy firewall rules, which block inbound traffic only")
+		}
 
 		// Cache resolved mode for use in ensureNewShardInfrastructure and pruneEmptyTailShards.
 		m.siteMu.Lock()
@@ -534,18 +538,17 @@ func (m *managerImpl) deleteOrphanedReferencingObjects(ctx context.Context, site
 			if !m.ownsOrphanReference(site, "zone", policy.Name, policy.ID, policy.Description) || policy.Action != "BLOCK" {
 				continue
 			}
-			// Check if this policy references the orphaned group
-			for _, policyGroupID := range policy.TrafficMatchingListIDs {
-				if policyGroupID == groupID {
-					if err := m.ctrl.DeleteZonePolicy(ctx, site, policy.ID); err != nil {
-						m.log.Warn().Err(err).Str("site", site).Str("policy_id", policy.ID).Str("group_id", groupID).
-							Msg("failed to delete orphaned zone policy (will continue)")
-					} else {
-						m.log.Info().Str("site", site).Str("policy_id", policy.ID).Str("group_id", groupID).
-							Msg("deleted zone policy referencing orphaned group")
-					}
-					break
-				}
+			// An inbound policy references the group as its source, an egress
+			// policy as its destination.
+			if policyListID(policy) != groupID {
+				continue
+			}
+			if err := m.ctrl.DeleteZonePolicy(ctx, site, policy.ID); err != nil {
+				m.log.Warn().Err(err).Str("site", site).Str("policy_id", policy.ID).Str("group_id", groupID).
+					Msg("failed to delete orphaned zone policy (will continue)")
+			} else {
+				m.log.Info().Str("site", site).Str("policy_id", policy.ID).Str("group_id", groupID).
+					Msg("deleted zone policy referencing orphaned group")
 			}
 		}
 		if err := m.deleteConvertedRulesFor(ctx, site, map[string]bool{groupID: true}, policies); err != nil {
