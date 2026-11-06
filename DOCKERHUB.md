@@ -10,7 +10,7 @@
 
 cs-unifi-bouncer-pro is a [CrowdSec](https://crowdsec.net) bouncer for [UniFi](https://ui.com) network controllers: UniFi OS consoles, UniFi OS Server and the self-hosted Network Application. It turns CrowdSec ban decisions into UniFi firewall objects, so malicious addresses are blocked at the gateway.
 
-It uses zone-based policies or legacy `WAN_IN` rules, chosen per site at startup, applies bans across multiple sites, and packs addresses into sharded groups or traffic matching lists that are created and merged as the ban list changes. Bans are persisted in a bbolt database, a configurable circuit breaker handles controller outages, and startup and periodic reconciles correct drift. The image is distroless, under 20 MB, runs as nonroot (UID 65532), and is Cosign-signed with a CycloneDX SBOM attached to every release.
+It uses zone-based policies or legacy `WAN_IN` rules, chosen per site at startup, applies bans across multiple sites, and packs addresses into sharded groups or traffic matching lists that are created and merged as the ban list changes. Bans are persisted in a bbolt database, a configurable circuit breaker handles controller outages, and startup and periodic reconciles correct drift. The image is distroless, about an 8 MB download (about 31 MB unpacked), runs as nonroot (UID 65532), and is Cosign-signed with a CycloneDX SBOM attached to every release.
 
 > **Upgrading from 1.x?** 2.0 changes several defaults and rejects settings 1.x accepted. Read the [upgrade guide](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/UPGRADING.md) before you pull the new image.
 
@@ -63,7 +63,7 @@ For full setup including CrowdSec registration, TLS, multi-site, and Docker Secr
 - **Validate and diagnose subcommands** — CI-safe config validation; LAPI, controller, UniFi Network version and firewall-mode checks with zone discovery (`--lapi-auth` also checks the LAPI key)
 - **Log redaction** — passwords, API keys and Bearer tokens are masked before log lines are written
 - **Dry-run mode** — connects and reads live state; logs all intended changes without writing anything to UniFi
-- **Multi-arch distroless image** — amd64, arm64, armv7; under 20 MB; runs as nonroot (UID 65532)
+- **Multi-arch distroless image** — amd64, arm64, armv7; about an 8 MB download; runs as nonroot (UID 65532)
 - **Cosign-signed + CycloneDX SBOM** — keyless OIDC image signing and SBOM attestation on every release
 
 ---

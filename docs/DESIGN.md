@@ -42,7 +42,7 @@ Rationale and architectural decisions for cs-unifi-bouncer-pro.
 
 Go was selected for three reasons:
 
-1. **Single static binary** — no runtime dependency, no interpreter, no shared libraries. The binary is copied into a distroless container with only CA certificates beside it. The resulting image is under 20 MB.
+1. **Single static binary** — no runtime dependency, no interpreter, no shared libraries. The binary is copied into a distroless container with only CA certificates beside it. The resulting image is about an 8 MB download and about 31 MB unpacked.
 2. **Concurrency primitives** — goroutines and channels map directly onto the stream processor and periodic sync model. The `golang.org/x/sync/errgroup` package simplifies coordinated shutdown.
 3. **TLS and HTTP** — the standard library's `net/http` and `crypto/tls` packages handle UniFi and CrowdSec LAPI connections without additional dependencies.
 

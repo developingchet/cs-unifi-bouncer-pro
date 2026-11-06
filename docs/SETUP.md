@@ -233,7 +233,7 @@ If both are on the same Docker network naturally (via docker-compose service nam
 docker compose pull
 ```
 
-This pulls the pre-built image from Docker Hub. The image is under 20 MB, runs as
+This pulls the pre-built image from Docker Hub. The image is about an 8 MB download (about 31 MB unpacked), runs as
 a non-root user in a distroless container, and is Cosign-signed on every release.
 
 > **Building from source** is only needed for development or if you have forked
