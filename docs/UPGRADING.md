@@ -143,7 +143,10 @@ Behaviour that changes without action:
   not exist. Every setting is now unquoted the same way, including
   `UNIFI_SITES_EXCLUDE`, `BLOCKLIST_URLS`, `WEBHOOK_URL`, `WEBHOOK_EVENTS`,
   `BLOCK_SCENARIO_DURATION_MAP`, durations, numbers and booleans, which kept
-  their quotes before.
+  their quotes before. A list whose elements are quoted one by one, such as
+  `UNIFI_SITES='default','branch'`, still reads as those elements; this now
+  also holds for `BLOCK_SCENARIO_DURATION_MAP`, the connection state lists
+  and the AbuseIPDB country lists.
 - **Blank durations**: a duration setting left empty, such as `SYNC_INTERVAL=`
   in an env file, takes its default. Before, it stopped startup with
   `'sync_interval' time: invalid duration ""`.

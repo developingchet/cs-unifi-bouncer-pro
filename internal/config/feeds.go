@@ -108,7 +108,7 @@ func isCountryCode(s string) bool {
 // splitCountryCodes parses a CSV of country codes, upper-cased and deduplicated.
 func splitCountryCodes(s string) []string {
 	var codes []string
-	for _, code := range splitCSV(stripEnvQuotes(strings.TrimSpace(s))) {
+	for _, code := range splitCSV(strings.TrimSpace(s)) {
 		code = strings.ToUpper(stripEnvQuotes(code))
 		if !slices.Contains(codes, code) {
 			codes = append(codes, code)

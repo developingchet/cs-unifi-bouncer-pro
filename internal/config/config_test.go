@@ -36,6 +36,7 @@ func TestStripEnvQuotes(t *testing.T) {
 		{"'", "'"},                                     // single char — unchanged
 		{"", ""},                                       // empty — unchanged
 		{"'nested 'quotes''", "nested 'quotes'"},       // only outer pair stripped
+		{"'it's'", "it's"},                             // a scalar keeps a quote inside
 	}
 	for _, tc := range cases {
 		if got := stripEnvQuotes(tc.in); got != tc.want {
@@ -757,8 +758,8 @@ func TestLoad_QuotedEnvValues(t *testing.T) {
 	}
 }
 
-// A quoted list keeps its first and last elements whole: the quotes are
-// removed from the value before it is split.
+// A list quoted as a whole ("a,b") or element by element ('a','b') reads as
+// the same elements: the quotes are never left on the first or last one.
 func TestLoad_QuotedListValues(t *testing.T) {
 	tests := []struct {
 		env  string
@@ -786,9 +787,29 @@ func TestLoad_QuotedListValues(t *testing.T) {
 			map[string]time.Duration{"ssh-bf": 168 * time.Hour, "http-probing": 24 * time.Hour}},
 		{"SYNC_INTERVAL", `"45s"`, func(c *Config) any { return c.SyncInterval }, 45 * time.Second},
 		{"FIREWALL_ENABLE_IPV6", `"false"`, func(c *Config) any { return c.FirewallEnableIPv6 }, false},
+		{"UNIFI_SITES", `'default','branch'`, func(c *Config) any { return c.UnifiSites }, []string{"default", "branch"}},
+		{"UNIFI_SITES", `"default","branch"`, func(c *Config) any { return c.UnifiSites }, []string{"default", "branch"}},
+		{"UNIFI_SITES", `"default",'branch'`, func(c *Config) any { return c.UnifiSites }, []string{"default", "branch"}},
+		{"CROWDSEC_ORIGINS", `"crowdsec","lists"`, func(c *Config) any { return c.CrowdSecOrigins }, []string{"crowdsec", "lists"}},
+		{"BLOCK_DECISION_TYPES", `'ban','captcha'`, func(c *Config) any { return c.BlockDecisionTypes }, []string{"ban", "captcha"}},
+		{"BLOCK_WHITELIST", `"10.0.0.1","10.0.0.2"`, func(c *Config) any { return c.BlockWhitelist }, []string{"10.0.0.1", "10.0.0.2"}},
+		{"ZONE_PAIRS", `'External->Dmz','External->Internal'`, func(c *Config) any { return c.ZonePairs },
+			[]string{"External->Dmz", "External->Internal"}},
+		{"ZONE_PAIRS", `"External:80,443->Internal";"External->Dmz"`, func(c *Config) any { return c.ZonePairs },
+			[]string{"External:80,443->Internal", "External->Dmz"}},
+		{"EGRESS_ZONE_PAIRS", `'Dmz->External';'IoT->External'`, func(c *Config) any { return c.EgressZonePairs },
+			[]string{"Dmz->External", "IoT->External"}},
+		{"WEBHOOK_EVENTS", `"circuit_breaker_open","reconcile_drift"`, func(c *Config) any { return c.WebhookEvents },
+			[]string{"circuit_breaker_open", "reconcile_drift"}},
+		{"BLOCK_SCENARIO_DURATION_MAP", `"ssh-bf=168h";"http-probing=24h"`, func(c *Config) any { return c.BlockScenarioDurationMap },
+			map[string]time.Duration{"ssh-bf": 168 * time.Hour, "http-probing": 24 * time.Hour}},
+		{"FIREWALL_CONNECTION_STATES", `'NEW','INVALID'`, func(c *Config) any {
+			states, _ := c.ParseFirewallConnectionStates()
+			return states
+		}, []string{"NEW", "INVALID"}},
 	}
 	for _, tc := range tests {
-		t.Run(tc.env, func(t *testing.T) {
+		t.Run(tc.env+"="+tc.val, func(t *testing.T) {
 			baseEnv(t)
 			setEnv(t, tc.env, tc.val)
 			cfg, err := Load()
@@ -799,6 +820,41 @@ func TestLoad_QuotedListValues(t *testing.T) {
 				t.Errorf("%s=%s: got %#v, want %#v", tc.env, tc.val, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestLoad_QuotedCountryCodes(t *testing.T) {
+	for _, val := range []string{`'us','ca'`, `"us,ca"`, `"us","ca"`} {
+		t.Run(val, func(t *testing.T) {
+			baseEnv(t)
+			setEnv(t, "ABUSEIPDB_LIST", "7d")
+			setEnv(t, "ABUSEIPDB_COUNTRY_EXCLUDE", val)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if want := []string{"US", "CA"}; !reflect.DeepEqual(cfg.AbuseIPDBCountryExclude, want) {
+				t.Errorf("AbuseIPDBCountryExclude = %q, want %q", cfg.AbuseIPDBCountryExclude, want)
+			}
+		})
+	}
+}
+
+// Zone pairs read from a file may be quoted line by line.
+func TestLoad_QuotedZonePairFile(t *testing.T) {
+	baseEnv(t)
+	path := filepath.Join(t.TempDir(), "zone-pairs")
+	content := "'External->Internal'\n\"default/Wan->Lan:80,443\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setEnv(t, "ZONE_PAIRS_FILE", path)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := []string{"External->Internal", "default/Wan->Lan:80,443"}; !reflect.DeepEqual(cfg.ZonePairs, want) {
+		t.Errorf("ZonePairs = %q, want %q", cfg.ZonePairs, want)
 	}
 }
 

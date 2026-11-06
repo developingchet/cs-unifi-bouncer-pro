@@ -11,17 +11,44 @@ import (
 	"github.com/knadh/koanf/v2"
 )
 
+// listKeys are the settings that hold a list. Each element may be quoted on
+// its own ('a','b'), or the whole value may be ("a,b").
+var listKeys = map[string]bool{
+	"unifi_sites":                 true,
+	"unifi_sites_exclude":         true,
+	"crowdsec_origins":            true,
+	"block_scenario_exclude":      true,
+	"block_decision_types":        true,
+	"block_whitelist":             true,
+	"block_scenario_duration_map": true,
+	"zone_pairs":                  true,
+	"cloudflare_zone_pairs":       true,
+	"egress_zone_pairs":           true,
+	"firewall_connection_states":  true,
+	"egress_connection_states":    true,
+	"blocklist_urls":              true,
+	"abuseipdb_country_include":   true,
+	"abuseipdb_country_exclude":   true,
+	"webhook_events":              true,
+}
+
 // unquoteValues removes a single layer of matching surrounding quotes from
 // every setting, as Docker's --env-file passes shell quoting through. It runs
 // before list settings are split, so CROWDSEC_ORIGINS="crowdsec,lists" keeps
-// both origins whole instead of becoming `"crowdsec` and `lists"`.
+// both origins whole instead of becoming `"crowdsec` and `lists"`. A list
+// whose elements are quoted one by one keeps its quotes here, and each
+// element is unquoted after the split.
 func unquoteValues(k *koanf.Koanf) error {
 	for key, value := range k.All() {
 		s, ok := value.(string)
 		if !ok {
 			continue
 		}
-		if unquoted := stripEnvQuotes(s); unquoted != s {
+		strip := stripEnvQuotes
+		if listKeys[key] {
+			strip = stripListQuotes
+		}
+		if unquoted := strip(s); unquoted != s {
 			if err := k.Set(key, unquoted); err != nil {
 				return fmt.Errorf("unquote %s: %w", strings.ToUpper(key), err)
 			}
@@ -70,7 +97,8 @@ func durationKeys() []string {
 
 // sanitise removes a single layer of matching surrounding quotes from each
 // element of the list settings, for lists written as 'a','b'. Whole values
-// are unquoted before they are split (see unquoteValues).
+// are unquoted before they are split (see unquoteValues). The other lists
+// unquote their elements as they are parsed.
 func (c *Config) sanitise() {
 	c.AbuseIPDBList = strings.ToLower(strings.TrimSpace(c.AbuseIPDBList))
 
@@ -173,6 +201,17 @@ func stripEnvQuotes(s string) string {
 	return s
 }
 
+// stripListQuotes is stripEnvQuotes for a whole list value. When the quote
+// character also appears inside, as in 'a','b', the outer characters belong
+// to the first and last elements and are left for the per-element unquoting.
+func stripListQuotes(s string) string {
+	unquoted := stripEnvQuotes(s)
+	if unquoted != s && strings.IndexByte(unquoted, s[0]) >= 0 {
+		return s
+	}
+	return unquoted
+}
+
 // fileSecretKeys may be read from the file named by <NAME>_FILE, for Docker
 // and Kubernetes secrets. The file's contents are trimmed.
 var fileSecretKeys = []string{
@@ -251,7 +290,7 @@ func parseScenarioDurationMap(s string) (map[string]time.Duration, error) {
 	}
 	result := make(map[string]time.Duration)
 	for _, part := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ';' }) {
-		part = strings.TrimSpace(part)
+		part = stripEnvQuotes(strings.TrimSpace(part))
 		if part == "" {
 			continue
 		}

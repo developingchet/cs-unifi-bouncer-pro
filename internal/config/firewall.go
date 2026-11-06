@@ -32,7 +32,7 @@ func parseConnectionStates(setting, value string) ([]string, error) {
 	seen := make(map[string]bool)
 	var states []string
 	for _, part := range strings.Split(raw, ",") {
-		state := strings.ToUpper(strings.TrimSpace(part))
+		state := strings.ToUpper(stripEnvQuotes(strings.TrimSpace(part)))
 		if !allowed[state] || seen[state] {
 			return nil, fmt.Errorf("%s contains invalid or duplicate state %q", setting, part)
 		}
