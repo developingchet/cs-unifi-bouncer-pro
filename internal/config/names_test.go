@@ -6,6 +6,48 @@ import (
 	"time"
 )
 
+func TestLoadRejectsLegacyGroupNamesOver64Characters(t *testing.T) {
+	long := strings.Repeat("x", 58) + "-{{.Family}}-{{.Index}}" // 58 + "-v4-0" = 63
+	tests := []struct {
+		name    string
+		env     map[string]string
+		wantErr string
+	}{
+		{name: "63 characters", env: map[string]string{"GROUP_NAME_TEMPLATE": long}},
+		{
+			name:    "65 characters",
+			env:     map[string]string{"GROUP_NAME_TEMPLATE": "xx" + long},
+			wantErr: `(65 characters) for site "default"; legacy firewall groups are limited to 64 characters`,
+		},
+		{
+			name: "too long with a configured site",
+			env: map[string]string{
+				"UNIFI_SITES":         "default,branch-office-east",
+				"GROUP_NAME_TEMPLATE": "crowdsec-block-" + strings.Repeat("y", 30) + "-{{.Site}}-{{.Family}}-{{.Index}}",
+			},
+			wantErr: `for site "branch-office-east"; legacy firewall groups are limited to 64 characters`,
+		},
+		{
+			name: "zone mode has no limit",
+			env:  map[string]string{"FIREWALL_MODE": "zone", "GROUP_NAME_TEMPLATE": "xx" + long},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadWith(t, tc.env)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Load: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.HasPrefix(err.Error(), "GROUP_NAME_TEMPLATE renders ") {
+				t.Fatalf("Load = %v, want error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsUnusableSettings(t *testing.T) {
 	tests := []struct {
 		name    string

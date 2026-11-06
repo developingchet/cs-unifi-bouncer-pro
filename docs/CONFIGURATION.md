@@ -147,7 +147,7 @@ The bouncer uses Go templates for all managed UniFi object names. This allows mu
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GROUP_NAME_TEMPLATE` | `crowdsec-block-{{.Family}}-{{.Index}}` | Name template for firewall address groups |
+| `GROUP_NAME_TEMPLATE` | `crowdsec-block-{{.Family}}-{{.Index}}` | Name template for firewall address groups. The classic firewall API refuses a group name longer than 64 characters, so with `FIREWALL_MODE=legacy` or `auto`, validation fails when the name of the first shard (index `0`, on each site in `UNIFI_SITES`, or `default` with `UNIFI_SITES_AUTO`) is longer. A name that passes 64 characters only at a higher index is refused when that shard is created, which logs an error and fires `shard_create_failed`. |
 | `RULE_NAME_TEMPLATE` | `crowdsec-drop-{{.Family}}-{{.Index}}` | Name template for legacy firewall rules |
 | `POLICY_NAME_TEMPLATE` | `crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}` | Name template for zone firewall policies |
 | `OBJECT_DESCRIPTION` | `Managed by cs-unifi-bouncer-pro. Do not edit manually.` | Description set on all managed objects |

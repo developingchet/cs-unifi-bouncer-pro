@@ -80,6 +80,17 @@ func (c *Config) validateFirewall() error {
 			return err
 		}
 	}
+	// The length limit of traffic matching list names is not known, so zone
+	// mode is not checked.
+	if c.FirewallMode != "zone" {
+		sites := c.UnifiSites
+		if c.UnifiSitesAuto || len(sites) == 0 {
+			sites = []string{"default"}
+		}
+		if err := validateLegacyGroupName(c.GroupNameTemplate, sites); err != nil {
+			return err
+		}
+	}
 
 	// Validate zone pairs if mode is zone or auto
 	if c.FirewallMode != "legacy" {
