@@ -3,6 +3,7 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
@@ -22,6 +23,10 @@ type MockController struct {
 
 	// orderPolicies assigns creation-order indices to new zone policies.
 	orderPolicies bool
+
+	// refuseReferencedLists makes DeleteTrafficMatchingList fail for a list a
+	// zone policy still references, as UniFi does.
+	refuseReferencedLists bool
 
 	// Preset site ID mappings: internalReference -> UUID
 	siteIDs map[string]string
@@ -489,11 +494,26 @@ func (m *MockController) DiscoverSites(ctx context.Context) ([]string, error) {
 	return append([]string{}, m.discoveredSites...), nil
 }
 
+// RefuseReferencedListDeletes makes DeleteTrafficMatchingList refuse a list
+// that a zone policy still references, as UniFi does.
+func (m *MockController) RefuseReferencedListDeletes() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.refuseReferencedLists = true
+}
+
 func (m *MockController) DeleteTrafficMatchingList(ctx context.Context, site string, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.track("DeleteTrafficMatchingList"); err != nil {
 		return err
+	}
+	if m.refuseReferencedLists {
+		for _, p := range m.policies[site] {
+			if slices.Contains(p.TrafficMatchingListIDs, id) {
+				return &controller.ErrBadRequest{Body: `{"code":"api.firewall.traffic-matching-list.in-use","message":"list is referenced by policy ` + p.Name + `"}`}
+			}
+		}
 	}
 	tmls := m.tmls[site][:0]
 	for _, t := range m.tmls[site] {

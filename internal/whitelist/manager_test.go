@@ -579,6 +579,7 @@ func TestEnsureAllowPolicy_WithPorts_NoOpWhenCurrent(t *testing.T) {
 
 func TestSyncWithIPv6OffRemovesIPv6Objects(t *testing.T) {
 	ctrl := testutil.NewMockController()
+	ctrl.RefuseReferencedListDeletes()
 	mgr := NewManager(ctrl, []string{"test-site"}, NewCloudflareProvider("", ""), zerolog.Nop())
 	mgr.SetIPv6(false)
 	ctx := context.Background()
