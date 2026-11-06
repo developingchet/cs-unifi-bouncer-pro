@@ -61,6 +61,24 @@ func TestLogSitePairs(t *testing.T) {
 	}
 }
 
+// The IPv6 warning names only the site whose own pairs are all limited to
+// IPv4 destinations.
+func TestLogSitePairsWarnsPerSiteAboutUnenforcedIPv6(t *testing.T) {
+	cfg := &config.Config{
+		FirewallMode:       "auto",
+		FirewallEnableIPv6: true,
+		ZonePairs:          []string{"External->Dmz", "branch/Wan->Lan@192.168.5.10"},
+	}
+	var out bytes.Buffer
+	logSitePairs(cfg, []string{"default", "branch"}, zerolog.New(&out))
+	if got := strings.Count(out.String(), "no policy to enforce IPv6 bans"); got != 1 {
+		t.Fatalf("log has %d IPv6 warnings, want 1:\n%s", got, out.String())
+	}
+	if !strings.Contains(out.String(), `every ZONE_PAIRS pair of site \"branch\" is limited to IPv4`) {
+		t.Errorf("log does not name site branch:\n%s", out.String())
+	}
+}
+
 func TestLogSitePairsLogsNothingForLegacyMode(t *testing.T) {
 	var out bytes.Buffer
 	logSitePairs(&config.Config{FirewallMode: "legacy", ZonePairs: []string{"External->Dmz"}}, []string{"default"}, zerolog.New(&out))

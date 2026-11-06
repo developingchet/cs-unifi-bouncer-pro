@@ -1,37 +1,53 @@
 package config
 
 import (
+	"fmt"
 	"net/netip"
 	"strings"
 )
 
-// UnenforcedIPv6Warning returns a warning when IPv6 bans are on but no zone
-// pair can carry an IPv6 block policy: every inbound pair is limited to IPv4
-// destination addresses and there is no egress pair. Zone-based sites then
-// keep IPv6 bans in a shard list that no policy uses. Legacy sites block IPv6
-// through their WANv6_IN rule, so the warning names zone-based sites only.
-// It returns "" otherwise, or when the pairs do not parse (validation reports
-// that).
-func (c *Config) UnenforcedIPv6Warning() string {
+// UnenforcedIPv6Warnings returns a warning for each of sites where IPv6 bans
+// are on but no zone pair can carry an IPv6 block policy: every inbound pair
+// the site uses is limited to IPv4 destination addresses and the site has no
+// egress pair. A zone-based site then keeps IPv6 bans in a shard list that no
+// policy uses. Legacy sites block IPv6 through their WANv6_IN rule, so the
+// warning applies only if the site uses the zone-based firewall. It returns
+// nothing when the pairs do not parse (validation reports that).
+func (c *Config) UnenforcedIPv6Warnings(sites []string) []string {
 	if !c.FirewallEnableIPv6 || c.FirewallMode == "legacy" {
-		return ""
+		return nil
 	}
 	inbound, err := c.ParseZonePairs()
-	if err != nil || len(inbound) == 0 {
-		return ""
+	if err != nil {
+		return nil
 	}
 	egress, err := c.ParseEgressZonePairs()
-	if err != nil || len(egress) > 0 {
-		return ""
+	if err != nil {
+		return nil
 	}
-	for _, p := range inbound {
+	var warnings []string
+	for _, site := range sites {
+		if len(PairsForSite(egress, site)) > 0 {
+			continue
+		}
+		pairs := PairsForSite(inbound, site)
+		if len(pairs) == 0 || !allIPv4Only(pairs) {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf("FIREWALL_ENABLE_IPV6 is on, but every ZONE_PAIRS pair of site %q is limited to IPv4 "+
+			"destination addresses and the site has no EGRESS_ZONE_PAIRS pair, so if it uses the zone-based firewall it has "+
+			"no policy to enforce IPv6 bans; set FIREWALL_ENABLE_IPV6=false or add a pair that IPv6 traffic can match", site))
+	}
+	return warnings
+}
+
+func allIPv4Only(pairs []ZonePair) bool {
+	for _, p := range pairs {
 		if !ipv4Only(p.DstIPs) {
-			return ""
+			return false
 		}
 	}
-	return "FIREWALL_ENABLE_IPV6 is on, but every ZONE_PAIRS pair is limited to IPv4 destination addresses, " +
-		"so zone-based sites have no policy to enforce IPv6 bans; set FIREWALL_ENABLE_IPV6=false " +
-		"or add a pair that IPv6 traffic can match"
+	return true
 }
 
 // ipv4Only reports whether ips is non-empty and every entry, a plain address

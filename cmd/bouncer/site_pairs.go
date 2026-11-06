@@ -8,13 +8,17 @@ import (
 )
 
 // logSitePairs warns about site prefixes in the zone pair settings that name
-// none of sites, then logs the zone pairs each site uses.
+// none of sites and about sites whose pairs cannot enforce IPv6 bans, then
+// logs the zone pairs each site uses.
 func logSitePairs(cfg *config.Config, sites []string, log zerolog.Logger) {
 	for _, w := range cfg.UnknownPairSiteWarnings(sites) {
 		log.Warn().Msg(w)
 	}
 	if cfg.FirewallMode == "legacy" {
 		return
+	}
+	for _, w := range cfg.UnenforcedIPv6Warnings(sites) {
+		log.Warn().Msg(w)
 	}
 	// Validate has parsed each setting already.
 	inbound, _ := cfg.ParseZonePairs()

@@ -112,6 +112,12 @@ Behaviour that changes without action:
   that decision is deleted; one that no decision claims stays until it
   expires. `DRY_RUN` runs no migration, so a dry run against a 1.x database
   shows its bans without claims.
+- **IPv6 warning per site**: the warning that IPv6 bans have no policy to
+  enforce them is checked for each site with the pairs that site uses, and
+  names the site. It is logged once the sites are known (after discovery
+  with `UNIFI_SITES_AUTO`), again after each SIGHUP reload, and printed by
+  `validate`. Its text changed: it now reads `every ZONE_PAIRS pair of site
+  "<site>" is limited to IPv4 destination addresses`.
 - **Quoted lists**: a quoted list value such as
   `CROWDSEC_ORIGINS="crowdsec,lists"` is unquoted before it is split. Before,
   the quotes stayed on the first and last elements, so that origin filter

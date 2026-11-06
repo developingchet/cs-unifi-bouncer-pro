@@ -80,6 +80,12 @@ No API calls are made — safe to run in CI without network access.`,
 			if w2 := cfg.InsecureLAPIURLWarning(); w2 != "" {
 				fmt.Fprintf(os.Stderr, "WARNING: %s\n", w2)
 			}
+			// Discovered sites are not known without contacting the controller.
+			if !cfg.UnifiSitesAuto {
+				for _, w2 := range cfg.UnenforcedIPv6Warnings(cfg.UnifiSites) {
+					fmt.Fprintf(os.Stderr, "WARNING: %s\n", w2)
+				}
+			}
 
 			fmt.Println("\nconfiguration valid ✓")
 			return nil

@@ -256,9 +256,6 @@ func logStartup(cfg *config.Config, log zerolog.Logger) {
 	if len(cfg.BlockWhitelist) == 0 {
 		log.Warn().Msg("BLOCK_WHITELIST is empty; add your public WAN address to prevent self-ban")
 	}
-	if w := cfg.UnenforcedIPv6Warning(); w != "" {
-		log.Warn().Msg(w)
-	}
 	log.Info().Str("version", Version).Msg("cs-unifi-bouncer-pro starting")
 	log.Info().
 		Str("bouncer_type", capabilities.BouncerType).
