@@ -135,7 +135,7 @@ type ShardManager struct {
 	log        zerolog.Logger
 	flushDelay time.Duration
 	dryRun     bool
-	mode       string // "legacy" or "zone" (used for log messaging only)
+	mode       string // "legacy" (firewall groups) or "zone" (traffic matching lists): the shard object type and API
 
 	// fam holds the shard state for this manager's address family
 	// ("v4" for ipv6=false, "v6" for ipv6=true). Guarded by mu.
