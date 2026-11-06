@@ -310,6 +310,7 @@ func (zm *ZoneManager) repairPolicy(ctx context.Context, site string, current, d
 	updated := desired
 	updated.ID = current.ID
 	updated.Index = current.Index
+	updated.ReportFlowEnabled = current.ReportFlowEnabled
 	err := zm.ctrl.UpdateZonePolicy(ctx, site, updated)
 	if err == nil {
 		existingByID[updated.ID] = updated
@@ -337,6 +338,7 @@ func (zm *ZoneManager) replacePolicy(ctx context.Context, site string, current, 
 	existingByID map[string]controller.ZonePolicy,
 ) error {
 	name := desired.Name
+	desired.ReportFlowEnabled = current.ReportFlowEnabled
 	staged, err := zm.stageReplacementPolicy(ctx, site, desired, existingByID)
 	if err != nil {
 		return fmt.Errorf("stage replacement for zone policy %s: %w", name, err)

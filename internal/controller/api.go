@@ -142,6 +142,9 @@ type apiV1Policy struct {
 	IPProtocolScope       apiV1IPScope      `json:"ipProtocolScope"`
 	ConnectionStateFilter []string          `json:"connectionStateFilter,omitempty"`
 	LoggingEnabled        bool              `json:"loggingEnabled"`
+	// ReportFlowEnabled is reported from UniFi Network 11 on; when a write
+	// leaves it out, the controller sets it to true.
+	ReportFlowEnabled *bool `json:"reportFlowEnabled,omitempty"`
 }
 
 // apiV1PolicyUpdateSrc is the source struct for PUT requests.
@@ -173,6 +176,7 @@ type apiV1PolicyUpdate struct {
 	IPProtocolScope       apiV1IPScope         `json:"ipProtocolScope"`
 	ConnectionStateFilter []string             `json:"connectionStateFilter,omitempty"`
 	LoggingEnabled        bool                 `json:"loggingEnabled"`
+	ReportFlowEnabled     *bool                `json:"reportFlowEnabled,omitempty"`
 }
 
 // --- Generic HTTP helpers ---------------------------------------------------
@@ -880,6 +884,7 @@ func v1PolicyToModel(p apiV1Policy) ZonePolicy {
 		IPVersion:              ipVersion,
 		ConnectionStateFilter:  p.ConnectionStateFilter,
 		LoggingEnabled:         p.LoggingEnabled,
+		ReportFlowEnabled:      p.ReportFlowEnabled,
 		TrafficMatchingListIDs: tmlIDs,
 		SrcPortTMLID:           srcPortTMLID,
 		DstPortTMLID:           dstPortTMLID,
@@ -967,6 +972,7 @@ func modelToV1Policy(p ZonePolicy) apiV1Policy {
 		IPProtocolScope:       apiV1IPScope{IPVersion: normalizeIPVersion(p.IPVersion)},
 		ConnectionStateFilter: p.ConnectionStateFilter,
 		LoggingEnabled:        p.LoggingEnabled,
+		ReportFlowEnabled:     p.ReportFlowEnabled,
 	}
 }
 
@@ -993,5 +999,6 @@ func modelToV1PolicyUpdate(p ZonePolicy) apiV1PolicyUpdate {
 		IPProtocolScope:       apiV1IPScope{IPVersion: normalizeIPVersion(p.IPVersion)},
 		ConnectionStateFilter: p.ConnectionStateFilter,
 		LoggingEnabled:        p.LoggingEnabled,
+		ReportFlowEnabled:     p.ReportFlowEnabled,
 	}
 }

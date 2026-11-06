@@ -929,6 +929,40 @@ func TestUpdateZonePolicy(t *testing.T) {
 	}
 }
 
+// reportFlowEnabled (UniFi Network 11) is read back and written as read; a
+// policy whose controller does not report it sends nothing, so controllers
+// before 11 never see the field.
+func TestZonePolicyReportFlowEnabledRoundTrip(t *testing.T) {
+	var wire apiV1Policy
+	if err := json.Unmarshal([]byte(`{"id":"p1","name":"n","action":{"type":"BLOCK"},"source":{"zoneId":"a"},"destination":{"zoneId":"b"},"ipProtocolScope":{"ipVersion":"IPV4"},"reportFlowEnabled":false}`), &wire); err != nil {
+		t.Fatal(err)
+	}
+	model := v1PolicyToModel(wire)
+	if model.ReportFlowEnabled == nil || *model.ReportFlowEnabled {
+		t.Fatalf("ReportFlowEnabled = %v, want false read back", model.ReportFlowEnabled)
+	}
+	for name, body := range map[string]any{"create": modelToV1Policy(model), "update": modelToV1PolicyUpdate(model)} {
+		out, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(out), `"reportFlowEnabled":false`) {
+			t.Errorf("%s body %s does not carry reportFlowEnabled=false", name, out)
+		}
+	}
+
+	model.ReportFlowEnabled = nil
+	for name, body := range map[string]any{"create": modelToV1Policy(model), "update": modelToV1PolicyUpdate(model)} {
+		out, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(out), "reportFlowEnabled") {
+			t.Errorf("%s body %s sends reportFlowEnabled although the controller never reported it", name, out)
+		}
+	}
+}
+
 func TestDeleteZonePolicy(t *testing.T) {
 	const siteID = testSiteUUID
 	const policyID = "pol-del-1"

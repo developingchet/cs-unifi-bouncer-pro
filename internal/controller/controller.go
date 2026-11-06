@@ -44,9 +44,14 @@ type ZonePolicy struct {
 	TrafficMatchingListIDs []string // proxy API: source.ip_group_id (single ID)
 	ConnectionStateFilter  []string // e.g. ["NEW", "INVALID"]
 	LoggingEnabled         bool
-	SrcPortTMLID           string // TML of type "PORTS" for source port filter (empty = any)
-	DstPortTMLID           string // TML of type "PORTS" for destination port filter (empty = any)
-	DstIPTMLID             string // TML of type IPV4_ADDRESSES or IPV6_ADDRESSES for dst IP filter (empty = any)
+	// ReportFlowEnabled is whether matches show in Insights Flows (UniFi
+	// Network 11 and later; nil when the controller does not report it). The
+	// bouncer does not manage it: writes carry the value the policy already
+	// has, so a setting made in the UniFi UI survives repairs.
+	ReportFlowEnabled *bool
+	SrcPortTMLID      string // TML of type "PORTS" for source port filter (empty = any)
+	DstPortTMLID      string // TML of type "PORTS" for destination port filter (empty = any)
+	DstIPTMLID        string // TML of type IPV4_ADDRESSES or IPV6_ADDRESSES for dst IP filter (empty = any)
 }
 
 // Zone represents a UniFi network zone (topology discovery).
