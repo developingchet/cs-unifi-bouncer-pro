@@ -55,6 +55,19 @@ func TestUnifiDialIPv6Aliases(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidEnableIPv6(t *testing.T) {
+	for _, env := range []map[string]string{
+		{"ENABLE_IPV6": "yes"},
+		{"ENABLE_IPV6": "yes", "UNIFI_DIAL_IPV6": "true"},
+	} {
+		_, err := loadWith(t, env)
+		want := `ENABLE_IPV6 must be true or false; got "yes"`
+		if err == nil || err.Error() != want {
+			t.Errorf("Load with %v: err = %v, want %q", env, err, want)
+		}
+	}
+}
+
 func TestShardCapacitiesDefaultLimit(t *testing.T) {
 	cfg := Config{ShardLimitV6: 300}
 	v4, v6 := cfg.ShardCapacities(500)

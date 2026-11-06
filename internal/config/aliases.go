@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/knadh/koanf/v2"
@@ -40,19 +41,25 @@ func isSet(k *koanf.Koanf, name string) bool {
 
 // applySettingAliases resolves deprecated setting names into their current
 // settings and records a deprecation warning for each one in use.
-func (c *Config) applySettingAliases(k *koanf.Koanf) {
+func (c *Config) applySettingAliases(k *koanf.Koanf) error {
 	for _, alias := range capacityAliases {
 		if isSet(k, alias.old) {
 			c.DeprecationWarnings = append(c.DeprecationWarnings, aliasWarning(alias, isSet(k, alias.current)))
 		}
 	}
 	if isSet(k, dialIPv6Alias.old) {
+		raw := strings.TrimSpace(k.String(strings.ToLower(dialIPv6Alias.old)))
+		dial, err := strconv.ParseBool(raw)
+		if err != nil {
+			return fmt.Errorf("%s must be true or false; got %q", dialIPv6Alias.old, raw)
+		}
 		current := isSet(k, dialIPv6Alias.current)
 		if !current {
-			c.UnifiDialIPv6 = k.Bool(strings.ToLower(dialIPv6Alias.old))
+			c.UnifiDialIPv6 = dial
 		}
 		c.DeprecationWarnings = append(c.DeprecationWarnings, aliasWarning(dialIPv6Alias, current))
 	}
+	return nil
 }
 
 // aliasWarning words the deprecation warning for alias, saying the old

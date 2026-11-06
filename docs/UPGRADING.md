@@ -173,7 +173,10 @@ one in use logs a deprecation warning at startup:
 names, and `UNIFI_DIAL_IPV6` over `ENABLE_IPV6`. Replacing
 `FIREWALL_GROUP_CAPACITY` with `SHARD_LIMIT` keeps the same shard sizes
 unless a per-family setting is larger than it: `SHARD_LIMIT` caps the
-per-family settings, `FIREWALL_GROUP_CAPACITY` did not.
+per-family settings, `FIREWALL_GROUP_CAPACITY` did not. `ENABLE_IPV6` still
+accepts only the boolean forms Go reads (`true`, `false`, `1`, `0`, ...); any
+other value, such as `yes`, stops startup with `ENABLE_IPV6 must be true or
+false; got "yes"`, also when `UNIFI_DIAL_IPV6` is set.
 
 Settings now rejected. These configurations were accepted by 2.3 and now stop
 startup with a validation error, and a SIGHUP reload that introduces one is

@@ -225,7 +225,9 @@ func Load() (*Config, error) {
 	}
 
 	cfg.sanitise()
-	cfg.applySettingAliases(k)
+	if err := cfg.applySettingAliases(k); err != nil {
+		return nil, err
+	}
 
 	// Deprecation alias: FIREWALL_BATCH_WINDOW → SYNC_INTERVAL.
 	// If the user set the old variable but not the new one, migrate the value.
