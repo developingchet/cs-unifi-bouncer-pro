@@ -316,7 +316,7 @@ When enabled, the bouncer periodically fetches current Cloudflare IP ranges and 
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | No | Enable the Cloudflare IP whitelist sync. Requires zone mode and `UNIFI_API_KEY`; startup fails with `FIREWALL_MODE=legacy` or without an API key. Both address families get a list and ALLOW policies, whatever `FIREWALL_ENABLE_IPV6` is set to. |
+| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | No | Enable the Cloudflare IP whitelist sync. Requires zone mode and `UNIFI_API_KEY`; startup fails with `FIREWALL_MODE=legacy` or without an API key. With `FIREWALL_ENABLE_IPV6=false` only the IPv4 list and ALLOW policies are kept; IPv6 ones from an earlier run are removed. |
 | `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | No | How often to re-fetch Cloudflare IP ranges and update the IP TMLs (default: weekly). |
 | `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | No | `https://` URL to fetch the current Cloudflare IPv4 CIDR list. |
 | `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | No | `https://` URL to fetch the current Cloudflare IPv6 CIDR list. |

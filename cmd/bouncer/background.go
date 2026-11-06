@@ -205,6 +205,7 @@ func startCloudflareWhitelist(ctx context.Context, cfg *config.Config, ctrl cont
 	}
 	provider := whitelist.NewCloudflareProvider(cfg.CloudflareIPv4URL, cfg.CloudflareIPv6URL)
 	mgr := whitelist.NewManager(ctrl, cfg.UnifiSites, provider, log)
+	mgr.SetIPv6(cfg.FirewallEnableIPv6)
 	if zm != nil {
 		mgr.SetBlockRecreator(zm)
 	}
