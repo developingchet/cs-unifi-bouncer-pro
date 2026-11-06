@@ -71,6 +71,9 @@ func New(cfg *config.Config, ctrl controller.Controller, store storage.Store,
 	filterCfg.Whitelist = whitelist
 	filterCfg.MinBanDuration = cfg.BlockMinDuration
 	filterCfg.ScenarioDurationMap = cfg.BlockScenarioDurationMap
+	if len(cfg.BlockDecisionTypes) > 0 {
+		filterCfg.BanTypes = cfg.BlockDecisionTypes
+	}
 
 	handler := makeJobHandler(store, claims, cfg, recorder, log)
 	resyncClient, err := lapihttp.NewClient(cfg.CrowdSecLAPIVerifyTLS, cfg.CrowdSecLAPICACert, resyncHTTPTimeout)

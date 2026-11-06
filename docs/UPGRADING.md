@@ -77,6 +77,9 @@ Behaviour that changes without action:
   that belong to no site. Queries that select series by their exact label set
   need `site` added or summed away, for example
   `sum by (endpoint) (rate(crowdsec_unifi_api_calls_total[5m]))`.
+- **Decision types**: `BLOCK_DECISION_TYPES` is new and defaults to `ban`,
+  so captcha and other non-ban decisions are still ignored until it lists
+  them (see [CONFIGURATION.md](CONFIGURATION.md#decision-filtering)).
 
 Renamed settings. The old names keep working with the same effect, and each
 one in use logs a deprecation warning at startup:

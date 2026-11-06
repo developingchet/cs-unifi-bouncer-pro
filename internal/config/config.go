@@ -109,6 +109,7 @@ type Config struct {
 	CrowdSecResyncInterval  time.Duration `koanf:"crowdsec_resync_interval"`
 	LAPIMetricsPushInterval time.Duration `koanf:"lapi_metrics_push_interval"`
 	BlockScenarioExclude    []string      `koanf:"block_scenario_exclude"`
+	BlockDecisionTypes      []string      `koanf:"-"` // parsed from BLOCK_DECISION_TYPES CSV
 	BlockWhitelist          []string      `koanf:"block_whitelist"`
 	BlockMinDuration        time.Duration `koanf:"block_min_duration"`
 	// BlockScenarioDurationMap overrides the ban duration for specific scenarios.
@@ -523,6 +524,7 @@ func Load() (*Config, error) {
 	cfg.UnifiSitesExclude = splitCSV(k.String("unifi_sites_exclude"))
 	cfg.CrowdSecOrigins = splitCSV(k.String("crowdsec_origins"))
 	cfg.BlockScenarioExclude = splitCSV(k.String("block_scenario_exclude"))
+	cfg.BlockDecisionTypes = parseBlockDecisionTypes(k.String("block_decision_types"))
 	cfg.BlockWhitelist = splitCSV(k.String("block_whitelist"))
 	cfg.ZonePairs = splitZonePairList(k.String("zone_pairs"))
 	cfg.CloudflareZonePairs = splitZonePairList(k.String("cloudflare_zone_pairs"))
@@ -581,6 +583,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateShardLimits(); err != nil {
+		return err
+	}
+	if err := c.validateBlockDecisionTypes(); err != nil {
 		return err
 	}
 	if err := c.validateFeeds(); err != nil {

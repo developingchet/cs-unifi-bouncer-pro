@@ -371,6 +371,7 @@ Decisions from CrowdSec pass through an 8-stage filter pipeline before being enq
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `BLOCK_DECISION_TYPES` | `ban` | Comma-separated CrowdSec decision types enforced as bans. A firewall can only block, so a listed type such as `captcha` blocks the address like a ban, through every other stage of the filter. Example: `ban,captcha`. Types are case-insensitive; an entry other than lower-case letters, digits, `_` and `-`, or the word `delete`, stops startup. Leave `ban` in the list unless ban decisions should be ignored. A deletion releases its ban when its type is `ban` or is listed here, so taking a type out of the list leaves the bans it made until they expire. |
 | `BLOCK_SCENARIO_EXCLUDE` | — | Comma-separated scenario substrings to skip. Example: `impossible-travel,test` |
 | `BLOCK_WHITELIST` | — | Comma-separated IP addresses or CIDR ranges that are never blocked. Add your public WAN IP here; private and CGNAT ranges are skipped automatically. Adding an address takes effect for existing bans on restart (see below). |
 | `BLOCK_MIN_DURATION` | — | Ignore ban decisions shorter than this duration. Example: `1h`. Useful to filter out short test decisions. The decision's own duration is checked, before any `BLOCK_SCENARIO_DURATION_MAP` override, so a mapped duration below this minimum still applies. |
@@ -382,7 +383,7 @@ The stage names below are the `stage` label values of `crowdsec_unifi_decisions_
 
 | Stage | What it rejects |
 |-------|----------------|
-| `1_action` | Decisions whose type is neither `ban` nor `delete` |
+| `1_action` | Decisions whose type is not in `BLOCK_DECISION_TYPES` (reason `unsupported_action`, or `not_a_ban` for a new decision of type `delete`, or `ban` left out of the list) |
 | `2_scenario_exclude` | Scenarios matching any `BLOCK_SCENARIO_EXCLUDE` substring |
 | `3_origin` | Origins not in `CROWDSEC_ORIGINS` (when set) |
 | `4_scope` | Non-IP/CIDR scopes (ASN, country, etc.) |

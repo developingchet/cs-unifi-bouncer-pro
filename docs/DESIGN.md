@@ -137,7 +137,7 @@ A ban runs every stage in order; a deletion runs only stages 1, 4 and 5.
 
 | Stage | Condition | Rationale |
 |-------|-----------|-----------|
-| `1_action` | Decision type is neither `ban` nor a deletion | Only bans and their deletions change firewall state |
+| `1_action` | Decision type is not in `BLOCK_DECISION_TYPES` (default `ban`) | Only bans, the types enforced as bans, and their deletions change firewall state |
 | `2_scenario_exclude` | Scenario contains a `BLOCK_SCENARIO_EXCLUDE` substring | Skip scenarios inappropriate for IP banning (e.g. account compromise) |
 | `3_origin` | Origin not in `CROWDSEC_ORIGINS` (when set) | Optionally restrict to selected decision origins |
 | `4_scope` | Scope is not `ip` or `range` | UniFi accepts only IP addresses and CIDRs |

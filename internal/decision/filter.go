@@ -16,6 +16,10 @@ type FilterConfig struct {
 	// Stage 1: allowed action types
 	AllowedActions []string // default: ["ban", "delete"]
 
+	// BanTypes are the decision types applied as bans (BLOCK_DECISION_TYPES).
+	// They pass stage 1 alongside AllowedActions.
+	BanTypes []string // default: ["ban"]
+
 	// Stage 2: scenario substrings to skip
 	BlockScenarioExclude []string
 
@@ -41,6 +45,7 @@ type FilterConfig struct {
 func NewFilterConfig() FilterConfig {
 	return FilterConfig{
 		AllowedActions: []string{"ban", "delete"},
+		BanTypes:       []string{"ban"},
 		AllowedScopes:  []string{"ip", "range"},
 	}
 }
@@ -99,7 +104,7 @@ func filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger, deleted bo
 	}
 
 	// Stage 1: action must be an allowed type
-	if !containsCI(cfg.AllowedActions, action) {
+	if !containsCI(cfg.AllowedActions, action) && !containsCI(cfg.BanTypes, action) {
 		metrics.DecisionsFiltered.WithLabelValues(stageAction, "unsupported_action").Inc()
 		log.Trace().Str("action", action).Msg("filtered: unsupported action")
 		return FilterResult{}
@@ -111,12 +116,16 @@ func filter(d *models.Decision, cfg FilterConfig, log zerolog.Logger, deleted bo
 	// before BLOCK_SCENARIO_EXCLUDE, CROWDSEC_ORIGINS or BLOCK_WHITELIST changed.
 	if deleted {
 		action = "delete"
-	} else if action != "ban" {
+	} else if !containsCI(cfg.BanTypes, action) {
 		// A decision in the stream's new list is applied as a ban whatever its
 		// type says, so any other type would bypass the ban-only stages.
 		metrics.DecisionsFiltered.WithLabelValues(stageAction, "not_a_ban").Inc()
 		log.Debug().Str("action", action).Msg("filtered: new decision is not a ban")
 		return FilterResult{}
+	} else {
+		// A new decision of a type listed in BanTypes (captcha, for example)
+		// is enforced as a ban: a network firewall can only block.
+		action = "ban"
 	}
 	isBan := action == "ban"
 
