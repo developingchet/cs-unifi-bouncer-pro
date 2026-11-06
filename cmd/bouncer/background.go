@@ -99,20 +99,23 @@ func notifySIGHUP() chan os.Signal {
 }
 
 // watchSIGHUP reloads the zone pairs and reconciles their policies on SIGHUP,
-// without a restart.
-func watchSIGHUP(ctx context.Context, sighup chan os.Signal, cfg *config.Config, fwMgr firewall.Manager, log zerolog.Logger) {
+// without a restart. reconcilesOpen reports whether the startup reconcile
+// gate has opened (see gateReconciles).
+func watchSIGHUP(ctx context.Context, sighup chan os.Signal, cfg *config.Config, fwMgr firewall.Manager,
+	reconcilesOpen func() bool, log zerolog.Logger,
+) {
 	defer signal.Stop(sighup)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-sighup:
-			reloadZones(ctx, cfg, fwMgr, log)
+			reloadZones(ctx, cfg, fwMgr, reconcilesOpen, log)
 		}
 	}
 }
 
-func reloadZones(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager, log zerolog.Logger) {
+func reloadZones(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager, reconcilesOpen func() bool, log zerolog.Logger) {
 	if cfg.DryRun {
 		log.Info().Msg("[DRY-RUN] skipping zone reload")
 		return
@@ -139,6 +142,17 @@ func reloadZones(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager
 	}
 	if err := zm.Reload(ctx, cfg.UnifiSites, newPairs); err != nil {
 		log.Warn().Err(err).Msg("SIGHUP: zone reload failed")
+		return
+	}
+	if !reconcilesOpen() {
+		// A full reconcile also removes controller members the ban database
+		// does not hold. Until the startup gate opens the database may be
+		// empty, so only the policies are brought in line with the new pairs.
+		if err := fwMgr.RepairInfrastructure(ctx, cfg.UnifiSites); err != nil {
+			log.Warn().Err(err).Msg("SIGHUP: zone policies could not be fully repaired")
+			return
+		}
+		log.Info().Msg("SIGHUP: zone pairs and policies reloaded; bans are reconciled once the startup reconcile runs")
 		return
 	}
 	if _, err := fwMgr.Reconcile(ctx, cfg.UnifiSites); err != nil {

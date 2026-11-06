@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
@@ -119,7 +120,10 @@ func runDaemon() error {
 	if err := fwMgr.LoadInfrastructure(ctx, cfg.UnifiSites); err != nil {
 		return fmt.Errorf("load infrastructure: %w", err)
 	}
-	go watchSIGHUP(ctx, notifySIGHUP(), cfg, fwMgr, log)
+	// reconcilesOpen is set once gateReconciles lets reconciles run; a SIGHUP
+	// before then must not reconcile bans against a database still empty.
+	var reconcilesOpen atomic.Bool
+	go watchSIGHUP(ctx, notifySIGHUP(), cfg, fwMgr, reconcilesOpen.Load, log)
 
 	recorder, recorderDone, err := newMetricsRecorder(ctx, cfg, log)
 	if err != nil {
@@ -162,6 +166,7 @@ func runDaemon() error {
 	}
 	bnc.OnStartupSynced(health.MarkSynced)
 	gateReconciles(ctx, bnc.OnStartupSynced, banCount, startupReconcileFallback, func() {
+		reconcilesOpen.Store(true)
 		go func() {
 			if cfg.FirewallReconcileOnStart {
 				runStartupReconcile(ctx, fwMgr, cfg.UnifiSites, log)

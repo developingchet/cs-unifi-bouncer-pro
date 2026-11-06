@@ -610,6 +610,8 @@ SIGHUP reloads the process's current environment. Changes to `.env` or a Kuberne
 5. Reconciles block policies immediately, creating missing policies and removing policies for deleted pairs
 6. If zone or filter setup fails, the **existing configuration stays active** and an error is logged
 
+A SIGHUP that arrives before the startup reconcile has run (the bouncer is still waiting for its first CrowdSec batch) only repairs the block policies for the new pairs. Ban membership is reconciled when the startup reconcile runs, because reconciling an empty ban database would remove every enforced ban from the controller.
+
 Filter changes stage a new block policy before removing the old one. If policy reconciliation fails after the configuration commits, the error is logged and the next reconciliation retries; some pairs may already have updated.
 
 Only zone pair changes (`ZONE_PAIRS`) are applied via SIGHUP. All other config changes require a restart. In legacy mode (no site resolved to zone mode), SIGHUP logs a warning that zone reload is skipped and does nothing else.
