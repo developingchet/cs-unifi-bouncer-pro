@@ -419,8 +419,8 @@ func TestReconcile_AddsMissing(t *testing.T) {
 	}
 
 	// Put an IP in the ban list.
-	if err := store.BanRecord("10.0.0.99", time.Time{}, false); err != nil {
-		t.Fatalf("BanRecord: %v", err)
+	if err := testutil.PutBan(store, "10.0.0.99", time.Time{}, false); err != nil {
+		t.Fatalf("PutBan: %v", err)
 	}
 
 	result, err := mgr.Reconcile(context.Background(), []string{testSite})
@@ -578,7 +578,7 @@ func TestSyncDirty_DoesNotDrainDonorBeforeTargetFlush(t *testing.T) {
 		{ID: "group-1", Name: "crowdsec-block-v4-1", GroupMembers: []string{"2.2.2.2"}},
 	})
 	for _, ip := range []string{"1.1.1.1", "2.2.2.2"} {
-		if err := store.BanRecord(ip, time.Time{}, false); err != nil {
+		if err := testutil.PutBan(store, ip, time.Time{}, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -615,7 +615,7 @@ func TestSyncDirty_RetriesFailedDonorPolicyDeletion(t *testing.T) {
 		{ID: "group-1", Name: "crowdsec-block-v4-1", GroupMembers: []string{"2.2.2.2"}},
 	})
 	for _, ip := range []string{"1.1.1.1", "2.2.2.2"} {
-		if err := store.BanRecord(ip, time.Time{}, false); err != nil {
+		if err := testutil.PutBan(store, ip, time.Time{}, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -668,11 +668,11 @@ func TestReconcile_ActivationCallbackFires(t *testing.T) {
 	}
 
 	// Two IPs: first fills shard 0, second triggers shard 1 (Pending).
-	if err := store.BanRecord("10.0.0.1", time.Time{}, false); err != nil {
-		t.Fatalf("BanRecord: %v", err)
+	if err := testutil.PutBan(store, "10.0.0.1", time.Time{}, false); err != nil {
+		t.Fatalf("PutBan: %v", err)
 	}
-	if err := store.BanRecord("10.0.0.2", time.Time{}, false); err != nil {
-		t.Fatalf("BanRecord: %v", err)
+	if err := testutil.PutBan(store, "10.0.0.2", time.Time{}, false); err != nil {
+		t.Fatalf("PutBan: %v", err)
 	}
 
 	result, err := mgr.Reconcile(context.Background(), []string{testSite})
@@ -710,8 +710,8 @@ func TestReconcile_ContextCancellation(t *testing.T) {
 	// Populate the store with many IPs.
 	for i := 0; i < 50; i++ {
 		ip := fmt.Sprintf("10.0.%d.%d", i/256, i%256)
-		if err := store.BanRecord(ip, time.Time{}, false); err != nil {
-			t.Fatalf("BanRecord: %v", err)
+		if err := testutil.PutBan(store, ip, time.Time{}, false); err != nil {
+			t.Fatalf("PutBan: %v", err)
 		}
 	}
 
@@ -746,8 +746,8 @@ func TestReconcile_FlushErrorSurfaced(t *testing.T) {
 	}
 
 	// Put an IP in the ban list so the shard becomes dirty.
-	if err := store.BanRecord("10.0.0.99", time.Time{}, false); err != nil {
-		t.Fatalf("BanRecord: %v", err)
+	if err := testutil.PutBan(store, "10.0.0.99", time.Time{}, false); err != nil {
+		t.Fatalf("PutBan: %v", err)
 	}
 
 	// Make the UpdateFirewallGroup call fail (called during the flush after adding).
@@ -771,7 +771,7 @@ func TestReconcile_RestoresMissingZonePolicy(t *testing.T) {
 		ID: "tml-3", Name: "crowdsec-block-v4-3", Type: "IPV4_ADDRESSES",
 		Items: []controller.TrafficMatchingListItem{{Type: "IP_ADDRESS", Value: "1.2.3.4"}},
 	}})
-	if err := store.BanRecord("1.2.3.4", time.Time{}, false); err != nil {
+	if err := testutil.PutBan(store, "1.2.3.4", time.Time{}, false); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
@@ -800,7 +800,7 @@ func TestReconcile_RestoresPoliciesDespiteFlushFailure(t *testing.T) {
 		ID: "tml-3", Name: "crowdsec-block-v4-3", Type: "IPV4_ADDRESSES",
 		Items: []controller.TrafficMatchingListItem{{Type: "IP_ADDRESS", Value: "1.2.3.4"}},
 	}})
-	if err := store.BanRecord("1.2.3.4", time.Time{}, false); err != nil {
+	if err := testutil.PutBan(store, "1.2.3.4", time.Time{}, false); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
@@ -808,7 +808,7 @@ func TestReconcile_RestoresPoliciesDespiteFlushFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctrl.SetPolicies(testSite, nil)
-	if err := store.BanRecord("1.2.3.5", time.Time{}, false); err != nil {
+	if err := testutil.PutBan(store, "1.2.3.5", time.Time{}, false); err != nil {
 		t.Fatal(err)
 	}
 	ctrl.SetError("UpdateTrafficMatchingList", errTest("simulated flush failure"))
@@ -873,8 +873,8 @@ func TestDryRunNoWrites(t *testing.T) {
 	}
 
 	// Populate bbolt with a fake ban entry so reconcile has something to do
-	if err := store.BanRecord("203.0.113.42", time.Now().Add(1*time.Hour), false); err != nil {
-		t.Fatalf("BanRecord: %v", err)
+	if err := testutil.PutBan(store, "203.0.113.42", time.Now().Add(1*time.Hour), false); err != nil {
+		t.Fatalf("PutBan: %v", err)
 	}
 
 	// Reconcile should NOT panic (dry run gates all writes)

@@ -9,7 +9,7 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/testutil"
 )
 
-// TestMockStore_BanOperations covers BanRecord, BanExists, BanDelete, BanList.
+// TestMockStore_BanOperations covers BanPut, BanExists, BanDelete, BanList.
 func TestMockStore_BanOperations(t *testing.T) {
 	t.Run("exists returns false for unknown IP", func(t *testing.T) {
 		s := testutil.NewMockStore()
@@ -21,8 +21,8 @@ func TestMockStore_BanOperations(t *testing.T) {
 
 	t.Run("record then exists", func(t *testing.T) {
 		s := testutil.NewMockStore()
-		if err := s.BanRecord("1.2.3.4", time.Time{}, false); err != nil {
-			t.Fatalf("BanRecord: %v", err)
+		if err := testutil.PutBan(s, "1.2.3.4", time.Time{}, false); err != nil {
+			t.Fatalf("PutBan: %v", err)
 		}
 		ok, err := s.BanExists("1.2.3.4")
 		if err != nil || !ok {
@@ -32,7 +32,7 @@ func TestMockStore_BanOperations(t *testing.T) {
 
 	t.Run("delete removes ban", func(t *testing.T) {
 		s := testutil.NewMockStore()
-		_ = s.BanRecord("1.2.3.4", time.Time{}, false)
+		_ = testutil.PutBan(s, "1.2.3.4", time.Time{}, false)
 		if err := s.BanDelete("1.2.3.4"); err != nil {
 			t.Fatalf("BanDelete: %v", err)
 		}
@@ -51,8 +51,8 @@ func TestMockStore_BanOperations(t *testing.T) {
 
 	t.Run("list returns all recorded bans", func(t *testing.T) {
 		s := testutil.NewMockStore()
-		_ = s.BanRecord("1.2.3.4", time.Time{}, false)
-		_ = s.BanRecord("::1", time.Time{}, true)
+		_ = testutil.PutBan(s, "1.2.3.4", time.Time{}, false)
+		_ = testutil.PutBan(s, "::1", time.Time{}, true)
 		bans, err := s.BanList()
 		if err != nil {
 			t.Fatalf("BanList: %v", err)
@@ -67,7 +67,7 @@ func TestMockStore_BanOperations(t *testing.T) {
 
 	t.Run("list returns a copy not an alias", func(t *testing.T) {
 		s := testutil.NewMockStore()
-		_ = s.BanRecord("1.2.3.4", time.Time{}, false)
+		_ = testutil.PutBan(s, "1.2.3.4", time.Time{}, false)
 		bans, _ := s.BanList()
 		delete(bans, "1.2.3.4")
 		bans2, _ := s.BanList()
@@ -78,7 +78,7 @@ func TestMockStore_BanOperations(t *testing.T) {
 
 	t.Run("IPv6 flag is stored correctly", func(t *testing.T) {
 		s := testutil.NewMockStore()
-		_ = s.BanRecord("::1", time.Time{}, true)
+		_ = testutil.PutBan(s, "::1", time.Time{}, true)
 		bans, _ := s.BanList()
 		if !bans["::1"].IPv6 {
 			t.Fatal("expected IPv6=true")
@@ -244,8 +244,8 @@ func TestMockStore_ErrorInjection(t *testing.T) {
 			func(s *testutil.MockStore) error { _, err := s.BanExists("ip"); return err },
 		},
 		{
-			"BanRecord",
-			func(s *testutil.MockStore) error { return s.BanRecord("ip", time.Time{}, false) },
+			"BanPut",
+			func(s *testutil.MockStore) error { return testutil.PutBan(s, "ip", time.Time{}, false) },
 		},
 		{
 			"BanDelete",

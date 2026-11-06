@@ -98,7 +98,7 @@ func TestHalfOpenProbeRefusedRequestClosesBreaker(t *testing.T) {
 
 func TestReconcileProbeFailureReopensBreaker(t *testing.T) {
 	m, ctrl, store := newGatedManager(t, nil)
-	if err := store.BanRecord("198.51.100.1", time.Time{}, false); err != nil {
+	if err := testutil.PutBan(store, "198.51.100.1", time.Time{}, false); err != nil {
 		t.Fatal(err)
 	}
 	startHalfOpenProbe(m)
@@ -173,7 +173,7 @@ func TestReconcileDefersWritesWhileGated(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m, ctrl, store := newGatedManager(t, nil)
-			if err := store.BanRecord("198.51.100.1", time.Time{}, false); err != nil {
+			if err := testutil.PutBan(store, "198.51.100.1", time.Time{}, false); err != nil {
 				t.Fatal(err)
 			}
 			tt.gate(m)
@@ -194,7 +194,7 @@ func TestReconcileDefersWritesWhileGated(t *testing.T) {
 func TestReconcileStopsAfterRateLimit(t *testing.T) {
 	m, ctrl, store := newGatedManager(t, nil)
 	for _, ip := range []string{"198.51.100.1", "198.51.100.2"} {
-		if err := store.BanRecord(ip, time.Time{}, false); err != nil {
+		if err := testutil.PutBan(store, ip, time.Time{}, false); err != nil {
 			t.Fatal(err)
 		}
 	}

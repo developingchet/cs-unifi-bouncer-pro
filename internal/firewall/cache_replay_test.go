@@ -34,7 +34,7 @@ func TestEnsureShards_CachedMembersAreCheckedAgainstBanStore(t *testing.T) {
 			ctx := context.Background()
 			ctrl := testutil.NewMockController()
 			store := testutil.NewMockStore()
-			if err := store.BanRecord(live, time.Time{}, false); err != nil {
+			if err := testutil.PutBan(store, live, time.Time{}, false); err != nil {
 				t.Fatal(err)
 			}
 			record := storage.GroupRecord{Site: testSite, Index: 0, Members: []string{live, expired}}

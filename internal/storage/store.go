@@ -43,7 +43,6 @@ type PolicyRecord struct {
 type Store interface {
 	// Ban operations
 	BanExists(ip string) (bool, error)
-	BanRecord(ip string, expiresAt time.Time, ipv6 bool) error
 	BanGet(ip string) (*BanEntry, error)
 	BanPut(ip string, entry BanEntry) error
 	// BanPutMany writes every entry in one transaction.

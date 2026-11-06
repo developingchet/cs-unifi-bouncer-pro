@@ -2,7 +2,6 @@ package testutil
 
 import (
 	"sync"
-	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 )
@@ -70,21 +69,6 @@ func (m *MockStore) BanExists(ip string) (bool, error) {
 	return ok, nil
 }
 
-func (m *MockStore) BanRecord(ip string, expiresAt time.Time, ipv6 bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.check("BanRecord"); err != nil {
-		return err
-	}
-	m.bans[ip] = storage.BanEntry{
-		RecordedAt: time.Now().UTC(),
-		ExpiresAt:  expiresAt.UTC(),
-		IPv6:       ipv6,
-		Claims:     map[string]time.Time{"legacy": expiresAt.UTC()},
-	}
-	return nil
-}
-
 func (m *MockStore) BanGet(ip string) (*storage.BanEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -103,9 +87,6 @@ func (m *MockStore) BanPut(ip string, entry storage.BanEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.check("BanPut"); err != nil {
-		return err
-	}
-	if err := m.check("BanRecord"); err != nil {
 		return err
 	}
 	entry.Claims = copyMap(entry.Claims)

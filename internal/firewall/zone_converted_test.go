@@ -25,7 +25,7 @@ func migratedSite(t *testing.T, extra ...controller.ZonePolicy) (Manager, *testu
 		ID: "tml-0", Name: "crowdsec-block-v4-0", Type: "IPV4_ADDRESSES",
 		Items: []controller.TrafficMatchingListItem{{Type: "IP_ADDRESS", Value: "203.0.113.7"}},
 	}})
-	if err := store.BanRecord("203.0.113.7", time.Time{}, false); err != nil {
+	if err := testutil.PutBan(store, "203.0.113.7", time.Time{}, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetPolicy(cacheKey(testSite, "crowdsec-drop-v4-0"),

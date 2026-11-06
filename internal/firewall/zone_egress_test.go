@@ -43,7 +43,7 @@ func zoneSite(t *testing.T, pairs []config.ZonePair) (Manager, *testutil.MockCon
 		ID: "tml-0", Name: "crowdsec-block-v4-0", Type: "IPV4_ADDRESSES",
 		Items: []controller.TrafficMatchingListItem{{Type: "IP_ADDRESS", Value: "203.0.113.7"}},
 	}})
-	if err := store.BanRecord("203.0.113.7", time.Time{}, false); err != nil {
+	if err := testutil.PutBan(store, "203.0.113.7", time.Time{}, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := mgr.EnsureInfrastructure(context.Background(), []string{testSite}); err != nil {

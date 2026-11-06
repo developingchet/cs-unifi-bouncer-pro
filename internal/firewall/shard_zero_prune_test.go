@@ -34,7 +34,7 @@ func TestEmptiedShardZeroIsPrunedAndCreatedAgain(t *testing.T) {
 	}
 
 	const first, second = "198.51.100.1", "198.51.100.2"
-	if err := store.BanRecord(first, time.Time{}, false); err != nil {
+	if err := testutil.PutBan(store, first, time.Time{}, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := mgr.Reconcile(ctx, []string{testSite}); err != nil {
@@ -61,7 +61,7 @@ func TestEmptiedShardZeroIsPrunedAndCreatedAgain(t *testing.T) {
 	}
 
 	// The next ban creates shard 0 again, with its rule.
-	if err := store.BanRecord(second, time.Time{}, false); err != nil {
+	if err := testutil.PutBan(store, second, time.Time{}, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := mgr.ApplyBan(ctx, testSite, second, false); err != nil {

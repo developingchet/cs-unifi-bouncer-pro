@@ -33,7 +33,7 @@ func TestReconcile_RepairsOutOfBandEdits(t *testing.T) {
 				t.Fatalf("EnsureInfrastructure: %v", err)
 			}
 			for _, ip := range []string{"198.51.100.1", "198.51.100.2"} {
-				if err := store.BanRecord(ip, time.Time{}, false); err != nil {
+				if err := testutil.PutBan(store, ip, time.Time{}, false); err != nil {
 					t.Fatal(err)
 				}
 			}

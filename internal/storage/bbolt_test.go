@@ -20,7 +20,17 @@ func newTestStore(t *testing.T) Store {
 	return s
 }
 
-func TestBanRecordExistsDelete(t *testing.T) {
+// putBan stores a ban on ip held by one claim ending at expiresAt.
+func putBan(s Store, ip string, expiresAt time.Time, ipv6 bool) error {
+	return s.BanPut(ip, BanEntry{
+		RecordedAt: time.Now().UTC(),
+		ExpiresAt:  expiresAt.UTC(),
+		IPv6:       ipv6,
+		Claims:     map[string]time.Time{"test": expiresAt.UTC()},
+	})
+}
+
+func TestBanPutExistsDelete(t *testing.T) {
 	s := newTestStore(t)
 
 	const ip = "1.2.3.4"
@@ -33,8 +43,8 @@ func TestBanRecordExistsDelete(t *testing.T) {
 
 	// Record it
 	expires := time.Now().Add(24 * time.Hour)
-	if err := s.BanRecord(ip, expires, false); err != nil {
-		t.Fatalf("BanRecord: %v", err)
+	if err := putBan(s, ip, expires, false); err != nil {
+		t.Fatalf("putBan: %v", err)
 	}
 
 	// Now exists
@@ -73,8 +83,8 @@ func TestBanEntryExpiresAt(t *testing.T) {
 	s := newTestStore(t)
 	const ip = "5.6.7.8"
 	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
-	if err := s.BanRecord(ip, expires, false); err != nil {
-		t.Fatalf("BanRecord: %v", err)
+	if err := putBan(s, ip, expires, false); err != nil {
+		t.Fatalf("putBan: %v", err)
 	}
 	entry, err := s.BanGet(ip)
 	if err != nil || entry == nil {
@@ -109,7 +119,7 @@ func TestConcurrentBanAccess(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			ip := "192.0.2." + string(rune('0'+id))
-			_ = s.BanRecord(ip, time.Now().Add(time.Hour), false)
+			_ = putBan(s, ip, time.Now().Add(time.Hour), false)
 			_, _ = s.BanExists(ip)
 			_ = s.BanDelete(ip)
 		}(i)

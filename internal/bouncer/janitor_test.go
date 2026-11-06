@@ -9,6 +9,7 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/testutil"
 	"github.com/rs/zerolog"
 )
 
@@ -49,11 +50,11 @@ func TestJanitor_PrunesExpiredBans(t *testing.T) {
 
 	// Record a ban with past expiry
 	past := time.Now().Add(-time.Hour)
-	if err := store.BanRecord("1.2.3.4", past, false); err != nil {
+	if err := testutil.PutBan(store, "1.2.3.4", past, false); err != nil {
 		t.Fatal(err)
 	}
 	// Also record a fresh ban
-	if err := store.BanRecord("5.6.7.8", time.Now().Add(time.Hour), false); err != nil {
+	if err := testutil.PutBan(store, "5.6.7.8", time.Now().Add(time.Hour), false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -76,7 +77,7 @@ func TestJanitor_KeepsFreshBans(t *testing.T) {
 	store := newJanitorTestStore(t)
 
 	// Record a fresh ban
-	if err := store.BanRecord("9.9.9.9", time.Now().Add(24*time.Hour), false); err != nil {
+	if err := testutil.PutBan(store, "9.9.9.9", time.Now().Add(24*time.Hour), false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -117,11 +118,11 @@ func TestJanitor_SkipsPruneOnUnbanFailure(t *testing.T) {
 	past := time.Now().Add(-time.Hour)
 
 	// IP that will fail to unban
-	if err := store.BanRecord("1.1.1.1", past, false); err != nil {
+	if err := testutil.PutBan(store, "1.1.1.1", past, false); err != nil {
 		t.Fatal(err)
 	}
 	// IP that will succeed
-	if err := store.BanRecord("2.2.2.2", past, false); err != nil {
+	if err := testutil.PutBan(store, "2.2.2.2", past, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -144,7 +145,7 @@ func TestJanitor_SkipsPruneOnUnbanFailure(t *testing.T) {
 func TestJanitor_AllSitesFailKeepsIP(t *testing.T) {
 	store := newJanitorTestStore(t)
 	past := time.Now().Add(-time.Hour)
-	if err := store.BanRecord("3.3.3.3", past, false); err != nil {
+	if err := testutil.PutBan(store, "3.3.3.3", past, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -161,7 +162,7 @@ func TestJanitor_AllSitesFailKeepsIP(t *testing.T) {
 func TestJanitor_PartialSiteFailKeepsIP(t *testing.T) {
 	store := newJanitorTestStore(t)
 	past := time.Now().Add(-time.Hour)
-	if err := store.BanRecord("4.4.4.4", past, false); err != nil {
+	if err := testutil.PutBan(store, "4.4.4.4", past, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -181,7 +182,7 @@ func TestJanitor_TickImmediatelyOnStart(t *testing.T) {
 	store := newJanitorTestStore(t)
 
 	// Record an expired ban
-	if err := store.BanRecord("3.3.3.3", time.Now().Add(-time.Hour), false); err != nil {
+	if err := testutil.PutBan(store, "3.3.3.3", time.Now().Add(-time.Hour), false); err != nil {
 		t.Fatal(err)
 	}
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/testutil"
 )
 
@@ -90,7 +91,8 @@ func TestFeedRenewalAndExpiry(t *testing.T) {
 
 func TestLegacyClaimAndFailedUnban(t *testing.T) {
 	store := testutil.NewMockStore()
-	if err := store.BanRecord("203.0.113.30", time.Now().Add(time.Hour), false); err != nil {
+	// 1.x stored bans without claims.
+	if err := store.BanPut("203.0.113.30", storage.BanEntry{ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	fw := &recordingFirewall{}

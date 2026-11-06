@@ -97,16 +97,6 @@ func (s *bboltStore) BanExists(ip string) (bool, error) {
 	return exists, err
 }
 
-func (s *bboltStore) BanRecord(ip string, expiresAt time.Time, ipv6 bool) error {
-	entry := BanEntry{
-		RecordedAt: time.Now().UTC(),
-		ExpiresAt:  expiresAt.UTC(),
-		IPv6:       ipv6,
-		Claims:     map[string]time.Time{"legacy": expiresAt.UTC()},
-	}
-	return s.BanPut(ip, entry)
-}
-
 func (s *bboltStore) BanGet(ip string) (*BanEntry, error) {
 	var entry *BanEntry
 	err := s.db.View(func(tx *bolt.Tx) error {
