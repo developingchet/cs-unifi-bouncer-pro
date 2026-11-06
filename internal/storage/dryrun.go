@@ -78,7 +78,8 @@ func (s *dryRunStore) ListPolicies() (map[string]PolicyRecord, error) {
 func (s *dryRunStore) SetPolicy(string, PolicyRecord) error { return nil }
 func (s *dryRunStore) DeletePolicy(string) error            { return nil }
 
-func (s *dryRunStore) RecordEvent(EventEntry) error { return nil }
+func (s *dryRunStore) RecordEvent(EventEntry) error    { return nil }
+func (s *dryRunStore) RecordEvents([]EventEntry) error { return nil }
 func (s *dryRunStore) ListEvents(limit int) ([]EventEntry, error) {
 	if s.base == nil {
 		return nil, nil

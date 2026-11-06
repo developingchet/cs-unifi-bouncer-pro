@@ -9,7 +9,9 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/lapihttp"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/testutil"
+	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/rs/zerolog"
 )
 
@@ -107,24 +109,38 @@ func TestBouncer_InFlightGauge_IncDec(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	// Call the handler directly; metrics.DecisionsInFlight should net to zero.
-	_ = b.handler(ctx, SyncJob{
-		Action:    "ban",
-		Source:    "crowdsec:id:1",
-		IP:        "10.0.0.99",
-		ExpiresAt: time.Now().Add(time.Hour),
+	before := promtest.ToFloat64(metrics.DecisionsInFlight)
+	var during float64
+	inner := b.handler
+	b.handler = func(ctx context.Context, jobs []SyncJob) []error {
+		during = promtest.ToFloat64(metrics.DecisionsInFlight)
+		return inner(ctx, jobs)
+	}
+	b.runJobs(ctx, []SyncJob{
+		{Action: "ban", Source: "crowdsec:id:1", IP: "10.0.0.99", ExpiresAt: time.Now().Add(time.Hour)},
+		{Action: "ban", Source: "crowdsec:id:2", IP: "10.0.0.98", ExpiresAt: time.Now().Add(time.Hour)},
 	})
-	// No panic, no race — the test is satisfied if it completes cleanly.
+	if during != before+2 {
+		t.Errorf("decisions_in_flight during the batch = %v, want %v", during, before+2)
+	}
+	if after := promtest.ToFloat64(metrics.DecisionsInFlight); after != before {
+		t.Errorf("decisions_in_flight after the batch = %v, want %v", after, before)
+	}
+}
+
+// collectJobs returns a JobHandler that appends every job it is given to jobs.
+func collectJobs(jobs *[]SyncJob) JobHandler {
+	return func(_ context.Context, batch []SyncJob) []error {
+		*jobs = append(*jobs, batch...)
+		return make([]error, len(batch))
+	}
 }
 
 func TestBouncer_SkipsDecisionsWithoutIdentity(t *testing.T) {
 	cfg := &config.Config{UnifiSites: []string{"default"}, BanTTL: time.Hour}
 	b := newTestBouncer(t, cfg)
 	var jobs []SyncJob
-	b.handler = func(_ context.Context, job SyncJob) error {
-		jobs = append(jobs, job)
-		return nil
-	}
+	b.handler = collectJobs(&jobs)
 	action, scope, ip := "ban", "ip", "8.8.8.8"
 	d := &models.Decision{Type: &action, Scope: &scope, Value: &ip}
 	b.handleDecisionBlock(context.Background(), &models.DecisionsStreamResponse{New: []*models.Decision{d}, Deleted: []*models.Decision{d}}, "stream")
@@ -139,10 +155,7 @@ func TestBouncer_DeletionOfWhitelistedBanReachesHandler(t *testing.T) {
 	cfg := &config.Config{UnifiSites: []string{"default"}, BanTTL: time.Hour, BlockWhitelist: []string{"203.0.113.0/24"}}
 	b := newTestBouncer(t, cfg)
 	var jobs []SyncJob
-	b.handler = func(_ context.Context, job SyncJob) error {
-		jobs = append(jobs, job)
-		return nil
-	}
+	b.handler = collectJobs(&jobs)
 	action, scope, ip, origin := "ban", "ip", "203.0.113.7", "cscli"
 	id := int64(42)
 	d := &models.Decision{ID: id, Type: &action, Scope: &scope, Value: &ip, Origin: &origin}
@@ -156,10 +169,7 @@ func TestBouncer_NewDecisionOfDeleteTypeIsNotBanned(t *testing.T) {
 	cfg := &config.Config{UnifiSites: []string{"default"}, BanTTL: time.Hour, BlockWhitelist: []string{"203.0.113.0/24"}}
 	b := newTestBouncer(t, cfg)
 	var jobs []SyncJob
-	b.handler = func(_ context.Context, job SyncJob) error {
-		jobs = append(jobs, job)
-		return nil
-	}
+	b.handler = collectJobs(&jobs)
 	action, scope, origin := "delete", "ip", "cscli"
 	for i, ip := range []string{"198.51.100.9", "203.0.113.7", "10.0.0.5"} {
 		value := ip

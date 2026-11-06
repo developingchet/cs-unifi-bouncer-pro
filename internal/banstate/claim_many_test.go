@@ -76,6 +76,73 @@ func TestClaimMany(t *testing.T) {
 	}
 }
 
+// ClaimBatch reports each claim's own outcome: claims on one address build
+// on each other, a claim without a source fails alone, and the whole batch
+// costs two writes.
+func TestClaimBatch(t *testing.T) {
+	store := testutil.NewMockStore()
+	fw := &recordingFirewall{}
+	m := New(store, fw, []string{"default"}, false)
+	ctx := context.Background()
+	expiry := time.Now().Add(time.Hour)
+	if _, err := m.Claim(ctx, "203.0.113.9", false, "crowdsec:id:9", expiry); err != nil {
+		t.Fatal(err)
+	}
+	store.ResetCalls()
+	fw.bans = 0
+
+	results, err := m.ClaimBatch(ctx, []Claim{
+		{IP: "203.0.113.1", Source: "crowdsec:id:1", Expiry: expiry},
+		{IP: "203.0.113.1", Source: "crowdsec:id:2", Expiry: expiry},
+		{IP: "203.0.113.2", Source: "", Expiry: expiry},
+		{IP: "203.0.113.9", Source: "crowdsec:id:3", Expiry: expiry},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 4 {
+		t.Fatalf("results = %+v, want 4", results)
+	}
+	wantAdded := []bool{true, false, false, false}
+	for i, r := range results {
+		if r.Added != wantAdded[i] {
+			t.Errorf("results[%d].Added = %v, want %v", i, r.Added, wantAdded[i])
+		}
+		if (r.Err != nil) != (i == 2) {
+			t.Errorf("results[%d].Err = %v", i, r.Err)
+		}
+	}
+	entry, err := store.BanGet("203.0.113.1")
+	if err != nil || entry == nil || len(entry.Claims) != 2 || entry.Pending {
+		t.Fatalf("203.0.113.1 = %+v, %v; want two claims, confirmed", entry, err)
+	}
+	if exists, _ := store.BanExists("203.0.113.2"); exists {
+		t.Error("claim without a source was recorded")
+	}
+	if fw.bans != 1 {
+		t.Errorf("firewall bans = %d, want 1", fw.bans)
+	}
+	if got := store.Calls("BanPutMany"); got != 2 {
+		t.Errorf("BanPutMany calls = %d, want 2", got)
+	}
+}
+
+// A failed record write ends the batch before any firewall change and
+// leaves no result for the claims it covered.
+func TestClaimBatchStoreFailure(t *testing.T) {
+	store := testutil.NewMockStore()
+	fw := &recordingFirewall{}
+	m := New(store, fw, []string{"default"}, false)
+	store.SetError("BanPutMany", errors.New("disk full"))
+	results, err := m.ClaimBatch(context.Background(), []Claim{{IP: "203.0.113.1", Source: "crowdsec:id:1"}})
+	if err == nil || len(results) != 0 {
+		t.Fatalf("results = %+v, err = %v; want no results and an error", results, err)
+	}
+	if fw.bans != 0 {
+		t.Errorf("firewall bans = %d, want 0", fw.bans)
+	}
+}
+
 func TestClaimManyStopsOnCancel(t *testing.T) {
 	store := testutil.NewMockStore()
 	m := New(store, &recordingFirewall{}, []string{"default"}, false)

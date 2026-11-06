@@ -18,6 +18,9 @@ type MockStore struct {
 	// Error injection: method -> next error (consumed on first call)
 	errors map[string]error
 
+	// calls counts the calls of each method.
+	calls map[string]int
+
 	// SizeBytes value returned by SizeBytes()
 	Size int64
 }
@@ -29,6 +32,7 @@ func NewMockStore() *MockStore {
 		groups:   make(map[string]storage.GroupRecord),
 		policies: make(map[string]storage.PolicyRecord),
 		errors:   make(map[string]error),
+		calls:    make(map[string]int),
 		Size:     1024,
 	}
 }
@@ -40,9 +44,24 @@ func (m *MockStore) SetError(method string, err error) {
 	m.errors[method] = err
 }
 
-// check returns and clears any pending injected error for the named method.
-// Must be called with m.mu held.
+// Calls returns how many times the named method has been called.
+func (m *MockStore) Calls(method string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls[method]
+}
+
+// ResetCalls sets every call count back to zero.
+func (m *MockStore) ResetCalls() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clear(m.calls)
+}
+
+// check counts a call of the named method and returns and clears any pending
+// injected error for it. Must be called with m.mu held.
 func (m *MockStore) check(method string) error {
+	m.calls[method]++
 	err := m.errors[method]
 	delete(m.errors, method)
 	return err
@@ -225,6 +244,16 @@ func (m *MockStore) RecordEvent(e storage.EventEntry) error {
 		return err
 	}
 	m.events = append(m.events, e)
+	return nil
+}
+
+func (m *MockStore) RecordEvents(events []storage.EventEntry) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.check("RecordEvents"); err != nil {
+		return err
+	}
+	m.events = append(m.events, events...)
 	return nil
 }
 

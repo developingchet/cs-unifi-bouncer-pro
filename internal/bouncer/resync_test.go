@@ -40,10 +40,7 @@ func newResyncBouncer(t *testing.T, body string, status int) (*Bouncer, *[]SyncJ
 	}
 	b := newTestBouncer(t, cfg)
 	var jobs []SyncJob
-	b.handler = func(_ context.Context, job SyncJob) error {
-		jobs = append(jobs, job)
-		return nil
-	}
+	b.handler = collectJobs(&jobs)
 	return b, &jobs, &requests
 }
 
@@ -199,10 +196,7 @@ func TestResync_SkipsDecisionsDeletedDuringTheResync(t *testing.T) {
 		CrowdSecLAPIKey: "test-key",
 	})
 	var jobs []SyncJob
-	b.handler = func(_ context.Context, job SyncJob) error {
-		jobs = append(jobs, job)
-		return nil
-	}
+	b.handler = collectJobs(&jobs)
 
 	if err := b.resync(context.Background()); err != nil {
 		t.Fatalf("resync: %v", err)

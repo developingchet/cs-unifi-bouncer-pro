@@ -14,7 +14,7 @@ import (
 func TestConsumeStream_OnStartupSyncedFiresOnceAfterFirstBatch(t *testing.T) {
 	b := newTestBouncer(t, &config.Config{UnifiSites: []string{"default"}, BanTTL: time.Hour})
 	var jobs int
-	b.handler = func(context.Context, SyncJob) error { jobs++; return nil }
+	b.handler = func(_ context.Context, batch []SyncJob) []error { jobs += len(batch); return make([]error, len(batch)) }
 	synced := 0
 	jobsAtSync := -1
 	b.OnStartupSynced(func() {

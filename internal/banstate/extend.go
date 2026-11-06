@@ -15,7 +15,7 @@ import (
 // whole list lapse during an outage.
 func (m *Manager) ExtendSource(source string, expiry time.Time) (int, error) {
 	if source == "" {
-		return 0, fmt.Errorf("ban source is required")
+		return 0, errSourceRequired
 	}
 	if m.dryRun {
 		return 0, nil
@@ -55,7 +55,7 @@ func (m *Manager) ExtendSource(source string, expiry time.Time) (int, error) {
 // to compare a fresh fetch with what the previous one left behind.
 func (m *Manager) CountSource(source string) (int, error) {
 	if source == "" {
-		return 0, fmt.Errorf("ban source is required")
+		return 0, errSourceRequired
 	}
 	m.mu.Lock()
 	bans, err := m.store.BanList()
@@ -81,7 +81,7 @@ func (m *Manager) CountSource(source string) (int, error) {
 // unbanned.
 func (m *Manager) ReleaseSourceExcept(ctx context.Context, source string, keep map[string]struct{}) (int, error) {
 	if source == "" {
-		return 0, fmt.Errorf("ban source is required")
+		return 0, errSourceRequired
 	}
 	if m.dryRun {
 		return 0, nil

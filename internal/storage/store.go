@@ -64,6 +64,8 @@ type Store interface {
 
 	// Event history (audit trail)
 	RecordEvent(e EventEntry) error
+	// RecordEvents appends events in order in one transaction.
+	RecordEvents(events []EventEntry) error
 	ListEvents(limit int) ([]EventEntry, error)
 	ListEventsForIP(ip string, limit int) ([]EventEntry, error)
 

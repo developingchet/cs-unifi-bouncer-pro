@@ -222,7 +222,13 @@ func streamError(err error) error {
 	return fmt.Errorf("CrowdSec stream closed: %w", err)
 }
 
-// handleDecisionBlock applies one batch of decisions. source labels the
+// decisionBatchSize is the most decisions handed to the job handler at once.
+// It matches the ban manager's claim chunk, so each batch of bans costs two
+// ban-database transactions and one history write.
+const decisionBatchSize = 500
+
+// handleDecisionBlock applies one batch of decisions, new ones before
+// deleted ones, in batches of up to decisionBatchSize. source labels the
 // decisions_processed metric: "stream" for the LAPI stream, "resync" for the
 // periodic full pull.
 func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.DecisionsStreamResponse, source string) {
@@ -230,51 +236,94 @@ func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.Dec
 		b.log.Warn().Msg("ignoring empty CrowdSec decision block")
 		return
 	}
-	for _, d := range decisions.New {
-		if !b.applyDecision(ctx, d, "ban", source) {
-			return
-		}
-	}
-	for _, d := range decisions.Deleted {
-		if !b.applyDecision(ctx, d, "delete", source) {
-			return
+	batch := make([]SyncJob, 0, min(len(decisions.New)+len(decisions.Deleted), decisionBatchSize))
+	defer func() {
+		// Decisions taken before a cancellation are still applied, as they
+		// were accepted from the stream; the work is in memory and the ban
+		// database only.
+		b.runJobs(context.WithoutCancel(ctx), batch)
+	}()
+	for _, list := range []struct {
+		action    string
+		decisions []*models.Decision
+	}{{"ban", decisions.New}, {"delete", decisions.Deleted}} {
+		for _, d := range list.decisions {
+			job, ok := b.decisionJob(d, list.action, source)
+			if !ok {
+				continue
+			}
+			if !b.admit(ctx, &batch) {
+				return
+			}
+			if job.Action == "ban" {
+				job.ReceivedAt = time.Now()
+			}
+			batch = append(batch, job)
+			if len(batch) == decisionBatchSize {
+				b.runJobs(ctx, batch)
+				batch = batch[:0]
+			}
 		}
 	}
 }
 
-// applyDecision filters d and hands it to the job handler. It returns false
-// only when ctx was cancelled while waiting on the rate limiter.
-func (b *Bouncer) applyDecision(ctx context.Context, d *models.Decision, action, source string) bool {
+// admit waits for the rate limiter, when one is configured. When it is out
+// of tokens, the batch collected so far is applied before waiting, so a
+// limited stream still applies each decision as it is admitted. It returns
+// false when ctx ends while waiting.
+func (b *Bouncer) admit(ctx context.Context, batch *[]SyncJob) bool {
+	if b.limiter == nil {
+		return true
+	}
+	if len(*batch) > 0 && b.limiter.Tokens() < 1 {
+		b.runJobs(ctx, *batch)
+		*batch = (*batch)[:0]
+	}
+	return b.limiter.Wait(ctx) == nil
+}
+
+// runJobs hands jobs to the job handler and logs the ones that failed.
+func (b *Bouncer) runJobs(ctx context.Context, jobs []SyncJob) {
+	if len(jobs) == 0 {
+		return
+	}
+	metrics.DecisionsInFlight.Add(float64(len(jobs)))
+	errs := b.handler(ctx, jobs)
+	metrics.DecisionsInFlight.Sub(float64(len(jobs)))
+	for i, err := range errs {
+		if err != nil {
+			b.log.Error().Err(err).Str("ip", jobs[i].IP).Str("action", jobs[i].Action).Msg("failed to apply decision")
+		}
+	}
+}
+
+// decisionJob filters d and builds its job. It reports false for a decision
+// that is filtered out or must be skipped.
+func (b *Bouncer) decisionJob(d *models.Decision, action, source string) (SyncJob, bool) {
 	filter := decision.Filter
 	if action == "delete" {
 		filter = decision.FilterDeleted
 	}
 	result := filter(d, b.filterCfg, b.log)
 	if !result.Passed {
-		return true
+		return SyncJob{}, false
 	}
 	decisionID := decisionSource(d)
 	if decisionID == "" {
 		b.log.Warn().Str("ip", result.Value).Str("action", action).Msg("skipping CrowdSec decision without ID or UUID")
-		return true
+		return SyncJob{}, false
 	}
 	if action == "delete" {
 		b.resyncDeleted.noteDeleted(decisionID)
 	} else if source == "resync" && b.resyncDeleted.wasDeleted(decisionID) {
 		b.log.Debug().Str("ip", result.Value).Msg("skipping resync decision deleted since the resync started")
-		return true
+		return SyncJob{}, false
 	}
 	metricAction := "ban"
 	if action == "delete" {
 		metricAction = "unban"
 	}
 	metrics.DecisionsProcessed.WithLabelValues(metricAction, source).Inc()
-
-	if b.limiter != nil {
-		if err := b.limiter.Wait(ctx); err != nil {
-			return false
-		}
-	}
 
 	job := SyncJob{
 		Action:   action,
@@ -288,16 +337,8 @@ func (b *Bouncer) applyDecision(ctx context.Context, d *models.Decision, action,
 		job.DurationOverride = result.DurationOverride
 		job.Origin = deref(d.Origin)
 		job.RemediationType = deref(d.Type)
-		job.ReceivedAt = time.Now()
 	}
-
-	metrics.DecisionsInFlight.Inc()
-	err := b.handler(ctx, job)
-	metrics.DecisionsInFlight.Dec()
-	if err != nil {
-		b.log.Error().Err(err).Str("ip", result.Value).Str("action", action).Msg("failed to apply decision")
-	}
-	return true
+	return job, true
 }
 
 func deref(s *string) string {

@@ -164,7 +164,9 @@ Ban and unban decisions are processed synchronously, one CrowdSec decision batch
 
 Re-delivered decisions update the same claim after a reconnect, while distinct decisions and feeds independently keep the ban alive. After all decisions in a batch are handled, `SyncDirty` writes the dirty shards to the controller (see [Shards and Syncing](#shards-and-syncing)).
 
-`DECISION_RATE_LIMIT` puts a token bucket in front of the job handler, so a large ban wave is applied at a bounded rate instead of all at once.
+The bans of a batch are claimed 500 at a time: one bbolt transaction records their claims, the new ones marked pending, and a second clears the pending flag of those added to their shards. Their history events are written together in a third, so a burst of decisions costs three disk syncs per 500 instead of three per decision. Deletions follow the bans of the batch one at a time, in the order the LAPI sent them.
+
+`DECISION_RATE_LIMIT` puts a token bucket in front of the job handler, so a large ban wave is applied at a bounded rate instead of all at once. Decisions admitted within the burst are claimed together; once the bucket is empty, each decision is applied as soon as it is admitted.
 
 ---
 
@@ -398,9 +400,10 @@ Claim expiries are set when a decision is received: a decision with no duration,
 
 ### Ban history
 
-Every successful ban, unban, and janitor expiry is appended to the `events` bucket as an `EventEntry`. The `Store` interface exposes three methods for it:
+Every successful ban, unban, and janitor expiry is appended to the `events` bucket as an `EventEntry`. The `Store` interface exposes four methods for it:
 
 - `RecordEvent(e EventEntry) error` — append an event (ring-buffer eviction on overflow)
+- `RecordEvents(events []EventEntry) error` — append several events in order in one transaction
 - `ListEvents(limit int) ([]EventEntry, error)` — newest-first, bounded by `limit`
 - `ListEventsForIP(ip string, limit int) ([]EventEntry, error)` — newest-first, filtered by IP
 

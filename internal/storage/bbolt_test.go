@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"fmt"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -317,6 +319,41 @@ func TestBbolt_EventRingBuffer(t *testing.T) {
 	}
 	if len(got) != 5 {
 		t.Errorf("ring buffer: expected 5 events, got %d", len(got))
+	}
+}
+
+// A batch keeps its order and the ring-buffer cap, also when the batch alone
+// is larger than the cap.
+func TestBbolt_RecordEvents(t *testing.T) {
+	s, err := NewBboltStore(t.TempDir(), zerolog.Nop(), 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.RecordEvent(EventEntry{Action: "ban", IP: "192.0.2.1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordEvents(nil); err != nil {
+		t.Fatalf("RecordEvents(nil): %v", err)
+	}
+	batch := make([]EventEntry, 7)
+	for i := range batch {
+		batch[i] = EventEntry{Action: "ban", IP: fmt.Sprintf("198.51.100.%d", i)}
+	}
+	if err := s.RecordEvents(batch); err != nil {
+		t.Fatalf("RecordEvents: %v", err)
+	}
+	got, err := s.ListEvents(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ips []string
+	for _, e := range got {
+		ips = append(ips, e.IP)
+	}
+	want := []string{"198.51.100.6", "198.51.100.5", "198.51.100.4", "198.51.100.3", "198.51.100.2"}
+	if !slices.Equal(ips, want) {
+		t.Fatalf("events newest first = %v, want %v", ips, want)
 	}
 }
 

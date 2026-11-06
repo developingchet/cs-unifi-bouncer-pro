@@ -86,8 +86,13 @@ func (m *mockFirewallManager) CheckModeChange(_ context.Context) error {
 	return nil
 }
 
-func newTestHandler(store storage.Store, fwMgr firewall.Manager, cfg *config.Config) JobHandler {
-	return makeJobHandler(store, banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun), cfg, nopRecorder{}, zerolog.Nop())
+// newTestHandler returns a function that runs one job through the daemon's
+// job handler.
+func newTestHandler(store storage.Store, fwMgr firewall.Manager, cfg *config.Config) func(context.Context, SyncJob) error {
+	handler := makeJobHandler(store, banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun), cfg, nopRecorder{}, zerolog.Nop())
+	return func(ctx context.Context, job SyncJob) error {
+		return handler(ctx, []SyncJob{job})[0]
+	}
 }
 
 // testCfg returns a minimal config suitable for handler tests.
@@ -205,7 +210,7 @@ func TestJobHandler_StorageError_Fatal(t *testing.T) {
 
 	// A failed ban write must abort the job, so the firewall is never changed
 	// without a ban record.
-	store.SetError("BanPut", errors.New("storage failure"))
+	store.SetError("BanPutMany", errors.New("storage failure"))
 
 	handler := newTestHandler(store, fwMgr, cfg)
 	job := SyncJob{
@@ -216,6 +221,9 @@ func TestJobHandler_StorageError_Fatal(t *testing.T) {
 	}
 	if err := handler(context.Background(), job); err == nil {
 		t.Error("expected error from bbolt write failure, got nil")
+	}
+	if fwMgr.applyBanCalls != 0 {
+		t.Errorf("ApplyBan called %d times after the ban write failed", fwMgr.applyBanCalls)
 	}
 }
 
