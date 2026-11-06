@@ -209,7 +209,7 @@ These settings apply only when `FIREWALL_MODE=zone` or when `auto` detects a zon
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ZONE_PAIRS` | `External->Dmz` | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. Use commas between simple pairs; use semicolons between pairs when ports or destination IPs contain commas. Ambiguous strings fail validation. A block policy is created for each pair, shard and address family, with the shard list as its source filter. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. Standard UUIDs and MongoDB ObjectIDs are also accepted. Optional port lists and `@ip1,ip2,...` scope each policy. An empty value is rejected when `FIREWALL_MODE=zone`, and a SIGHUP reload with an empty value is ignored, because an empty set would delete every block policy. `ZONE_PAIRS_FILE` variant supported; pairs read from a file can change on SIGHUP. |
+| `ZONE_PAIRS` | `External->Dmz` | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. Use commas between simple pairs; use semicolons between pairs when ports or destination IPs contain commas. Ambiguous strings fail validation. A block policy is created for each pair, shard and address family, with the shard list as its source filter. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. Standard UUIDs and MongoDB ObjectIDs are also accepted. Optional port lists and `@ip1,ip2,...` scope each policy. An empty value is rejected when `FIREWALL_MODE=zone`, and a SIGHUP reload with an empty value is ignored, because an empty set would delete every block policy. A `site/` prefix limits a pair to one site (see [Pairs for one site](#pairs-for-one-site)). `ZONE_PAIRS_FILE` variant supported; pairs read from a file can change on SIGHUP. |
 
 ```bash
 # Named zones (auto-resolved at startup) — no port filter (any port)
@@ -238,6 +238,38 @@ ZONE_PAIRS=aaaaaaaa-0000-4000-8000-aaaaaaaaaaaa->bbbbbbbb-0000-4000-8000-bbbbbbb
 ```
 
 Zone names are case-sensitive and must match the names shown in Settings → Firewall → Zones. If a zone name cannot be found at startup the bouncer exits with an error listing the available zones. A configured zone with an explicitly empty network list also stops startup or reload; External and Gateway do not require network membership.
+
+### Pairs for one site
+
+Without a prefix, every pair applies to every site in `UNIFI_SITES`. When sites name their zones differently, prefix a pair with the site's short name (as in `UNIFI_SITES`) and a slash:
+
+```
+[site/]src[:sport,...]->dst[:dport,...][@dstIP,...]
+```
+
+A site with at least one prefixed pair in a setting uses only its own pairs from that setting; every other site uses the pairs without a prefix. `ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS` are resolved separately, so a site may have its own `ZONE_PAIRS` pairs and still use the shared `EGRESS_ZONE_PAIRS`.
+
+```bash
+UNIFI_SITES=default,branch
+
+# default uses External->Dmz; branch uses its own two pairs
+ZONE_PAIRS=External->Dmz;branch/Wan->Lan;branch/Wan->Iot:22,23
+
+# both sites block egress from their DMZ, under each site's zone names
+EGRESS_ZONE_PAIRS=default/Dmz->External;branch/Servers->Wan
+```
+
+The same pairs in a `ZONE_PAIRS_FILE`:
+
+```
+# head office: the unprefixed pairs
+External->Dmz
+# branch office
+branch/Wan->Lan
+branch/Wan->Iot:22,23
+```
+
+A prefix that names a site not in `UNIFI_SITES` fails validation, as does, with `FIREWALL_MODE=zone`, a site left without a `ZONE_PAIRS` pair. With `UNIFI_SITES_AUTO=true` the sites are known only after discovery, so an unknown prefix logs a warning at startup and its pairs apply to no site. At startup, and after each SIGHUP reload, the bouncer logs the pairs each site uses (`zone pairs for site`), and `validate` prints one `zone_pairs[site]` row per site when a setting has prefixes. A SIGHUP that changes one site's pairs adds and removes only that site's policies; each site's orphan sweep looks only at its own policies. Duplicate `EGRESS_ZONE_PAIRS` pairs are checked per site.
 
 ### Port filtering for zone pairs
 
@@ -294,7 +326,7 @@ Both kinds of pair reference the same shard lists; only the side of the policy t
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EGRESS_ZONE_PAIRS` | — | Zone pairs in `src[:sport,...]->dst[:dport,...]` format, for example `Dmz->External;IoT->External`. A block policy is created for each pair, shard and address family, with the shard list as its destination filter. Port lists work as in `ZONE_PAIRS`. A destination IP list (`@...`) is rejected, because the ban list is the destination filter. Requires the zone-based firewall and `UNIFI_API_KEY`; validation rejects it with `FIREWALL_MODE=legacy`, and with `FIREWALL_MODE=auto` a site that resolves to legacy mode logs a warning that it has no effect there. Each pair may appear only once. `EGRESS_ZONE_PAIRS_FILE` variant supported. Reloaded on SIGHUP together with `ZONE_PAIRS`. |
+| `EGRESS_ZONE_PAIRS` | — | Zone pairs in `src[:sport,...]->dst[:dport,...]` format, for example `Dmz->External;IoT->External`. A block policy is created for each pair, shard and address family, with the shard list as its destination filter. Port lists work as in `ZONE_PAIRS`. A destination IP list (`@...`) is rejected, because the ban list is the destination filter. Requires the zone-based firewall and `UNIFI_API_KEY`; validation rejects it with `FIREWALL_MODE=legacy`, and with `FIREWALL_MODE=auto` a site that resolves to legacy mode logs a warning that it has no effect there. Each pair may appear only once for a site. A `site/` prefix limits a pair to one site (see [Pairs for one site](#pairs-for-one-site)). `EGRESS_ZONE_PAIRS_FILE` variant supported. Reloaded on SIGHUP together with `ZONE_PAIRS`. |
 | `EGRESS_CONNECTION_STATES` | `NEW` | Connection states matched by egress block policies. Same values as `FIREWALL_CONNECTION_STATES`. The default matches only new connections, so replies to inbound connections that `ZONE_PAIRS` allows are never cut. |
 
 ```bash
@@ -321,7 +353,7 @@ When enabled, the bouncer periodically fetches current Cloudflare IP ranges and 
 | `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | No | How often to re-fetch Cloudflare IP ranges and update the IP TMLs (default: weekly). |
 | `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | No | `https://` URL to fetch the current Cloudflare IPv4 CIDR list. |
 | `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | No | `https://` URL to fetch the current Cloudflare IPv6 CIDR list. |
-| `CLOUDFLARE_ZONE_PAIRS` | — | If enabled | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]` format. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. Use semicolons between pairs when a pair contains comma-separated ports or IPs. Zones are resolved separately for each site. Filter creation failure prevents a broader ALLOW policy from being created. |
+| `CLOUDFLARE_ZONE_PAIRS` | — | If enabled | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]` format. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. Use semicolons between pairs when a pair contains comma-separated ports or IPs. Zones are resolved separately for each site. A `site/` prefix limits a pair to one site (see [Pairs for one site](#pairs-for-one-site)); a site left without a pair has its whitelist policies and lists removed. Filter creation failure prevents a broader ALLOW policy from being created. |
 
 A fetched list is applied only if every entry passes validation: IPv4 ranges no broader than a /12, IPv6 ranges no broader than a /29, no private, loopback, link-local, multicast or other non-public ranges, and at most 1000 entries per list. A list that fails validation, or an empty one, is rejected with an error and the ranges from the last successful sync stay in place.
 

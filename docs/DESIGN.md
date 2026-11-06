@@ -291,9 +291,13 @@ An inbound pair stops banned addresses from opening connections into the destina
 
 Order works against egress: an ALLOW for the same zones evaluated earlier lets its traffic through, and recreating the block only moves it further back. After `EnsurePolicies`, such ALLOW policies are logged as a warning, once per change, and the `crowdsec_unifi_zone_block_policies` gauge records the inbound and egress policy counts per site. On a site loaded in legacy mode (`FIREWALL_MODE=auto` without zones), egress pairs have no effect and a warning says so.
 
+### Pairs per site
+
+The zone manager keeps the pairs of every site in one list; a pair from a `site/` prefix carries `ZonePair.Site`. Every per-site step (`Bootstrap`, `Reload`, `EnsurePolicies`, `EnsurePoliciesForShard`, `DeletePoliciesForShard` and the zone-mode check in `LoadInfrastructure`) works from `config.PairsForSite`, which resolves the inbound and the egress pairs separately through `config.SitePairs`: a site with prefixed pairs in a setting uses only those, any other site uses the unprefixed ones. The Cloudflare whitelist resolves `CLOUDFLARE_ZONE_PAIRS` through the same `config.SitePairs` and drains a site that is left without a pair. Zone IDs, filter lists, expected policy names and the orphan sweep are scoped to one site, so a change to one site's pairs never reaches another site's policies. `Reload` refuses a pair set that leaves any site without a pair, as it refuses an empty one.
+
 ### Orphan cleanup
 
-When a zone pair is removed from `ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` or `CLOUDFLARE_ZONE_PAIRS`, previously managed firewall objects are cleaned up:
+When a zone pair is removed from `ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` or `CLOUDFLARE_ZONE_PAIRS`, or no longer applies to a site, that site's previously managed firewall objects are cleaned up:
 
 - **Block policies**: at `EnsurePolicies` time, two complementary sweeps run. Pass 1 (bbolt-based) deletes a tracked policy no longer expected by the current config when its API ID, name, and `BLOCK` action match the cache record. Pass 2 (API-based) deletes an orphan without a cache record only when its name has the configured policy prefix, its description matches the managed description, and its action is `BLOCK`.
 - **Converted legacy rules**: on a zone-mode site, zone policies converted from the bouncer's legacy rules are deleted once its own block policies cover their lists (see [UniFi Network 11](#unifi-network-11)).
@@ -555,7 +559,7 @@ See [SECURITY.md](../SECURITY.md) and [COMPLIANCE.md](../COMPLIANCE.md) for deta
 
 Tests run without external services: the UniFi controller is replaced by `httptest` servers and an in-process fake (`internal/testutil`), and storage tests use real bbolt databases in `t.TempDir()`. Most packages use table-driven tests. Coverage includes:
 
-- **`internal/config`**: required fields, defaults, `_FILE` injection, name templates, zone pair parsing (ports, destination IPs, egress pairs), connection states, feed and Cloudflare settings
+- **`internal/config`**: required fields, defaults, `_FILE` injection, name templates, zone pair parsing (ports, destination IPs, egress pairs, site prefixes) and per-site resolution, connection states, feed and Cloudflare settings
 - **`internal/decision`**: every filter stage, IP parsing and sanitisation, private-range and whitelist checks, per-scenario duration overrides, and fuzz tests for the parser
 - **`internal/banstate`**: claims per source, release and expiry, host-prefix rekeying, dropping unbannable bans, claiming and retiring 1.x bans
 - **`internal/firewall`**: shard bin-packing, rebalance and pruning, sync and the circuit breaker, reconcile races, legacy rules, zone policies (port and destination filters, staged replacement, egress, converted legacy rules, Network 11 mode checks), drain and orphan sweeps

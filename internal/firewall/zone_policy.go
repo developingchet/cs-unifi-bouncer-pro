@@ -28,11 +28,14 @@ func (zm *ZoneManager) policiesByID(ctx context.Context, site string) (map[strin
 	return existingByID, nil
 }
 
-// EnsurePolicies idempotently creates zone policies for each shard and zone pair.
+// EnsurePolicies idempotently creates zone policies for each shard and each
+// zone pair of site, and removes the site's block policies of pairs that no
+// longer apply to it.
 func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards, v6Shards *ShardManager) error {
 	zm.opMu.Lock()
 	defer zm.opMu.Unlock()
-	if len(zm.cfg.ZonePairs) == 0 {
+	pairs := zm.sitePairs(site)
+	if len(pairs) == 0 {
 		return errNoZonePairs
 	}
 	zoneMap, err := zm.zoneMapForSite(site)
@@ -49,7 +52,7 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	// Build the set of all policy names expected by the current config so that
 	// cleanupOrphanedBlockPolicies can identify policies from removed zone pairs.
 	expectedNames := make(map[string]bool)
-	for _, pair := range zm.cfg.ZonePairs {
+	for _, pair := range pairs {
 		for _, ipv6 := range []bool{false, true} {
 			sm := v4Shards
 			if ipv6 {
@@ -70,7 +73,7 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	// One shard the controller refuses must not leave every later shard
 	// without a policy, so failures are collected and the rest carry on.
 	var failed []error
-	for _, pair := range zm.cfg.ZonePairs {
+	for _, pair := range pairs {
 		if pairCoversFamily(pair, false) {
 			failed = append(failed, zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, existingByID, false, v4Shards)...)
 		}
@@ -83,7 +86,7 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	}
 
 	// Remove any block policies that were managed by this bouncer but whose
-	// zone pair has since been removed from ZONE_PAIRS config.
+	// zone pair no longer applies to this site.
 	if err := zm.cleanupOrphanedBlockPolicies(ctx, site, expectedNames, existingByID); err != nil {
 		return err
 	}
@@ -535,7 +538,7 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 	}
 
 	firstCreate := true
-	for _, pair := range zm.cfg.ZonePairs {
+	for _, pair := range zm.sitePairs(site) {
 		if !pairCoversFamily(pair, ipv6) {
 			continue
 		}

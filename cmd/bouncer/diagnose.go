@@ -17,18 +17,6 @@ import (
 )
 
 // validateCmd loads and validates config without making any API calls.
-// zonePairSummary lists pairs as "src->dst, ...", or "0 pair(s)" when empty.
-func zonePairSummary(pairs []config.ZonePair) string {
-	if len(pairs) == 0 {
-		return "0 pair(s)"
-	}
-	parts := make([]string, 0, len(pairs))
-	for _, p := range pairs {
-		parts = append(parts, p.Src+"->"+p.Dst)
-	}
-	return strings.Join(parts, ", ")
-}
-
 func validateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "validate",
@@ -53,14 +41,24 @@ No API calls are made — safe to run in CI without network access.`,
 				fmt.Fprintf(os.Stderr, "configuration invalid: %v\n", err)
 				os.Exit(1)
 			}
+			rows := append(zonePairRows("zone_pairs", pairs, cfg), zonePairRows("egress_zone_pairs", egressPairs, cfg)...)
+			if cfg.CloudflareWhitelistEnabled {
+				cloudflarePairs, err := cfg.ParseCloudflareZonePairs()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "configuration invalid: %v\n", err)
+					os.Exit(1)
+				}
+				rows = append(rows, zonePairRows("cloudflare_zone_pairs", cloudflarePairs, cfg)...)
+			}
 
 			v4Cap, _ := resolveCapacities(cfg)
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "FIELD\tVALUE")
 			fmt.Fprintf(w, "firewall_mode\t%s\n", cfg.FirewallMode)
-			fmt.Fprintf(w, "zone_pairs\t%s\n", zonePairSummary(pairs))
-			fmt.Fprintf(w, "egress_zone_pairs\t%s\n", zonePairSummary(egressPairs))
+			for _, row := range rows {
+				fmt.Fprintf(w, "%s\t%s\n", row[0], row[1])
+			}
 			fmt.Fprintf(w, "sites\t%s\n", strings.Join(cfg.UnifiSites, ", "))
 			fmt.Fprintf(w, "ban_ttl\t%s\n", cfg.BanTTL)
 			fmt.Fprintf(w, "shard_capacity\t%d\n", v4Cap)

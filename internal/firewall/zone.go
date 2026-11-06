@@ -17,7 +17,7 @@ import (
 // ZoneConfig holds configuration for zone-based firewall mode.
 type ZoneConfig struct {
 	// ZonePairs holds the inbound pairs followed by the egress pairs
-	// (ZonePair.Egress).
+	// (ZonePair.Egress) of every site; sitePairs picks a site's own.
 	ZonePairs              []config.ZonePair
 	Description            string
 	LogDrops               bool
@@ -53,6 +53,13 @@ func NewZoneManager(cfg ZoneConfig, namer *Namer, ctrl controller.Controller, st
 	return &ZoneManager{cfg: cfg, namer: namer, ctrl: controller.WithListingPasses(ctrl), store: store, log: log}
 }
 
+// sitePairs returns the zone pairs that apply to site.
+func (zm *ZoneManager) sitePairs(site string) []config.ZonePair {
+	zm.mu.RLock()
+	defer zm.mu.RUnlock()
+	return config.PairsForSite(zm.cfg.ZonePairs, site)
+}
+
 // Bootstrap performs fail-fast startup discovery for all configured sites:
 //  1. Resolves each site name to its integration v1 UUID (fails if missing).
 //  2. Fetches all firewall zones for each site (fails if unavailable).
@@ -61,6 +68,7 @@ func (zm *ZoneManager) Bootstrap(ctx context.Context, sites []string) error {
 	zm.opMu.Lock()
 	defer zm.opMu.Unlock()
 	for _, site := range sites {
+		pairs := zm.sitePairs(site)
 		siteID, err := zm.ctrl.GetSiteID(ctx, site)
 		if err != nil {
 			return fmt.Errorf("resolve site UUID for %q: %w", site, err)
@@ -72,7 +80,7 @@ func (zm *ZoneManager) Bootstrap(ctx context.Context, sites []string) error {
 			return fmt.Errorf("discover firewall zones for site %q: %w", site, err)
 		}
 		zm.log.Info().Str("site", site).Int("zone_count", len(zones)).Msg("zone discovery complete")
-		if err := validateZoneNetworks(site, zm.cfg.ZonePairs, zones); err != nil {
+		if err := validateZoneNetworks(site, pairs, zones); err != nil {
 			return err
 		}
 
@@ -90,7 +98,7 @@ func (zm *ZoneManager) Bootstrap(ctx context.Context, sites []string) error {
 
 		// Populate zone cache for this site.
 		siteZones := make(map[string]string)
-		for _, pair := range zm.cfg.ZonePairs {
+		for _, pair := range pairs {
 			for _, name := range []string{pair.Src, pair.Dst} {
 				if _, ok := siteZones[name]; ok {
 					continue
@@ -104,7 +112,7 @@ func (zm *ZoneManager) Bootstrap(ctx context.Context, sites []string) error {
 		}
 
 		// Ensure port TMLs for zone pairs that have port filters configured.
-		sitePortTMLs, err := zm.ensurePortTMLs(ctx, site, zm.cfg.ZonePairs)
+		sitePortTMLs, err := zm.ensurePortTMLs(ctx, site, pairs)
 		if err != nil {
 			return fmt.Errorf("ensure port TMLs for site %q: %w", site, err)
 		}
@@ -124,12 +132,19 @@ func (zm *ZoneManager) Bootstrap(ctx context.Context, sites []string) error {
 }
 
 // Reload updates the zone pair configuration and repopulates the zone ID cache
-// for all given sites. All zone IDs are resolved into a staging map first; the
-// live cache is updated only if every zone resolves successfully (validate-then-commit).
-// Safe to call concurrently with read operations.
+// for all given sites. pairs holds the pairs of every site; each site uses the
+// ones config.PairsForSite resolves for it. All zone IDs are resolved into a
+// staging map first; the live cache is updated only if every zone resolves
+// successfully (validate-then-commit), and only if no site is left without a
+// pair. Safe to call concurrently with read operations.
 func (zm *ZoneManager) Reload(ctx context.Context, sites []string, pairs []config.ZonePair) error {
 	if len(pairs) == 0 {
 		return fmt.Errorf("reload: %w", errNoZonePairs)
+	}
+	for _, site := range sites {
+		if len(config.PairsForSite(pairs, site)) == 0 {
+			return fmt.Errorf("reload site %q: %w", site, errNoZonePairs)
+		}
 	}
 	zm.opMu.Lock()
 	defer zm.opMu.Unlock()
@@ -138,18 +153,19 @@ func (zm *ZoneManager) Reload(ctx context.Context, sites []string, pairs []confi
 	stagedPorts := make(map[string]map[string]portTMLIDs, len(sites))
 
 	for _, site := range sites {
+		sitePairs := config.PairsForSite(pairs, site)
 		// 1A: Evict stale cache entries so GetZoneID hits the API.
 		zm.ctrl.InvalidateZoneCache(site)
 		zones, err := zm.ctrl.DiscoverZones(ctx, site)
 		if err != nil {
 			return fmt.Errorf("discover firewall zones for site %q: %w", site, err)
 		}
-		if err := validateZoneNetworks(site, pairs, zones); err != nil {
+		if err := validateZoneNetworks(site, sitePairs, zones); err != nil {
 			return err
 		}
 
 		siteZones := make(map[string]string)
-		for _, pair := range pairs {
+		for _, pair := range sitePairs {
 			for _, name := range []string{pair.Src, pair.Dst} {
 				if _, ok := siteZones[name]; ok {
 					continue
@@ -167,7 +183,7 @@ func (zm *ZoneManager) Reload(ctx context.Context, sites []string, pairs []confi
 		staged[site] = siteZones
 	}
 	for _, site := range sites {
-		ports, err := zm.ensurePortTMLs(ctx, site, pairs)
+		ports, err := zm.ensurePortTMLs(ctx, site, config.PairsForSite(pairs, site))
 		if err != nil {
 			return fmt.Errorf("reload port and destination IP filters for site %q: %w", site, err)
 		}
@@ -215,7 +231,7 @@ func validateZoneNetworks(site string, pairs []config.ZonePair, zones []controll
 }
 
 // zoneMapForSite returns the cached zone name -> ID map for site, having
-// verified that every configured zone pair's src/dst zones are present in it.
+// verified that the src/dst zones of every pair of the site are present in it.
 func (zm *ZoneManager) zoneMapForSite(site string) (map[string]string, error) {
 	zm.mu.RLock()
 	zoneMap, ok := zm.zoneCache[site]
@@ -223,7 +239,7 @@ func (zm *ZoneManager) zoneMapForSite(site string) (map[string]string, error) {
 	if !ok {
 		return nil, fmt.Errorf("zone cache not populated for site %q — was Bootstrap called?", site)
 	}
-	for _, pair := range zm.cfg.ZonePairs {
+	for _, pair := range zm.sitePairs(site) {
 		if _, ok := zoneMap[pair.Src]; !ok {
 			return nil, fmt.Errorf("zone %q not in cache for site %q", pair.Src, site)
 		}
@@ -321,7 +337,7 @@ func (zm *ZoneManager) cleanupOrphanedBlockPolicies(ctx context.Context, site st
 func (zm *ZoneManager) DeletePoliciesForShard(ctx context.Context, site string, ipv6 bool, shardIdx int) error {
 	zm.opMu.Lock()
 	defer zm.opMu.Unlock()
-	for _, pair := range zm.cfg.ZonePairs {
+	for _, pair := range zm.sitePairs(site) {
 		policyName, err := zm.policyName(site, pair, ipv6, shardIdx)
 		if err != nil {
 			return err

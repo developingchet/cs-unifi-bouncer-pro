@@ -170,6 +170,9 @@ type Config struct {
 
 // ZonePair represents a parsed src->dst zone pair, optionally with port and IP filters.
 type ZonePair struct {
+	// Site is the UniFi site named by a "<site>/" prefix, or "" for a pair
+	// without one. See SitePairs for how the two kinds combine.
+	Site     string
 	Src      string
 	Dst      string
 	SrcPorts []int    // empty = any source ports
@@ -220,14 +223,19 @@ func parseZoneSide(side string) (zoneName string, ports []int, err error) {
 	return zoneName, ports, nil
 }
 
-// parseZonePairList parses zone pair strings in "src[:port,...]->dst[:port,...][@ip1,ip2,...]" format.
+// parseZonePairList parses zone pair strings in
+// "[site/]src[:port,...]->dst[:port,...][@ip1,ip2,...]" format.
 func parseZonePairList(pairs []string) ([]ZonePair, error) {
 	result := make([]ZonePair, 0, len(pairs))
 	for _, p := range pairs {
 		if strings.Count(p, "->") != 1 {
 			return nil, fmt.Errorf("invalid zone pair %q: expected one src->dst pair; separate pairs with semicolons when using comma-separated ports or destination IPs", p)
 		}
-		parts := strings.SplitN(p, "->", 2)
+		site, body, err := cutSitePrefix(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid zone pair %q: %w", p, err)
+		}
+		parts := strings.SplitN(body, "->", 2)
 		src, srcPorts, err := parseZoneSide(strings.TrimSpace(parts[0]))
 		if err != nil {
 			return nil, fmt.Errorf("invalid zone pair %q src: %w", p, err)
@@ -261,7 +269,7 @@ func parseZonePairList(pairs []string) ([]ZonePair, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid zone pair %q dst: %w", p, err)
 		}
-		result = append(result, ZonePair{Src: src, Dst: dst, SrcPorts: srcPorts, DstPorts: dstPorts, DstIPs: dstIPs})
+		result = append(result, ZonePair{Site: site, Src: src, Dst: dst, SrcPorts: srcPorts, DstPorts: dstPorts, DstIPs: dstIPs})
 	}
 	return result, nil
 }
@@ -591,7 +599,10 @@ func (c *Config) Validate() error {
 	if err := c.validateFeeds(); err != nil {
 		return err
 	}
-	return c.validateCloudflare()
+	if err := c.validateCloudflare(); err != nil {
+		return err
+	}
+	return c.validatePairSites()
 }
 
 // validateController checks the UniFi controller URL/TLS settings and the
@@ -700,11 +711,17 @@ func (c *Config) validateEgress() error {
 	if c.UnifiAPIKey == "" {
 		return fmt.Errorf("EGRESS_ZONE_PAIRS requires UNIFI_API_KEY; zone policies are managed through the integration API")
 	}
+	// A site's own pairs replace the unprefixed ones, so a pair may appear
+	// once without a prefix and again for a site.
 	seen := make(map[string]bool, len(pairs))
 	for _, p := range pairs {
-		key := p.Src + "->" + p.Dst
+		zones := p.Src + "->" + p.Dst
+		key := p.Site + "/" + zones
 		if seen[key] {
-			return fmt.Errorf("EGRESS_ZONE_PAIRS names %s more than once", key)
+			if p.Site != "" {
+				return fmt.Errorf("EGRESS_ZONE_PAIRS names %s more than once for site %q", zones, p.Site)
+			}
+			return fmt.Errorf("EGRESS_ZONE_PAIRS names %s more than once", zones)
 		}
 		seen[key] = true
 	}

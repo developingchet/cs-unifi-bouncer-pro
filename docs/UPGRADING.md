@@ -65,6 +65,13 @@ Behaviour that changes without action:
 - **Zone pairs from a file**: `ZONE_PAIRS_FILE` and `EGRESS_ZONE_PAIRS_FILE`
   are new. A SIGHUP reads them again, so pairs kept in a file change without
   a restart; pairs in the environment still need one.
+- **Zone pairs for one site**: a `site/` prefix (`branch/Wan->Lan`) limits a
+  `ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` or `CLOUDFLARE_ZONE_PAIRS` pair to one
+  site, and a site with prefixed pairs uses only those, so one instance can
+  manage sites whose zones have different names (see
+  [CONFIGURATION.md](CONFIGURATION.md#pairs-for-one-site)). Pairs without a
+  prefix apply to every site as before. A zone name that contains `/` is now
+  read as a site prefix; use the zone's ID instead.
 - **Feed redirects through a proxy**: with `HTTPS_PROXY` or `HTTP_PROXY` set,
   a feed redirect to another host is followed only when that host name
   resolves, from the bouncer, to public addresses. A redirect to a name the

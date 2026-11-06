@@ -108,7 +108,7 @@ All configuration is via environment variables. The most common settings are bel
 | `UNIFI_SITES` | `default` | Comma-separated site names to manage |
 | `UNIFI_CA_CERT` | — | CA bundle for a private controller certificate (`UNIFI_VERIFY_TLS` defaults to `true`) |
 | `FIREWALL_MODE` | `auto` | `auto` (per site), `legacy` or `zone` |
-| `ZONE_PAIRS` | `External->Dmz` | Zone pairs to block inbound traffic on, e.g. `External->Internal;External->Dmz`, with optional port and destination filters |
+| `ZONE_PAIRS` | `External->Dmz` | Zone pairs to block inbound traffic on, e.g. `External->Internal;External->Dmz`, with optional port and destination filters and an optional `site/` prefix |
 | `EGRESS_ZONE_PAIRS` | — | Zone pairs whose source zone may not connect out to banned addresses, e.g. `Dmz->External` |
 | `FIREWALL_ENABLE_IPV6` | `true` | Enforce IPv6 bans |
 | `BLOCK_WHITELIST` | — | IPs and CIDRs never to block, such as your own WAN address |
@@ -188,7 +188,7 @@ zone_discovery[default]  PASS    3 zones found
   Dmz                            id=67a8cc9efe6c6350dfa4dcc9
 ```
 
-`diagnose` exits 1 when a check fails; `WARN` rows (an unreadable Network version, an unexpected LAPI status) do not fail it. `validate` prints the resolved values (`firewall_mode`, `zone_pairs`, `egress_zone_pairs`, `sites`, `ban_ttl`, `shard_capacity`, `cb_threshold`, `cb_reset_interval`, the URLs and listen addresses) and exits 1 on an invalid configuration.
+`diagnose` exits 1 when a check fails; `WARN` rows (an unreadable Network version, an unexpected LAPI status) do not fail it. `validate` prints the resolved values (`firewall_mode`, `zone_pairs`, `egress_zone_pairs`, with one row per site when a setting has [site prefixes](docs/CONFIGURATION.md#pairs-for-one-site), `cloudflare_zone_pairs` when the whitelist is on, `sites`, `ban_ttl`, `shard_capacity`, `cb_threshold`, `cb_reset_interval`, the URLs and listen addresses) and exits 1 on an invalid configuration.
 
 `status` run inside the container reads a consistent snapshot that the daemon serves on `HEALTH_ADDR` at `/status/db`; with the daemon stopped it opens the database directly. `status sync`, `ban`, `unban` and `reconcile` use `/status/sync` and `/control/*` on the same address, guarded by the same token (see [DESIGN.md](docs/DESIGN.md#health-endpoints)). `ban` applies the same guards as CrowdSec decisions: it refuses private, loopback and link-local addresses, anything covered by `BLOCK_WHITELIST`, and ranges broader than /8 (IPv4) or /32 (IPv6). `drain` deletes the policies or rules first, then the shard objects and their database records, and finally the Cloudflare whitelist policies and lists.
 

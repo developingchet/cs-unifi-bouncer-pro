@@ -254,10 +254,11 @@ func (m *managerImpl) LoadInfrastructure(ctx context.Context, sites []string) er
 			return err
 		}
 
-		if mode == "zone" && len(m.cfg.ZoneCfg.ZonePairs) == 0 {
+		pairs := m.zoneMgr.sitePairs(site)
+		if mode == "zone" && len(pairs) == 0 {
 			return fmt.Errorf("site %s: %w", site, errNoZonePairs)
 		}
-		if mode == "legacy" && hasEgressPairs(m.cfg.ZoneCfg.ZonePairs) {
+		if mode == "legacy" && hasEgressPairs(pairs) {
 			m.log.Warn().Str("site", site).
 				Msg("EGRESS_ZONE_PAIRS has no effect on this site: it uses legacy firewall rules, which block inbound traffic only")
 		}

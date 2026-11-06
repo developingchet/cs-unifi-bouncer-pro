@@ -145,6 +145,7 @@ func reloadZones(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager
 		log.Warn().Err(err).Msg("SIGHUP: zone reload failed")
 		return
 	}
+	logSitePairs(newCfg, cfg.UnifiSites, log)
 	if !reconcilesOpen() {
 		// A full reconcile also removes controller members the ban database
 		// does not hold. Until the startup gate opens the database may be
@@ -176,6 +177,7 @@ func cloudflarePairs(cfg *config.Config) ([]whitelist.ZonePairConfig, error) {
 	pairs := make([]whitelist.ZonePairConfig, 0, len(parsed))
 	for _, pair := range parsed {
 		pairs = append(pairs, whitelist.ZonePairConfig{
+			Site:     pair.Site,
 			SrcName:  pair.Src,
 			DstName:  pair.Dst,
 			SrcPorts: pair.SrcPorts,

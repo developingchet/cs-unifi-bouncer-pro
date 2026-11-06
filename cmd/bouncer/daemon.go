@@ -89,6 +89,7 @@ func runDaemon() error {
 	} else if err := checkSitesExist(ctx, ctrl, cfg.UnifiSites, log); err != nil {
 		return err
 	}
+	logSitePairs(cfg, cfg.UnifiSites, log)
 
 	// The notifier is a no-op when WEBHOOK_URL is empty or in dry-run mode.
 	webhookURL := cfg.WebhookURL
