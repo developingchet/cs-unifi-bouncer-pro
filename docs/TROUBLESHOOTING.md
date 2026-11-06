@@ -559,9 +559,9 @@ docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro diagnose
 **Cause:** The controller runs UniFi Network 11 or later, which moves every site to the zone-based firewall and ignores legacy `WAN_IN`/`WANv6_IN` rules. The bouncer refuses to create rules that would block nothing. There are two variants:
 
 - `FIREWALL_MODE=legacy: UniFi Network 11.x applies only the zone-based firewall` — legacy mode was set explicitly.
-- `site ... has no firewall zones, and UniFi Network 11.x applies only the zone-based firewall` — `FIREWALL_MODE=auto` found no zones, which happens when no UniFi gateway is adopted on the site.
+- `site ... has no firewall zones, and UniFi Network 11.x applies only the zone-based firewall` — `FIREWALL_MODE=auto` found no zones: the controller returned none for the site, although Network 11 normally lists its system zones even before a gateway is adopted.
 
-**Fix:** Set `UNIFI_API_KEY` and `ZONE_PAIRS`, and use `FIREWALL_MODE=auto` or `zone`. A site without a gateway has no firewall for the bouncer to manage; remove it from `UNIFI_SITES`. See [Upgrading the controller to UniFi Network 11](UPGRADING.md#upgrading-the-controller-to-unifi-network-11).
+**Fix:** Set `UNIFI_API_KEY` and `ZONE_PAIRS`, and use `FIREWALL_MODE=auto` or `zone`. On a site with no gateway the policies are created but block nothing until a gateway is adopted; remove such a site from `UNIFI_SITES` if it never gets one. See [Upgrading the controller to UniFi Network 11](UPGRADING.md#upgrading-the-controller-to-unifi-network-11).
 
 ### Log warns "could not read the UniFi Network version"
 
