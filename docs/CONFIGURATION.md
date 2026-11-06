@@ -506,6 +506,8 @@ A feed may hold at most 250,000 entries and 16 MiB; a larger response fails the 
 
 Addresses are recorded and applied in batches of 500, so a large feed does not hold up CrowdSec decisions while it imports. Addresses the controller rejects stay recorded as pending and are retried by the next reconcile.
 
+Each feed, including the AbuseIPDB feed, has three Prometheus metrics labelled with its claim source (`source="blocklist:sha256:..."`, which the `blocklist: feed configured` startup log line pairs with the feed's host): `crowdsec_unifi_feed_entries` (entries the last applied fetch listed), `crowdsec_unifi_feed_last_success_timestamp_seconds` (last fetch applied in full) and `crowdsec_unifi_feed_fetch_errors_total` (failed fetches). Alert when the last success is older than a few refresh intervals, for example `time() - crowdsec_unifi_feed_last_success_timestamp_seconds > 3 * 86400` with the default 24h interval.
+
 A feed may redirect up to three times. A redirect from `https://` to `http://` is refused, and so is a redirect to a different host on a private, loopback, link-local or other internal address: literal addresses are refused before the request, and host names when they resolve to one at connect time. A feed URL configured with an internal address directly is fetched as configured. With `HTTPS_PROXY` or `HTTP_PROXY` set, the proxy connects to the redirect target, so the bouncer resolves the target name itself first and refuses the redirect when the name resolves to an internal address or does not resolve at all. The proxy can still resolve the name differently; limit where the proxy itself may connect if that matters in your network.
 
 ---

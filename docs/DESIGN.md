@@ -458,7 +458,7 @@ The per-pair filter lists, staged policies and Cloudflare whitelist objects have
 
 ### Prometheus metrics
 
-25 metrics under the `crowdsec_unifi_` namespace are served at `/metrics` on `METRICS_ADDR` (default `:9090`) while `METRICS_ENABLED=true`:
+28 metrics under the `crowdsec_unifi_` namespace are served at `/metrics` on `METRICS_ADDR` (default `:9090`) while `METRICS_ENABLED=true`:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
@@ -487,6 +487,11 @@ The per-pair filter lists, staged policies and Cloudflare whitelist objects have
 | `crowdsec_unifi_zone_block_policies` | Gauge | `direction` (`inbound`, `egress`), `site` | Zone block policies the bouncer keeps on the controller |
 | `crowdsec_unifi_db_size_bytes` | Gauge | | bbolt database file size, updated by the janitor |
 | `crowdsec_unifi_cloudflare_whitelist_sync_errors_total` | Counter | | Failed Cloudflare whitelist syncs |
+| `crowdsec_unifi_feed_entries` | Gauge | `source` | Entries the feed's last applied fetch listed, after the country filter and the range, private address and whitelist guards |
+| `crowdsec_unifi_feed_last_success_timestamp_seconds` | Gauge | `source` | Unix timestamp of the feed's last fetch applied in full. A fetch applied without pruning (invalid lines, or a sharp shrink) does not move it. Alert when it is older than a few refresh intervals |
+| `crowdsec_unifi_feed_fetch_errors_total` | Counter | `source` | Feed fetches that failed (unreachable, HTTP error, oversized, no valid entries, no entry passing the country filter), so the bans from the last good fetch were kept. Starts at 0 for every configured feed |
+
+The `source` label of the feed metrics is the feed's claim source, `blocklist:sha256:<hash of the URL>` for a `BLOCKLIST_URLS` entry and `abuseipdb:sha256:<hash>` for the AbuseIPDB feed, never the URL, which may carry an access token. The `blocklist: feed configured` line logged at startup pairs each source with its host.
 
 The `shard` label is the group name (e.g. `crowdsec-block-v4-0`) on `firewall_group_size` and `shard_occupancy_ratio`, and the numeric shard index on `shard_ip_count`, `shard_sync_total` and `shard_sync_duration_seconds`.
 
