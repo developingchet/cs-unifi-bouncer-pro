@@ -9,10 +9,9 @@
 
 services:
   cs-unifi-bouncer-pro:
-    # A fixed release, so an update is a deliberate change. To update, set
-    # BOUNCER_IMAGE in .env to the new release (or its @sha256 digest), check
-    # its signature with `cosign verify` (see SECURITY.md), then `up -d`.
-    image: ${BOUNCER_IMAGE:-developingchet/cs-unifi-bouncer-pro:2.3.0}
+    # Set BOUNCER_IMAGE in .env to run a specific release or @sha256 digest;
+    # `cosign verify` checks an image's signature (see SECURITY.md).
+    image: ${BOUNCER_IMAGE:-developingchet/cs-unifi-bouncer-pro:latest}
     container_name: cs-unifi-bouncer-pro
     restart: unless-stopped
     read_only: true

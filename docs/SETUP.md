@@ -387,19 +387,14 @@ Bans are applied to all listed sites simultaneously.
 
 ## Updating
 
-The compose files run a fixed release. To move to a new one, read its release
-notes, check its signature, and point `BOUNCER_IMAGE` at it:
+The compose files run `latest` unless `BOUNCER_IMAGE` in `.env` names another
+image. Read the release notes first, then:
 
 ```bash
-VERSION=2.3.0   # the release to run
-
-# Check the signature before running it
-cosign verify developingchet/cs-unifi-bouncer-pro:$VERSION \
+# Check the signature of the release you are about to run (needs cosign)
+cosign verify developingchet/cs-unifi-bouncer-pro:latest \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
-
-# Pin it in .env (replacing any earlier BOUNCER_IMAGE line)
-echo "BOUNCER_IMAGE=developingchet/cs-unifi-bouncer-pro:$VERSION" >> .env
 
 # Pull it and recreate the container
 docker compose pull
@@ -409,9 +404,10 @@ docker compose up -d --force-recreate cs-unifi-bouncer-pro
 docker logs cs-unifi-bouncer-pro
 ```
 
-`cosign verify` prints the digest it checked. Setting
-`BOUNCER_IMAGE=developingchet/cs-unifi-bouncer-pro@sha256:<digest>` runs exactly
-that image, even if the tag were later moved.
+To stay on a release until you choose to move, set
+`BOUNCER_IMAGE=developingchet/cs-unifi-bouncer-pro:2.3.0` in `.env`, or pin the
+`@sha256:` digest that `cosign verify` printed; that digest runs exactly the
+image that was checked, even if a tag were later moved.
 
 The startup reconcile (`FIREWALL_RECONCILE_ON_START=true`) automatically syncs the UniFi firewall state with the bbolt database after an update.
 

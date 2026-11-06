@@ -48,15 +48,9 @@ During and after the upgrade:
 
 ## From 2.3 to 2.4
 
-**Compose files run a fixed release.** `docker-compose.yml` and
-`docker-compose.standalone.yml` used `developingchet/cs-unifi-bouncer-pro:latest`,
-so `docker compose pull` moved to whatever that tag pointed at. They now run
-the release they ship with (`${BOUNCER_IMAGE:-developingchet/cs-unifi-bouncer-pro:<version>}`),
-and `docker compose pull` alone no longer updates the bouncer. To update,
-check the new release's signature and set `BOUNCER_IMAGE` in `.env`, as
-described in [SETUP.md](SETUP.md#updating). A compose file you keep from an
-earlier release, still naming `latest`, behaves as before until you replace
-it.
+The compose files still run `latest`, and now read `BOUNCER_IMAGE` from
+`.env` when it is set, so a release or `@sha256:` digest can be pinned without
+editing the compose file (see [SETUP.md](SETUP.md#updating)).
 
 Behaviour that changes without action:
 

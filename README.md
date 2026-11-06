@@ -55,8 +55,8 @@ CROWDSEC_LAPI_KEY=paste-key-here       # from step 1
 # and uncomment its line in the compose file; http:// also needs CROWDSEC_LAPI_ALLOW_HTTP=true.
 EOF
 
-# 4. Check the image signature (needs cosign; the compose file pins this release)
-cosign verify developingchet/cs-unifi-bouncer-pro:2.3.0 \
+# 4. Check the image signature (recommended; needs cosign)
+cosign verify developingchet/cs-unifi-bouncer-pro:latest \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 
@@ -67,9 +67,9 @@ docker compose -f docker-compose.standalone.yml up -d
 docker logs -f cs-unifi-bouncer-pro
 ```
 
-The compose file runs a fixed release rather than `latest`, so an image is
-only replaced when you choose to update. Set `BOUNCER_IMAGE` in `.env` to pin
-a different release or an `@sha256:` digest.
+The compose file runs `latest`. To run a specific release instead, set
+`BOUNCER_IMAGE` in `.env`, for example to `developingchet/cs-unifi-bouncer-pro:2.3.0`
+or to an `@sha256:` digest that `cosign verify` reported.
 
 For the full setup guide including advanced configuration, multi-site deployments,
 TLS setup, and Docker Secrets support, see [docs/SETUP.md](docs/SETUP.md).

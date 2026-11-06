@@ -21,7 +21,7 @@ It uses zone-based policies or legacy `WAN_IN` rules, chosen per site at startup
 ```yaml
 services:
   bouncer:
-    image: developingchet/cs-unifi-bouncer-pro:2.3.0
+    image: developingchet/cs-unifi-bouncer-pro:latest
     restart: unless-stopped
     environment:
       UNIFI_URL: https://192.168.1.1
