@@ -723,11 +723,11 @@ func listTMLs(ctx context.Context, c *unifiClient, siteID string) ([]TrafficMatc
 	}
 	out := make([]TrafficMatchingList, 0, len(data))
 	for _, raw := range data {
-		var t apiTMLV1
+		var t apiTMLV1Listed
 		if err := json.Unmarshal(raw, &t); err != nil {
 			continue
 		}
-		out = append(out, tmlFromWire(t))
+		out = append(out, t.model())
 	}
 	return out, nil
 }
@@ -741,11 +741,11 @@ func createTML(ctx context.Context, c *unifiClient, siteID string, list TrafficM
 	if err != nil {
 		return TrafficMatchingList{}, err
 	}
-	var created apiTMLV1
+	var created apiTMLV1Listed
 	if err := json.Unmarshal(raw, &created); err != nil {
 		return TrafficMatchingList{}, fmt.Errorf("decode created TML: %w", err)
 	}
-	return tmlFromWire(created), nil
+	return created.model(), nil
 }
 
 func updateTML(ctx context.Context, c *unifiClient, siteID string, list TrafficMatchingList) error {
@@ -809,15 +809,6 @@ func tmlToWire(list TrafficMatchingList) apiTMLV1 {
 
 func tmlToWireUpdate(list TrafficMatchingList) apiTMLV1Update {
 	return apiTMLV1Update{Type: resolveTMLType(list), Name: list.Name, Items: tmlItemsToWire(list)}
-}
-
-func tmlFromWire(t apiTMLV1) TrafficMatchingList {
-	items := make([]TrafficMatchingListItem, 0, len(t.Items))
-	for _, item := range t.Items {
-		val := fmt.Sprintf("%v", item.Value)
-		items = append(items, TrafficMatchingListItem{Type: item.Type, Value: val})
-	}
-	return TrafficMatchingList{ID: t.ID, Type: t.Type, Name: t.Name, Items: items}
 }
 
 // --- Zone Policies (integration v1) -----------------------------------------
