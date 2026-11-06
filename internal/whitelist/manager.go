@@ -531,7 +531,11 @@ func (m *Manager) drain(ctx context.Context, dryRun bool) error {
 	var failed []error
 	for _, site := range m.sites {
 		policies, err := m.ctrl.ListZonePolicies(ctx, site)
-		if err != nil {
+		if controller.ZoneFirewallNotConfigured(err) {
+			// A site on the legacy firewall has no zone policies, so no
+			// whitelist policies; its lists are still removed below.
+			m.log.Debug().Str("site", site).Msg("Cloudflare drain: site has no zone-based firewall")
+		} else if err != nil {
 			m.log.Warn().Err(err).Str("site", site).Msg("Cloudflare drain: failed to list zone policies")
 			failed = append(failed, fmt.Errorf("list zone policies for site %s: %w", site, err))
 		} else {

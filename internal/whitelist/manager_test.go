@@ -1014,6 +1014,32 @@ func TestEnsureAllowPolicy_DstIPTMLID_ChangeTriggerRecreate(t *testing.T) {
 // crowdsec-whitelist-cloudflare-* policies and TMLs while leaving unrelated
 // objects (ban policies, ban TMLs) intact. This covers the case where
 // CLOUDFLARE_WHITELIST_ENABLED is set to false after the feature was active.
+func TestDrainSkipsPoliciesOnLegacyFirewallSite(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	mgr := NewManager(ctrl, []string{"test-site"}, nil, zerolog.Nop())
+	ctrl.SetError("ListZonePolicies", &controller.ErrBadRequest{
+		Body: `{"statusCode":400,"code":"api.firewall.zone-based-firewall-not-configured","message":"Zone Based Firewall is not configured"}`,
+	})
+	ctrl.SetTMLs("test-site", []controller.TrafficMatchingList{{ID: "tml-v4", Name: TMLNameV4}})
+
+	if err := mgr.Drain(context.Background()); err != nil {
+		t.Fatalf("Drain on a legacy-firewall site: %v", err)
+	}
+	if got := ctrl.Calls("DeleteTrafficMatchingList"); got != 1 {
+		t.Errorf("DeleteTrafficMatchingList calls: got %d, want 1", got)
+	}
+}
+
+func TestDrainReportsOtherPolicyListErrors(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	mgr := NewManager(ctrl, []string{"test-site"}, nil, zerolog.Nop())
+	ctrl.SetError("ListZonePolicies", &controller.ErrBadRequest{Body: `{"code":"api.err.Invalid"}`})
+
+	if err := mgr.Drain(context.Background()); err == nil {
+		t.Fatal("Drain hid a failed policy listing")
+	}
+}
+
 func TestDrain_DeletesAllWhitelistObjects(t *testing.T) {
 	ctrl := testutil.NewMockController()
 	log := zerolog.Nop()
