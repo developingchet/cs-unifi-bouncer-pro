@@ -190,6 +190,9 @@ func Load() (*Config, error) {
 	if err := unquoteValues(k); err != nil {
 		return nil, err
 	}
+	if err := blankDurationsToDefaults(k, defs); err != nil {
+		return nil, err
+	}
 
 	cfg := &Config{}
 	if err := k.UnmarshalWithConf("", cfg, koanf.UnmarshalConf{Tag: "koanf"}); err != nil {

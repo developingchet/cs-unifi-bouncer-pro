@@ -143,6 +143,9 @@ Behaviour that changes without action:
   `UNIFI_SITES_EXCLUDE`, `BLOCKLIST_URLS`, `WEBHOOK_URL`, `WEBHOOK_EVENTS`,
   `BLOCK_SCENARIO_DURATION_MAP`, durations, numbers and booleans, which kept
   their quotes before.
+- **Blank durations**: a duration setting left empty, such as `SYNC_INTERVAL=`
+  in an env file, takes its default. Before, it stopped startup with
+  `'sync_interval' time: invalid duration ""`.
 
 Renamed settings. The old names keep working with the same effect, and each
 one in use logs a deprecation warning at startup:

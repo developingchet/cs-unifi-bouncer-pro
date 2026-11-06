@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -27,6 +28,44 @@ func unquoteValues(k *koanf.Koanf) error {
 		}
 	}
 	return nil
+}
+
+// blankDurationsToDefaults gives each duration setting set to an empty value,
+// such as SYNC_INTERVAL= in an env file, its default. An empty duration
+// cannot be decoded, and a blank setting reads as unset elsewhere too: the
+// FIREWALL_BATCH_WINDOW alias applies when SYNC_INTERVAL is blank.
+func blankDurationsToDefaults(k *koanf.Koanf, defs map[string]interface{}) error {
+	for _, key := range durationKeys() {
+		if !k.Exists(key) || strings.TrimSpace(k.String(key)) != "" {
+			continue
+		}
+		def, ok := defs[key]
+		if !ok {
+			k.Delete(key)
+			continue
+		}
+		if err := k.Set(key, def); err != nil {
+			return fmt.Errorf("default %s: %w", strings.ToUpper(key), err)
+		}
+	}
+	return nil
+}
+
+// durationKeys returns the koanf keys of the Config fields that hold a duration.
+func durationKeys() []string {
+	durationType := reflect.TypeOf(time.Duration(0))
+	t := reflect.TypeOf(Config{})
+	var keys []string
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if f.Type != durationType {
+			continue
+		}
+		if key, _, _ := strings.Cut(f.Tag.Get("koanf"), ","); key != "" && key != "-" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 // sanitise removes a single layer of matching surrounding quotes from each
