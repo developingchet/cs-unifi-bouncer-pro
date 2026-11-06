@@ -99,8 +99,7 @@ func (s *snapshotServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	given := r.Header.Get(SnapshotTokenHeader)
-	if !sameHostRequest(r) || subtle.ConstantTimeCompare([]byte(given), []byte(s.token)) != 1 {
+	if !authorizedStatusRequest(r, s.token) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -119,6 +118,13 @@ func (s *snapshotServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.store.WriteSnapshot(&deadlineWriter{w: w, deadline: deadline}); err != nil {
 		s.log.Warn().Err(err).Msg("database snapshot for status failed")
 	}
+}
+
+// authorizedStatusRequest reports whether r comes from the same host and
+// carries token. The snapshot and the control endpoints share this check.
+func authorizedStatusRequest(r *http.Request, token string) bool {
+	given := r.Header.Get(SnapshotTokenHeader)
+	return token != "" && sameHostRequest(r) && subtle.ConstantTimeCompare([]byte(given), []byte(token)) == 1
 }
 
 // sameHostRequest reports whether r comes from loopback or from the address

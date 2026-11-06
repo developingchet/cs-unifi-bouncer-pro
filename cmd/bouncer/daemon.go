@@ -125,6 +125,11 @@ func runDaemon() error {
 	// before then must not reconcile bans against a database still empty.
 	var reconcilesOpen atomic.Bool
 	go watchSIGHUP(ctx, notifySIGHUP(), cfg, fwMgr, reconcilesOpen.Load, log)
+	actions, err := newManualActions(cfg, claims, fwMgr, store, log)
+	if err != nil {
+		return err
+	}
+	health.EnableControl(actions, reconcilesOpen.Load)
 
 	recorder, recorderDone, err := newMetricsRecorder(ctx, cfg, log)
 	if err != nil {

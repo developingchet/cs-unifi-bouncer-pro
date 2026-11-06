@@ -508,11 +508,15 @@ This is distinct from the Prometheus metrics, which are cumulative for process d
 
 ### Health endpoints
 
-Three HTTP endpoints run on `HEALTH_ADDR` (default `:8081`):
+These HTTP endpoints run on `HEALTH_ADDR` (default `:8081`):
 
 - `GET /healthz` — liveness probe; returns 200 while the process is running
 - `GET /readyz` — readiness probe; returns 503 `starting` until the first CrowdSec decision batch has been processed, then pings the UniFi controller (and the LAPI when `HEALTH_CHECK_LAPI=true`) and returns 200 only if they answer. The result, pass or fail, is cached for 5 seconds and concurrent requests share one check, so polling `/readyz` cannot multiply load on the controller or its login rate limit
 - `GET /status/db` — a consistent copy of the ban database for the `status` command, which cannot open the file while the daemon holds its lock. It answers only requests from the same host that carry the token the daemon writes to `status.token` in `DATA_DIR`, and serves one copy at a time.
+- `GET /status/sync` — the firewall sync state as JSON, the same values the `dirty_shards`, `unsynced_ips`, `circuit_breaker_open` and `last_sync_timestamp_seconds` metrics hold: `startup_synced`, `dirty_shards`, `unsynced_ips` with `unsynced_by_site` (site, family, count), `circuit_breaker_open`, `last_sync` (RFC 3339, or `null` before the first complete sync) and `last_sync_age_seconds`. `status sync` prints it.
+- `POST /control/ban`, `POST /control/unban`, `POST /control/reconcile` — the `ban`, `unban` and `reconcile` commands while the daemon runs. Ban and unban take a JSON body, `{"ip": "203.0.113.42", "duration": "1h"}` (`duration` is optional; empty or `0` means `BAN_TTL`, longer values are capped at it) and `{"ip": "203.0.113.42"}`; reconcile takes none. A ban passes the guards CrowdSec decisions do (private, loopback and link-local ranges, `BLOCK_WHITELIST`, ranges broader than /8 or /32) and is a `manual` claim in the ban-state manager, like any other source; bans and unbans are recorded in the history with origin `manual`, and are written to UniFi at once. The answer is JSON: the address, the number of sites, the expiry or whether a ban was lifted, and `sync_error` when the change is recorded but UniFi could not be updated yet (the next sync retries it). A reconcile answers `added`, `removed`, `elapsed_seconds` and `error` for a partial run; it is refused with 503 until the first CrowdSec batch has been applied, as the periodic reconcile is, and with 409 while another requested reconcile runs.
+
+`/status/sync` and the control endpoints are guarded exactly like `/status/db`: same host and the `X-Status-Token` header from `status.token`, or 403. A request body is at most 4 KiB of `application/json` with no unknown fields; anything else is refused with 400 or 415. The endpoints answer 503 until the firewall infrastructure has loaded, and are not served in dry-run mode.
 
 The Docker `HEALTHCHECK` (through the `healthcheck` subcommand) and the Kubernetes liveness and startup probes use `/healthz`; the Kubernetes readiness probe uses `/readyz`.
 

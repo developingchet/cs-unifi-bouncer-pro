@@ -90,4 +90,4 @@ The pod runs with the runtime default seccomp profile, a read-only root filesyst
 
 The pod stays unready until the first LAPI pull has been processed, which can take several minutes on a large ban list. The manifest raises `progressDeadlineSeconds` to 1200 so `kubectl rollout status` does not report a stalled rollout meanwhile; raise it, and any `helm --wait` or GitOps health timeout, further for larger lists.
 
-`/status/db` on the same port serves the ban database to `kubectl exec … status` inside the pod; it refuses requests without the token in `DATA_DIR/status.token`, so it does not need a Service port.
+`/status/db` on the same port serves the ban database to `kubectl exec … status` inside the pod; `/status/sync` and `/control/*` serve `status sync`, `ban`, `unban` and `reconcile` the same way. They refuse requests without the token in `DATA_DIR/status.token`, so they do not need a Service port.

@@ -19,7 +19,8 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// Health serves /healthz, /readyz and the status snapshot. It is started
+// Health serves /healthz, /readyz, the status snapshot, the sync status and
+// the control endpoints. It is started
 // before the firewall infrastructure loads, which can take minutes on a large
 // ban list, so /healthz answers for the whole startup. /readyz reports
 // "starting" until the first LAPI decision batch has been processed.
@@ -38,6 +39,9 @@ type Health struct {
 	// cached is the last dependency check result, taken at cachedAt.
 	cached   readyResult
 	cachedAt time.Time
+
+	// control serves the control and sync status endpoints.
+	control control
 }
 
 const (
@@ -63,7 +67,17 @@ func NewHealth(cfg *config.Config, ctrl controller.Controller, store storage.Sto
 	if err != nil {
 		return nil, fmt.Errorf("configure LAPI readiness client: %w", err)
 	}
-	return &Health{cfg: cfg, ctrl: ctrl, store: store, lapiHTTP: lapiClient, log: log, now: time.Now}, nil
+	h := &Health{cfg: cfg, ctrl: ctrl, store: store, lapiHTTP: lapiClient, log: log, now: time.Now}
+	h.control.log = log
+	h.control.synced = h.synced.Load
+	return h, nil
+}
+
+// EnableControl lets the control endpoints act through actions. Until it is
+// called they answer 503. reconcileAllowed reports whether the startup gate
+// lets a reconcile run.
+func (h *Health) EnableControl(actions *ManualActions, reconcileAllowed func() bool) {
+	h.control.state.Store(&controlState{actions: actions, reconcileAllowed: reconcileAllowed})
 }
 
 // MarkSynced makes /readyz check its dependencies instead of reporting
@@ -116,6 +130,7 @@ func (h *Health) handler() http.Handler {
 			h.log.Warn().Err(err).Msg("status snapshots disabled")
 		} else if snap != nil {
 			mux.Handle(DBSnapshotPath, snap)
+			h.control.register(mux, snap.token)
 		}
 	}
 	return mux

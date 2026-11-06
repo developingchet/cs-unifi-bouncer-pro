@@ -636,10 +636,8 @@ docker compose run --rm --no-deps cs-unifi-bouncer-pro validate
 # What the bouncer's database holds for the address
 docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status ip 203.0.113.42
 
-# Force a reconcile
-docker compose stop cs-unifi-bouncer-pro
-docker compose run --rm --no-deps cs-unifi-bouncer-pro reconcile
-docker compose up -d cs-unifi-bouncer-pro
+# Force a reconcile; the running bouncer performs it
+docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro reconcile
 ```
 
 At `LOG_LEVEL=debug` each processed deletion logs `job applied` with `"action":"delete"`. An address stays banned while another source (a blocklist, a manual ban, a second CrowdSec decision) still claims it; `status ip` lists the claims.

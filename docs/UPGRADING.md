@@ -77,6 +77,11 @@ Behaviour that changes without action:
   that belong to no site. Queries that select series by their exact label set
   need `site` added or summed away, for example
   `sum by (endpoint) (rate(crowdsec_unifi_api_calls_total[5m]))`.
+- **Manual commands while running**: `ban`, `unban` and `reconcile` no
+  longer need the bouncer stopped. Run inside its container, they ask the
+  running bouncer to do the work through `HEALTH_ADDR`; `status sync` is
+  new. Manual bans and unbans now appear in `status history` with origin
+  `manual`.
 - **More webhook events**: `firewall_mode_changed`, `shard_create_failed`,
   `ban_entry_refused` and `cloudflare_whitelist_sync_failed` are new. With
   `WEBHOOK_URL` set and `WEBHOOK_EVENTS` empty they are sent as well; list

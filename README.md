@@ -144,18 +144,25 @@ See [Firewall mode details](docs/CONFIGURATION.md#firewall-mode-details) for how
 | `validate` | Validate the configuration and print a summary; no network calls |
 | `diagnose` | Check the configuration, LAPI reachability (`--lapi-auth` also checks the key), the controller, the UniFi Network version and each site's firewall mode and zones |
 | `status`, `status bans`, `status ip <IP>`, `status history` | Inspect the ban database. Works while the daemon runs when executed inside its container |
+| `status sync` | Show the running daemon's dirty shards, bans not yet enforced, circuit breaker state and last complete sync (`--json` for the raw answer) |
 | `reconcile` | Reconcile UniFi against the ban database once, then exit |
 | `ban <IP>` | Ban an address on every configured site; `--duration` defaults to `24h`, `0` means `BAN_TTL` |
 | `unban <IP>` | Release every claim on an address and remove it from every configured site |
 | `drain` | Remove every managed firewall object from UniFi; requires `--force` or `--dry-run` |
 | `version` | Print version, commit and build date |
 
-`reconcile`, `ban`, `unban` and `drain` open the database directly, so stop the daemon first:
+`reconcile`, `ban` and `unban` work while the daemon runs: inside its container they ask the daemon to do the work through `HEALTH_ADDR`, the same way `status` reads its snapshot. With the daemon stopped they open the database directly. Manual bans and unbans are recorded in the history with origin `manual`.
+
+```bash
+docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro ban 203.0.113.42 --duration 1h
+docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status sync
+```
+
+`drain` opens the database directly, so stop the daemon first:
 
 ```bash
 docker compose stop cs-unifi-bouncer-pro
-docker compose run --rm --no-deps cs-unifi-bouncer-pro ban 203.0.113.42 --duration 1h
-docker compose up -d cs-unifi-bouncer-pro
+docker compose run --rm --no-deps cs-unifi-bouncer-pro drain --force
 ```
 
 An `unban` does not change CrowdSec. If CrowdSec still holds a decision for the address, the ban is applied again at the next stream pull or resync; remove it there too (`cscli decisions delete --ip <IP>`).
@@ -183,7 +190,7 @@ zone_discovery[default]  PASS    3 zones found
 
 `diagnose` exits 1 when a check fails; `WARN` rows (an unreadable Network version, an unexpected LAPI status) do not fail it. `validate` prints the resolved values (`firewall_mode`, `zone_pairs`, `egress_zone_pairs`, `sites`, `ban_ttl`, `shard_capacity`, `cb_threshold`, `cb_reset_interval`, the URLs and listen addresses) and exits 1 on an invalid configuration.
 
-`status` run inside the container reads a consistent snapshot that the daemon serves on `HEALTH_ADDR` at `/status/db`; with the daemon stopped it opens the database directly. `ban` applies the same guards as CrowdSec decisions: it refuses private, loopback and link-local addresses, anything covered by `BLOCK_WHITELIST`, and ranges broader than /8 (IPv4) or /32 (IPv6). `drain` deletes the policies or rules first, then the shard objects and their database records, and finally the Cloudflare whitelist policies and lists.
+`status` run inside the container reads a consistent snapshot that the daemon serves on `HEALTH_ADDR` at `/status/db`; with the daemon stopped it opens the database directly. `status sync`, `ban`, `unban` and `reconcile` use `/status/sync` and `/control/*` on the same address, guarded by the same token (see [DESIGN.md](docs/DESIGN.md#health-endpoints)). `ban` applies the same guards as CrowdSec decisions: it refuses private, loopback and link-local addresses, anything covered by `BLOCK_WHITELIST`, and ranges broader than /8 (IPv4) or /32 (IPv6). `drain` deletes the policies or rules first, then the shard objects and their database records, and finally the Cloudflare whitelist policies and lists.
 
 ---
 
