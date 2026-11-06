@@ -13,20 +13,23 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// zoneManagerProbe fails the test if a reload reaches the zone manager.
-type zoneManagerProbe struct {
+// legacyProbe is a firewall manager whose sites all use legacy mode: it has
+// no zone manager, and a reload must not reconcile or repair through it.
+type legacyProbe struct {
 	firewall.Manager
 	t *testing.T
 }
 
-func (p zoneManagerProbe) ZoneManager() *firewall.ZoneManager {
-	p.t.Error("reload reached the zone manager although ZONE_PAIRS is empty")
-	return nil
+func (legacyProbe) ZoneManager() *firewall.ZoneManager { return nil }
+
+func (p legacyProbe) Reconcile(context.Context, []string) (*firewall.ReconcileResult, error) {
+	p.t.Error("reload reconciled a legacy deployment")
+	return nil, nil
 }
 
-func (p zoneManagerProbe) Reconcile(context.Context, []string) (*firewall.ReconcileResult, error) {
-	p.t.Error("reload reconciled although ZONE_PAIRS is empty")
-	return nil, nil
+func (p legacyProbe) RepairInfrastructure(context.Context, []string) error {
+	p.t.Error("reload repaired a legacy deployment")
+	return nil
 }
 
 // reconcileProbe counts how a reload brings the controller in line.
@@ -101,21 +104,47 @@ func TestReloadZonesAfterTheGateOpensReconciles(t *testing.T) {
 // An empty ZONE_PAIRS on SIGHUP must leave the running configuration alone:
 // applying it would delete every block policy the bouncer manages.
 func TestReloadZonesKeepsConfigWhenZonePairsAreEmpty(t *testing.T) {
-	t.Setenv("UNIFI_URL", "https://192.168.1.1")
-	t.Setenv("UNIFI_API_KEY", "key")
-	t.Setenv("CROWDSEC_LAPI_KEY", "lapi-key")
+	probe := newReconcileProbe(t)
 	t.Setenv("FIREWALL_MODE", "auto")
 	t.Setenv("ZONE_PAIRS", "")
 
 	var out bytes.Buffer
 	log := zerolog.New(&out)
-	reloadZones(context.Background(), &config.Config{UnifiSites: []string{"default"}}, zoneManagerProbe{t: t}, func() bool { return true }, log)
+	reloadZones(context.Background(), &config.Config{UnifiSites: []string{"default"}}, probe, func() bool { return true }, log)
 
+	if probe.reconciled != 0 || probe.repaired != 0 {
+		t.Errorf("reconciled %d, repaired %d; want neither", probe.reconciled, probe.repaired)
+	}
 	if !strings.Contains(out.String(), "keeping the current zone pairs") {
 		t.Errorf("log output %q does not report the rejected reload", out.String())
 	}
 	if !strings.Contains(out.String(), `"level":"error"`) {
 		t.Errorf("log output %q is not at error level", out.String())
+	}
+}
+
+// A legacy deployment has no zone pairs, so an empty ZONE_PAIRS on SIGHUP is
+// not an error there: the reload takes the legacy skip path.
+func TestReloadZonesSkipsLegacyDeploymentsWithoutError(t *testing.T) {
+	for _, mode := range []string{"legacy", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("UNIFI_URL", "https://192.168.1.1")
+			t.Setenv("UNIFI_API_KEY", "key")
+			t.Setenv("CROWDSEC_LAPI_KEY", "lapi-key")
+			t.Setenv("FIREWALL_MODE", mode)
+			t.Setenv("ZONE_PAIRS", "")
+
+			var out bytes.Buffer
+			reloadZones(context.Background(), &config.Config{UnifiSites: []string{"default"}}, legacyProbe{t: t},
+				func() bool { return true }, zerolog.New(&out))
+
+			if !strings.Contains(out.String(), "SIGHUP: ZoneManager not available (legacy mode?), skipping reload") {
+				t.Errorf("log output %q does not take the legacy skip path", out.String())
+			}
+			if strings.Contains(out.String(), `"level":"error"`) {
+				t.Errorf("log output %q has an error for a legacy deployment", out.String())
+			}
+		})
 	}
 }
 

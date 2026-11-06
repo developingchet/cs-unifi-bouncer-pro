@@ -126,6 +126,13 @@ func reloadZones(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager
 		log.Warn().Err(err).Msg("SIGHUP: reload config failed")
 		return
 	}
+	// Legacy sites have no zone pairs to apply, so an empty ZONE_PAIRS is
+	// expected there and checked only once a site uses zone mode.
+	zm := fwMgr.ZoneManager()
+	if zm == nil {
+		log.Warn().Msg("SIGHUP: ZoneManager not available (legacy mode?), skipping reload")
+		return
+	}
 	newPairs, err := newCfg.ManagedZonePairs()
 	if err != nil {
 		log.Warn().Err(err).Msg("SIGHUP: parse zone pairs failed")
@@ -134,11 +141,6 @@ func reloadZones(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager
 	if len(newPairs) == 0 {
 		// Applying an empty set would delete every block policy as an orphan.
 		log.Error().Msg("SIGHUP: ZONE_PAIRS and EGRESS_ZONE_PAIRS name no zone pair; keeping the current zone pairs")
-		return
-	}
-	zm := fwMgr.ZoneManager()
-	if zm == nil {
-		log.Warn().Msg("SIGHUP: ZoneManager not available (legacy mode?), skipping reload")
 		return
 	}
 	if err := zm.Reload(ctx, cfg.UnifiSites, newPairs); err != nil {
