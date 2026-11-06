@@ -68,7 +68,10 @@ Behaviour that changes without action:
   still need one.
 - **Cloudflare pairs on SIGHUP**: while the Cloudflare whitelist runs, a
   SIGHUP applies a changed `CLOUDFLARE_ZONE_PAIRS` and syncs the whitelist
-  at once; before, it needed a restart. A failed sync fires
+  at once; before, it needed a restart. The new pairs take effect only once
+  the `ZONE_PAIRS` reload has succeeded. Pairs that name a zone a site does
+  not have refuse the whole reload (`SIGHUP: Cloudflare zone pairs refused;
+  keeping the current zone pairs`). A failed sync fires
   `cloudflare_whitelist_sync_failed` with the new phase `reload`.
 - **What SIGHUP does not apply**: a SIGHUP logs, at info, the names of
   changed settings it does not apply (`SIGHUP: changed settings take effect

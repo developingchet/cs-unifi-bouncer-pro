@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -78,6 +79,73 @@ func TestReloadZonesSyncsChangedCloudflarePairs(t *testing.T) {
 	defer syncer.mu.Unlock()
 	if len(syncer.synced) != 1 || !reflect.DeepEqual(syncer.synced[0], want) {
 		t.Errorf("synced %+v, want one sync of %+v", syncer.synced, want)
+	}
+}
+
+// cloudflareReloadFixture loads a running configuration with the Cloudflare
+// whitelist on, then points CLOUDFLARE_ZONE_PAIRS at newPairs for the reload.
+func cloudflareReloadFixture(t *testing.T, newPairs string) (*reconcileProbe, *config.Config, *cloudflarePairSource) {
+	t.Helper()
+	probe := newReconcileProbe(t)
+	t.Setenv("CLOUDFLARE_WHITELIST_ENABLED", "true")
+	t.Setenv("CLOUDFLARE_ZONE_PAIRS", "External->Internal")
+	running, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := cloudflarePairs(running)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLOUDFLARE_ZONE_PAIRS", newPairs)
+	return probe, running, newCloudflarePairSource(initial)
+}
+
+// A SIGHUP whose zone reload fails changes neither the zone pairs nor the
+// Cloudflare pairs.
+func TestReloadZonesKeepsCloudflarePairsWhenZoneReloadFails(t *testing.T) {
+	probe, running, source := cloudflareReloadFixture(t, "External->Dmz")
+	initial := source.Pairs()
+	probe.ctrl.SetError("DiscoverZones", errors.New("controller unavailable"))
+
+	var out bytes.Buffer
+	reloadZones(context.Background(), running, probe, source, func() bool { return true }, zerolog.New(&out))
+
+	if !strings.Contains(out.String(), "SIGHUP: zone reload failed") {
+		t.Errorf("log does not report the failed zone reload: %s", out.String())
+	}
+	if strings.Contains(out.String(), "Cloudflare zone pairs reloaded") {
+		t.Errorf("log reports a Cloudflare reload after the zone reload failed: %s", out.String())
+	}
+	if !reflect.DeepEqual(source.Pairs(), initial) {
+		t.Errorf("Cloudflare pairs = %+v after a failed reload, want %+v", source.Pairs(), initial)
+	}
+	select {
+	case <-source.Changed():
+		t.Error("a failed reload signalled a Cloudflare sync")
+	default:
+	}
+}
+
+// Cloudflare pairs that name a zone the controller does not have refuse the
+// whole reload, before the zone pairs change.
+func TestReloadZonesRefusesCloudflarePairsWithAnUnknownZone(t *testing.T) {
+	probe, running, source := cloudflareReloadFixture(t, "External->Nowhere")
+	initial := source.Pairs()
+	probe.ctrl.SetError("GetZoneID", errors.New(`zone "Nowhere" not found on this controller`))
+
+	var out bytes.Buffer
+	reloadZones(context.Background(), running, probe, source, func() bool { return true }, zerolog.New(&out))
+
+	if !strings.Contains(out.String(), "SIGHUP: Cloudflare zone pairs refused; keeping the current zone pairs") ||
+		!strings.Contains(out.String(), "Nowhere") {
+		t.Errorf("log does not name the unknown zone: %s", out.String())
+	}
+	if !reflect.DeepEqual(source.Pairs(), initial) {
+		t.Errorf("Cloudflare pairs = %+v after a refused reload, want %+v", source.Pairs(), initial)
+	}
+	if probe.reconciled != 0 || probe.repaired != 0 {
+		t.Errorf("reconciled %d, repaired %d; want neither", probe.reconciled, probe.repaired)
 	}
 }
 

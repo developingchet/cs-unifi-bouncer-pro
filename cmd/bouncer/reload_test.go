@@ -36,6 +36,7 @@ func (p legacyProbe) RepairInfrastructure(context.Context, []string) error {
 type reconcileProbe struct {
 	firewall.Manager
 	zm         *firewall.ZoneManager
+	ctrl       *testutil.MockController
 	reconciled int
 	repaired   int
 }
@@ -72,7 +73,7 @@ func newReconcileProbe(t *testing.T) *reconcileProbe {
 	zm := firewall.NewZoneManager(firewall.ZoneConfig{
 		ZonePairs: []config.ZonePair{{Src: "External", Dst: "Internal"}},
 	}, namer, ctrl, testutil.NewMockStore(), zerolog.Nop())
-	return &reconcileProbe{zm: zm}
+	return &reconcileProbe{zm: zm, ctrl: ctrl}
 }
 
 // A SIGHUP before the startup reconcile gate opens must not reconcile bans:

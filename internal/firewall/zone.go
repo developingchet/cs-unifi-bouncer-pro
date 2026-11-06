@@ -210,6 +210,19 @@ func (zm *ZoneManager) Reload(ctx context.Context, sites []string, pairs []confi
 	return nil
 }
 
+// CheckZones reports an error naming the first of names that is not a zone of
+// site, read fresh from the controller. A setting that names zones, such as
+// CLOUDFLARE_ZONE_PAIRS, is checked with it before it is applied.
+func (zm *ZoneManager) CheckZones(ctx context.Context, site string, names []string) error {
+	zm.ctrl.InvalidateZoneCache(site)
+	for _, name := range names {
+		if _, err := zm.ctrl.GetZoneID(ctx, site, name); err != nil {
+			return fmt.Errorf("resolve zone %q for site %q: %w", name, site, err)
+		}
+	}
+	return nil
+}
+
 func validateZoneNetworks(site string, pairs []config.ZonePair, zones []controller.Zone) error {
 	used := make(map[string]bool, len(pairs)*2)
 	for _, pair := range pairs {

@@ -88,22 +88,45 @@ func (s *cloudflarePairSource) Changed() <-chan struct{} {
 	return s.changed
 }
 
-// reloadCloudflarePairs hands the reloaded CLOUDFLARE_ZONE_PAIRS to the
-// whitelist. It reports whether they were applied: only when the whitelist
-// runs and stays enabled. Turning the whitelist on or off needs a restart.
-func reloadCloudflarePairs(source *cloudflarePairSource, newCfg *config.Config, log zerolog.Logger) bool {
+// reloadedCloudflarePairs returns the reloaded CLOUDFLARE_ZONE_PAIRS and
+// whether a reload applies them: only when the whitelist runs and stays
+// enabled. Turning the whitelist on or off needs a restart.
+func reloadedCloudflarePairs(source *cloudflarePairSource, newCfg *config.Config, log zerolog.Logger) ([]whitelist.ZonePairConfig, bool) {
 	if source == nil || !newCfg.CloudflareWhitelistEnabled {
-		return false
+		return nil, false
 	}
 	pairs, err := cloudflarePairs(newCfg)
 	if err != nil {
 		log.Warn().Err(err).Msg("SIGHUP: parse Cloudflare zone pairs failed")
-		return false
+		return nil, false
 	}
+	return pairs, true
+}
+
+// publishCloudflarePairs hands reloaded Cloudflare pairs to the whitelist,
+// which syncs them at once when they changed.
+func publishCloudflarePairs(source *cloudflarePairSource, pairs []whitelist.ZonePairConfig, log zerolog.Logger) {
 	if source.Set(pairs) {
 		log.Info().Msg("SIGHUP: Cloudflare zone pairs reloaded; the whitelist syncs them now")
 	}
-	return true
+}
+
+// checkCloudflareZones reports an error naming the first zone of the
+// Cloudflare pairs that a site does not have.
+func checkCloudflareZones(ctx context.Context, zm *firewall.ZoneManager, sites []string, pairs []whitelist.ZonePairConfig) error {
+	for _, site := range sites {
+		var names []string
+		for _, pair := range config.SitePairs(pairs, site, func(p whitelist.ZonePairConfig) string { return p.Site }) {
+			names = append(names, pair.SrcName, pair.DstName)
+		}
+		if len(names) == 0 {
+			continue
+		}
+		if err := zm.CheckZones(ctx, site, names); err != nil {
+			return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: %w", err)
+		}
+	}
+	return nil
 }
 
 // startCloudflareWhitelist runs the first Cloudflare whitelist sync and returns

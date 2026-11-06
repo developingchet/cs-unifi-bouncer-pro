@@ -124,7 +124,9 @@ var reloadedOnSIGHUP = []string{"ZONE_PAIRS", "EGRESS_ZONE_PAIRS"}
 // reloadZones reads the configuration again and applies its zone pairs. The
 // whole configuration must load: one that fails validation would also fail
 // the next restart, so it is refused with its error and nothing changes.
-// Other changed settings are listed, by name only, as needing a restart.
+// The Cloudflare pairs are handed over only once the zone pairs are in
+// effect, so a refused zone reload leaves both as they were. Other changed
+// settings are listed, by name only, as needing a restart.
 func reloadZones(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager, cf *cloudflarePairSource,
 	reconcilesOpen func() bool, log zerolog.Logger,
 ) {
@@ -138,7 +140,8 @@ func reloadZones(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager
 		return
 	}
 	applied := reloadedOnSIGHUP
-	if reloadCloudflarePairs(cf, newCfg, log) {
+	cfPairs, cfApplies := reloadedCloudflarePairs(cf, newCfg, log)
+	if cfApplies {
 		applied = append(slices.Clone(applied), "CLOUDFLARE_ZONE_PAIRS")
 	}
 	if changed := config.ChangedSettings(cfg, newCfg, applied...); len(changed) > 0 {
@@ -148,6 +151,9 @@ func reloadZones(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager
 	// expected there and checked only once a site uses zone mode.
 	zm := fwMgr.ZoneManager()
 	if zm == nil {
+		if cfApplies {
+			publishCloudflarePairs(cf, cfPairs, log)
+		}
 		log.Warn().Msg("SIGHUP: ZoneManager not available (legacy mode?), skipping reload")
 		return
 	}
@@ -161,11 +167,28 @@ func reloadZones(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager
 		log.Error().Msg("SIGHUP: ZONE_PAIRS and EGRESS_ZONE_PAIRS name no zone pair; keeping the current zone pairs")
 		return
 	}
+	if cfApplies {
+		if err := checkCloudflareZones(ctx, zm, cfg.UnifiSites, cfPairs); err != nil {
+			log.Warn().Err(err).Msg("SIGHUP: Cloudflare zone pairs refused; keeping the current zone pairs")
+			return
+		}
+	}
 	if err := zm.Reload(ctx, cfg.UnifiSites, newPairs); err != nil {
 		log.Warn().Err(err).Msg("SIGHUP: zone reload failed")
 		return
 	}
+	if cfApplies {
+		publishCloudflarePairs(cf, cfPairs, log)
+	}
 	logSitePairs(newCfg, cfg.UnifiSites, log)
+	enforceReloadedPairs(ctx, cfg, fwMgr, reconcilesOpen, log)
+}
+
+// enforceReloadedPairs brings the controller in line with zone pairs a
+// SIGHUP has just applied.
+func enforceReloadedPairs(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager,
+	reconcilesOpen func() bool, log zerolog.Logger,
+) {
 	if !reconcilesOpen() {
 		// A full reconcile also removes controller members the ban database
 		// does not hold. Until the startup gate opens the database may be
