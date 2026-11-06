@@ -130,7 +130,10 @@ func passFrom(ctx context.Context) *listingPass {
 }
 
 // listThrough returns the pass's copy of a listing, or fetches it and keeps a
-// copy for the rest of the pass. Outside a pass it only fetches.
+// copy for the rest of the pass. Outside a pass it only fetches. The copies
+// are shallow: the slices inside the listed objects, such as a list's items,
+// are shared with the pass and with every other caller, so a caller must not
+// change them in place.
 func listThrough[T any](ctx context.Context, key siteKey, pick func(*siteListings) *collection[T],
 	fetch func() ([]T, error)) ([]T, error) {
 	p := passFrom(ctx)
@@ -236,11 +239,12 @@ func recordDelete[T any](key siteKey, pick func(*siteListings) *collection[T], e
 }
 
 // refused reports whether the controller turned a write down without
-// changing anything.
+// changing anything: a 400, a 409 or a 429.
 func refused(err error) bool {
 	var bad *ErrBadRequest
+	var conflict *ErrConflict
 	var rl *ErrRateLimit
-	return errors.As(err, &bad) || errors.As(err, &rl)
+	return errors.As(err, &bad) || errors.As(err, &conflict) || errors.As(err, &rl)
 }
 
 // upsert replaces the listed object with v's ID by v, or appends v.

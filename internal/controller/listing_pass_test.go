@@ -122,6 +122,15 @@ func TestListingPassFailedWrites(t *testing.T) {
 		t.Fatalf("a refused write dropped the listing: %d listings, want 1", got)
 	}
 
+	mock.SetError("CreateTrafficMatchingList", &controller.ErrConflict{Msg: "name in use"})
+	if _, err := c.CreateTrafficMatchingList(ctx, passSite, controller.TrafficMatchingList{Name: "list-a"}); err == nil {
+		t.Fatal("create succeeded, want the injected conflict")
+	}
+	listNames(t, ctx, c)
+	if got := mock.Calls("ListTrafficMatchingLists"); got != 1 {
+		t.Fatalf("a conflicting write dropped the listing: %d listings, want 1", got)
+	}
+
 	mock.SetError("UpdateTrafficMatchingList", errors.New("connection reset"))
 	if err := c.UpdateTrafficMatchingList(ctx, passSite, controller.TrafficMatchingList{ID: "a", Name: "x"}); err == nil {
 		t.Fatal("update succeeded, want the injected failure")
