@@ -724,6 +724,14 @@ The cleanup requires ownership evidence from the database or a static name prefi
 
 **Fix:** Move the ALLOW after the `crowdsec-policy-egress-*` policies in **Settings → Policy Table**, or narrow it so it no longer matches the traffic the egress pair should block. The warning is logged again only when the set of such ALLOW policies changes.
 
+### Log warns that zone-based sites have no policy to enforce IPv6 bans
+
+**Symptom:** At startup, `FIREWALL_ENABLE_IPV6 is on, but every ZONE_PAIRS pair is limited to IPv4 destination addresses, so zone-based sites have no policy to enforce IPv6 bans`.
+
+**Cause:** A pair with only IPv4 destination addresses (`@192.168.1.10`) gets no IPv6 block policy, because IPv6 traffic never reaches those addresses. When every pair is like that and no `EGRESS_ZONE_PAIRS` pair exists, IPv6 bans are still written to an IPv6 shard list, but no policy uses it.
+
+**Fix:** Set `FIREWALL_ENABLE_IPV6=false` if the protected hosts have no IPv6 addresses, or add a pair, or an IPv6 destination, that IPv6 traffic can match.
+
 ---
 
 ## Sync Issues
