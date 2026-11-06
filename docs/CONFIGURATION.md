@@ -12,7 +12,7 @@ UNIFI_PASSWORD=mypassword
 UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 ```
 
-`ZONE_PAIRS_FILE` and `EGRESS_ZONE_PAIRS_FILE` read the zone pairs from a file in the same way. Each line holds one pair (or a list in the variable's own syntax); blank lines and lines starting with `#` are skipped. A file setting takes precedence over the plain variable. The files are read again on SIGHUP, which is how pairs change without a restart (see [SIGHUP Hot-Reload](../README.md#sighup-hot-reload)).
+`ZONE_PAIRS_FILE` and `EGRESS_ZONE_PAIRS_FILE` read the zone pairs from a file in the same way. Each line holds one pair (or a list in the variable's own syntax); blank lines and lines starting with `#` are skipped. A file setting takes precedence over the plain variable. The files are read again on SIGHUP, which is how pairs change without a restart; mount the directory that holds the file rather than the file itself, and on Kubernetes do not use `subPath` (see [SIGHUP Hot-Reload](../README.md#sighup-hot-reload)).
 
 ```text
 # /config/zone-pairs

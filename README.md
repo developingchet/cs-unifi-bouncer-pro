@@ -192,15 +192,15 @@ zone_discovery[default]  PASS    3 zones found
 Sending `SIGHUP` to the running daemon reloads the zone pairs (`ZONE_PAIRS` and `EGRESS_ZONE_PAIRS`) without a restart. A running process cannot see a changed `.env`, `EnvironmentFile` or ConfigMap environment, so pairs that should change live go in files named by `ZONE_PAIRS_FILE` and `EGRESS_ZONE_PAIRS_FILE`, one pair per line, and the reload reads those files again:
 
 ```bash
-# Docker: mount the file, for example ./zone-pairs:/config/zone-pairs:ro,
-# with ZONE_PAIRS_FILE=/config/zone-pairs, edit it, then
+# Docker: mount the directory holding the file, for example ./config:/config:ro,
+# with ZONE_PAIRS_FILE=/config/zone-pairs, edit ./config/zone-pairs, then
 docker kill --signal=HUP cs-unifi-bouncer-pro
 
 # systemd: ExecReload=/bin/kill -HUP $MAINPID maps to the SIGHUP handler
 systemctl reload cs-unifi-bouncer-pro
 ```
 
-Pairs set directly in the environment change only with a restart; a SIGHUP then re-resolves the same pairs and repairs their policies. On Kubernetes, mount a ConfigMap key as the pairs file, or roll the deployment.
+Mount a directory, not the file itself: many editors save by replacing the file, and a single-file bind mount keeps showing the container the old one. On Kubernetes, mount the ConfigMap as a volume without `subPath` (a `subPath` mount never receives updates) and allow up to a minute for the kubelet to update it before the SIGHUP, or roll the deployment. Pairs set directly in the environment change only with a restart; a SIGHUP then re-resolves the same pairs and repairs their policies.
 
 On receipt, the daemon performs a **validate-then-commit** reload:
 
