@@ -59,15 +59,18 @@ EOF
 chmod 600 .env
 ```
 
-**Get your UniFi API key** from: **Settings → Control Plane → API Keys**
+**Get your UniFi API key** from: **Settings → Control Plane → Integrations**
 
 For all available configuration options, see [CONFIGURATION.md](CONFIGURATION.md).
 
-### Step 4: Start
+### Step 4: Check Network Connectivity
 
-The bouncer needs to reach both your CrowdSec LAPI and your UniFi controller. Ensure that:
-- `CROWDSEC_LAPI_URL` (defaults to `https://crowdsec:8080`) is reachable from inside the bouncer container
-- `UNIFI_URL` is reachable from inside the bouncer container
+The bouncer needs to reach both your CrowdSec LAPI and your UniFi controller from inside its container:
+
+- `CROWDSEC_LAPI_URL` defaults to `https://crowdsec:8080`.
+- `UNIFI_URL` must be reachable from the container, typically `https://192.168.1.1`.
+
+The standalone compose file passes only the variables listed under `environment:` to the container. To use another LAPI URL, set `CROWDSEC_LAPI_URL` in `.env` and uncomment its line in `docker-compose.standalone.yml`; an `http://` URL also needs the `CROWDSEC_LAPI_ALLOW_HTTP=true` line. Add other settings from [CONFIGURATION.md](CONFIGURATION.md) to that list the same way.
 
 If CrowdSec is in a separate container, you may need to connect them to the same Docker network, or use an IP address instead of a hostname.
 
@@ -87,9 +90,9 @@ docker exec crowdsec cscli bouncers list
 # Health check
 curl -s http://localhost:8081/healthz
 
-# Test with a manual decision
+# Test with a manual decision, then look it up in the bouncer's database
 docker exec crowdsec cscli decisions add -i 203.0.113.42 -t ban -d 1h -r "setup test"
-docker logs -f cs-unifi-bouncer-pro | grep 203.0.113.42
+docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status ip 203.0.113.42
 # Clean up
 docker exec crowdsec cscli decisions delete --ip 203.0.113.42
 ```
@@ -187,10 +190,10 @@ windows, exclusion filter, refresh interval, and trusted mirror URL option.
 
 #### Using API key authentication (recommended)
 
-UniFi Network ≥ 8.1 supports API key authentication, which is more secure than username/password:
+An API key needs no login session and is the only way to manage zone-based firewall policies:
 
-1. In the UniFi console, go to **Settings → Control Plane → API Keys**
-2. Create a key with the minimum required permissions (read/write on Firewall)
+1. In the UniFi console, go to **Settings → Control Plane → Integrations**
+2. Create an API key
 3. Set `UNIFI_API_KEY` in `.env`
 
 #### Using username/password authentication
@@ -317,17 +320,13 @@ Inject a public test IP and confirm the bouncer processes it:
 # Add a test ban
 docker exec crowdsec cscli decisions add -i 203.0.113.42 -t ban -d 1h -r "setup test"
 
-# Watch the bouncer logs
-docker logs -f cs-unifi-bouncer-pro | grep 203.0.113.42
+# Look the address up in the bouncer's database
+docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status ip 203.0.113.42
 ```
 
-You should see a log line similar to:
+Individual bans are not logged at the default `info` level. Within `SYNC_INTERVAL` (default 30 s) the shard holding the address is written, logged as `shard flushed to UniFi`. At `LOG_LEVEL=debug` each decision also logs `job applied` with `"action":"ban"` and the address.
 
-```json
-{"level":"info","action":"ban","ip":"203.0.113.42","site":"default","msg":"ban applied"}
-```
-
-Verify the IP appears in the UniFi firewall group or zone policy, then clean up:
+Verify the IP appears in a `crowdsec-block-v4-*` group (legacy mode) or traffic matching list (zone mode), then clean up:
 
 ```bash
 docker exec crowdsec cscli decisions delete --ip 203.0.113.42
