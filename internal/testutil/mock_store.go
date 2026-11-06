@@ -145,6 +145,28 @@ func (m *MockStore) BanList() (map[string]storage.BanEntry, error) {
 	return copyMap(m.bans), nil
 }
 
+func (m *MockStore) BanCount() (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.check("BanCount"); err != nil {
+		return 0, err
+	}
+	return len(m.bans), nil
+}
+
+func (m *MockStore) BanKeys() (map[string]struct{}, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.check("BanKeys"); err != nil {
+		return nil, err
+	}
+	keys := make(map[string]struct{}, len(m.bans))
+	for ip := range m.bans {
+		keys[ip] = struct{}{}
+	}
+	return keys, nil
+}
+
 // --- Group cache ------------------------------------------------------------
 
 func (m *MockStore) GetGroup(name string) (*storage.GroupRecord, error) {

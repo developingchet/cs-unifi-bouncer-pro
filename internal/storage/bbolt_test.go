@@ -81,6 +81,36 @@ func TestBanPutExistsDelete(t *testing.T) {
 	}
 }
 
+func TestBanCountAndKeys(t *testing.T) {
+	s := newTestStore(t)
+	if n, err := s.BanCount(); err != nil || n != 0 {
+		t.Fatalf("BanCount of an empty store = %d, %v; want 0", n, err)
+	}
+	for _, ip := range []string{"192.0.2.1", "192.0.2.2", "2001:db8::1"} {
+		if err := putBan(s, ip, time.Time{}, ip == "2001:db8::1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.BanDelete("192.0.2.2"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.BanCount(); err != nil || n != 2 {
+		t.Errorf("BanCount = %d, %v; want 2", n, err)
+	}
+	keys, err := s.BanKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 2 {
+		t.Errorf("BanKeys = %v, want 2 keys", keys)
+	}
+	for _, ip := range []string{"192.0.2.1", "2001:db8::1"} {
+		if _, ok := keys[ip]; !ok {
+			t.Errorf("BanKeys is missing %s", ip)
+		}
+	}
+}
+
 func TestBanEntryExpiresAt(t *testing.T) {
 	s := newTestStore(t)
 	const ip = "5.6.7.8"

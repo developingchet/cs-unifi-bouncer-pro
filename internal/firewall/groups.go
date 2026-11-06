@@ -396,6 +396,13 @@ func (sm *ShardManager) Contains(ip string) bool {
 	return ok
 }
 
+// Len returns the number of IPs across all shards.
+func (sm *ShardManager) Len() int {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return len(sm.fam.ipOwner)
+}
+
 // AllMembers returns all IPs across all shards.
 func (sm *ShardManager) AllMembers() []string {
 	sm.mu.RLock()

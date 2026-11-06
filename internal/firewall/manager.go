@@ -637,29 +637,16 @@ func (m *managerImpl) shardMgr(site string, ipv6 bool) *ShardManager {
 	return m.v4Mgrs[site]
 }
 
-// UpdateActiveBansMetric updates the active_bans gauge from bbolt.
-func (m *managerImpl) UpdateActiveBansMetric() {
-	bans, err := m.store.BanList()
-	if err != nil {
-		m.log.Warn().Err(err).Msg("failed to load ban list for metrics")
-		return
-	}
-
-	// Count per site (approximate — bans are site-independent in bbolt)
-	v4Count := 0
-	v6Count := 0
-	for _, entry := range bans {
-		if entry.IPv6 {
-			v6Count++
-		} else {
-			v4Count++
+// updateActiveBansMetric sets the active_bans gauge of each site from the
+// addresses in its shards, which include bans not yet on the controller.
+func (m *managerImpl) updateActiveBansMetric(sites []string) {
+	for _, site := range sites {
+		v4, v6 := m.siteShardMgrs(site)
+		if v4 != nil {
+			metrics.ActiveBans.WithLabelValues("v4", site).Set(float64(v4.Len()))
 		}
-	}
-
-	for _, site := range m.sites {
-		metrics.ActiveBans.WithLabelValues("v4", site).Set(float64(v4Count))
-		if m.cfg.EnableIPv6 {
-			metrics.ActiveBans.WithLabelValues("v6", site).Set(float64(v6Count))
+		if v6 != nil {
+			metrics.ActiveBans.WithLabelValues("v6", site).Set(float64(v6.Len()))
 		}
 	}
 }

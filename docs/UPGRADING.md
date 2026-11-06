@@ -89,6 +89,9 @@ Behaviour that changes without action:
 - **Decision types**: `BLOCK_DECISION_TYPES` is new and defaults to `ban`,
   so captcha and other non-ban decisions are still ignored until it lists
   them (see [CONFIGURATION.md](CONFIGURATION.md#decision-filtering)).
+- **`crowdsec_unifi_active_bans` per site**: the gauge counts the addresses in
+  each site's shards, so a site whose ban could not be applied shows fewer.
+  Before, every site showed the size of the whole ban database.
 
 Renamed settings. The old names keep working with the same effect, and each
 one in use logs a deprecation warning at startup:

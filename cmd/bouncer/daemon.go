@@ -166,12 +166,8 @@ func runDaemon() error {
 	// Reconcile removes controller IPs the ban database does not hold. A fresh
 	// or lost database holds nothing until the first LAPI batch arrives, so
 	// reconciling earlier would strip every enforced ban from the controller.
-	banCount := func() (int, error) {
-		bans, err := store.BanList()
-		return len(bans), err
-	}
 	bnc.OnStartupSynced(health.MarkSynced)
-	gateReconciles(ctx, bnc.OnStartupSynced, banCount, startupReconcileFallback, func() {
+	gateReconciles(ctx, bnc.OnStartupSynced, store.BanCount, startupReconcileFallback, func() {
 		reconcilesOpen.Store(true)
 		go func() {
 			if cfg.FirewallReconcileOnStart {

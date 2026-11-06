@@ -168,6 +168,29 @@ func (s *bboltStore) BanList() (map[string]BanEntry, error) {
 	return result, err
 }
 
+// BanCount returns the number of stored bans without decoding them.
+func (s *bboltStore) BanCount() (int, error) {
+	var n int
+	err := s.db.View(func(tx *bolt.Tx) error {
+		n = tx.Bucket([]byte(bucketBans)).Stats().KeyN
+		return nil
+	})
+	return n, err
+}
+
+// BanKeys returns the address of every stored ban without decoding them.
+func (s *bboltStore) BanKeys() (map[string]struct{}, error) {
+	keys := make(map[string]struct{})
+	err := s.db.View(func(tx *bolt.Tx) error {
+		cursor := tx.Bucket([]byte(bucketBans)).Cursor()
+		for k, _ := cursor.First(); k != nil; k, _ = cursor.Next() {
+			keys[string(k)] = struct{}{}
+		}
+		return nil
+	})
+	return keys, err
+}
+
 // ---- Group cache -----------------------------------------------------------
 
 func (s *bboltStore) GetGroup(name string) (*GroupRecord, error) {

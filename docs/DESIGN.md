@@ -330,7 +330,7 @@ A shard whose write fails stays dirty and is retried at the next `SYNC_INTERVAL`
 - **Capacity**: a shard holds up to `SHARD_LIMIT`, or the smaller `SHARD_LIMIT_V4` or `SHARD_LIMIT_V6` for its family, at most 10,000. Addresses are bin-packed: each shard fills before a new one is created. A new shard takes the number after the highest one in use and gets its rule or policies when its list first exists on the controller.
 - **Rebalance**: a shard at or below `SHARD_MERGE_THRESHOLD` addresses (default half the capacity) is drained into others when they have room, and its rule or policies and list are deleted once its members are written elsewhere. Empty trailing shards, shard 0 included, are pruned the same way at the next reconcile. Until then an emptied shard holds a documentation address (`192.0.2.1` or `2001:db8::1`), because the controller refuses an empty list; a shard list found holding only that address at startup is deleted together with its rule or policies. The next ban of the family creates a shard again.
 - **Pacing**: `FIREWALL_API_SHARD_DELAY` spaces out structural writes (rule creates, a new shard's policies, group deletes); membership `PUT`s are not delayed.
-- **Reconcile**: compares each shard manager with the controller and with bbolt, adds missing addresses, removes extra ones (each change re-checked against bbolt just before it is made), and rewrites groups edited outside the bouncer.
+- **Reconcile**: compares each shard manager with the controller and with bbolt, adds missing addresses, removes extra ones (each difference is confirmed against the bbolt keys, read again after the shards, so bans applied or lifted during a long reconcile are not undone), and rewrites groups edited outside the bouncer.
 
 ### Circuit breaker and rate limits
 
@@ -375,7 +375,7 @@ bbolt provides ACID transactions with a single writer at a time, and the daemon 
 
 The startup reconcile runs once the [reconcile gate](#startup-sequence) opens and `FIREWALL_RECONCILE_ON_START=true`. It and every periodic reconcile:
 
-1. Read all active bans from bbolt
+1. Read all active bans from bbolt, once for all sites
 2. Read every managed group or list from the controller
 3. Compute the difference per site and family
 4. Add missing addresses and remove unexpected ones, then write the changed shards
@@ -471,7 +471,7 @@ The per-pair filter lists, staged policies and Cloudflare whitelist objects have
 | `crowdsec_unifi_decisions_filtered_total` | Counter | `stage`, `reason` | Decisions rejected at each filter stage |
 | `crowdsec_unifi_decisions_in_flight` | Gauge | | Decisions currently being processed by the job handler |
 | `crowdsec_unifi_decision_latency_seconds` | Histogram | | Time from receiving a ban decision to recording it in the ban database and in-memory shard. Measured before the controller write, so it does not include UniFi API time; use `shard_sync_duration_seconds` and `unsynced_ips` for that. Buckets: 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0 s |
-| `crowdsec_unifi_active_bans` | Gauge | `family`, `site` | Bans the bouncer tracks, including any not yet on the controller |
+| `crowdsec_unifi_active_bans` | Gauge | `family`, `site` | Addresses in the site's shards, including any not yet on the controller, set at each sync and reconcile |
 | `crowdsec_unifi_unsynced_ips` | Gauge | `family`, `site` | Bans held in shards that are not enforced yet: the shard object or its block policy/rule is missing on the controller, or the controller refused the entry itself. Alert when above 0 for more than a few minutes |
 | `crowdsec_unifi_api_calls_total` | Counter | `endpoint`, `status`, `site` | UniFi API calls. `site` is empty for calls that belong to no site, such as the ping and the site list |
 | `crowdsec_unifi_api_duration_seconds` | Histogram | `endpoint`, `site` | UniFi API call latency |

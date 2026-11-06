@@ -246,10 +246,10 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 			v4Total := 0
 			v6Total := 0
 			if v4 != nil {
-				v4Total = len(v4.AllMembers())
+				v4Total = v4.Len()
 			}
 			if v6 != nil {
-				v6Total = len(v6.AllMembers())
+				v6Total = v6.Len()
 			}
 			m.log.Info().
 				Str("site", site).
@@ -260,8 +260,6 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 		}
 	}
 
-	// Update active_bans gauge from bbolt after every sync tick.
-	m.UpdateActiveBansMetric()
 	syncErrors = m.settleProbe(ctx, syncErrors)
 	if len(syncErrors) == 0 && !deferred {
 		metrics.LastSyncTimestamp.Set(float64(time.Now().Unix()))
@@ -269,7 +267,8 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 	return errors.Join(syncErrors...)
 }
 
-// refreshShardMetrics brings the shard gauges of sites up to date.
+// refreshShardMetrics brings the shard gauges and active_bans of sites up
+// to date.
 func (m *managerImpl) refreshShardMetrics(sites []string) {
 	for _, site := range sites {
 		v4, v6 := m.siteShardMgrs(site)
@@ -279,6 +278,7 @@ func (m *managerImpl) refreshShardMetrics(sites []string) {
 			}
 		}
 	}
+	m.updateActiveBansMetric(sites)
 }
 
 // siteShardMgrs returns the IPv4 and IPv6 shard managers of site; either may be nil.

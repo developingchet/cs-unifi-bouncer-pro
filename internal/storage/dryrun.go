@@ -44,6 +44,18 @@ func (s *dryRunStore) BanList() (map[string]BanEntry, error) {
 	}
 	return s.base.BanList()
 }
+func (s *dryRunStore) BanCount() (int, error) {
+	if s.base == nil {
+		return 0, nil
+	}
+	return s.base.BanCount()
+}
+func (s *dryRunStore) BanKeys() (map[string]struct{}, error) {
+	if s.base == nil {
+		return map[string]struct{}{}, nil
+	}
+	return s.base.BanKeys()
+}
 func (s *dryRunStore) BanPut(string, BanEntry) error        { return nil }
 func (s *dryRunStore) BanPutMany(map[string]BanEntry) error { return nil }
 func (s *dryRunStore) BanDelete(string) error               { return nil }

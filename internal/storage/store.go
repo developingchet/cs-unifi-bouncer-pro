@@ -49,6 +49,9 @@ type Store interface {
 	BanPutMany(entries map[string]BanEntry) error
 	BanDelete(ip string) error
 	BanList() (map[string]BanEntry, error)
+	// BanCount and BanKeys read the ban bucket without decoding its entries.
+	BanCount() (int, error)
+	BanKeys() (map[string]struct{}, error)
 
 	// Group cache
 	GetGroup(name string) (*GroupRecord, error)
