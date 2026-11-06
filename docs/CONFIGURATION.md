@@ -118,7 +118,7 @@ UNIFI_SITES=default,homelab,iot
 | `SHARD_LIMIT_V4` | — | No | Maximum IPs per IPv4 shard, 1 to 10000. `0` or unset uses `SHARD_LIMIT`; a value above `SHARD_LIMIT` is capped at it. |
 | `SHARD_LIMIT_V6` | — | No | Maximum IPs per IPv6 shard, 1 to 10000. `0` or unset uses `SHARD_LIMIT`; a value above `SHARD_LIMIT` is capped at it. |
 | `SHARD_MERGE_THRESHOLD` | `0` | No | IPs at or below this count make a shard eligible for consolidation into another shard. `0` = auto (50% of `SHARD_LIMIT`). `-1` disables rebalancing. |
-| `CIRCUIT_BREAKER_THRESHOLD` | `5` | No | Consecutive shard sync failures before the circuit breaker opens and suspends syncs. Must be at least 1. |
+| `CIRCUIT_BREAKER_THRESHOLD` | `5` | No | Consecutive controller failures before the circuit breaker opens and suspends syncs. A failed shard write counts unless the controller answered 400 or 429; a failed reconcile read or policy or rule check counts when it suggests the controller is unreachable or failing (a transport error, a timeout, a 5xx or a 401), not when it answers 400, 404, 409 or 429. Must be at least 1. |
 | `CIRCUIT_BREAKER_RESET_INTERVAL` | `60s` | No | How long the open breaker waits before allowing a probe request (half-open). Must be greater than 0. |
 
 `FIREWALL_GROUP_CAPACITY`, `FIREWALL_GROUP_CAPACITY_V4` and `FIREWALL_GROUP_CAPACITY_V6` are the deprecated names of the shard limits. They still work, and each logs a deprecation warning at startup. A family's capacity is the first of these that is set and non-zero, capped at `SHARD_LIMIT`: `SHARD_LIMIT_V4` (or `_V6`), then `FIREWALL_GROUP_CAPACITY_V4` (or `_V6`), then `FIREWALL_GROUP_CAPACITY`. With none of them set, a family uses `SHARD_LIMIT`.
@@ -484,7 +484,7 @@ The database contains four bbolt buckets:
 | `policies` | Zone policy / legacy rule cache |
 | `events` | Ban audit trail ring buffer (see [Ban History](#ban-history)) |
 
-The daemon holds an exclusive lock on `bouncer.db`. `status` works while it runs (see below); `reconcile`, `drain`, `ban` and `unban` open the file themselves and need the daemon stopped first.
+The daemon holds an exclusive lock on `bouncer.db`. `status` works while it runs (see below), and `reconcile`, `ban` and `unban`, run inside its container, ask the running daemon to do the work through `HEALTH_ADDR`. `drain` always opens the file itself, so it needs the daemon stopped first.
 
 ---
 
@@ -599,7 +599,7 @@ The bouncer can POST a JSON notification to a webhook URL when significant event
 
 | Event | Fired when | `detail` |
 |-------|-----------|----------|
-| `circuit_breaker_open` | The circuit breaker opens after consecutive sync failures | omitted |
+| `circuit_breaker_open` | The circuit breaker opens after consecutive controller failures (see `CIRCUIT_BREAKER_THRESHOLD`) | omitted |
 | `circuit_breaker_close` | The circuit breaker resets to closed after a successful probe | omitted |
 | `reconcile_drift` | A periodic reconcile adds and removes 100 or more IPs in total (`added + removed >= 100`). The startup reconcile does not fire it. | `{"added": N, "removed": N}` |
 | `firewall_mode_changed` | The bouncer exits because a site loaded in legacy mode now needs zone mode (see [Firewall mode details](#firewall-mode-details)); its restart policy starts it again | `{"site": "...", "reason": "..."}` |

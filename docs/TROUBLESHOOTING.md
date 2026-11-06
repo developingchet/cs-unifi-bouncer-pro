@@ -230,7 +230,7 @@ docker compose up -d --force-recreate cs-unifi-bouncer-pro
 
 For a bind mount, `chown -R 65532:65532` the host directory.
 
-The same error, with a timeout instead of `permission denied`, means another process holds the database: an offline command (`reconcile`, `drain`, `ban`, `unban`) cannot run while the daemon is up.
+The same error, with a timeout instead of `permission denied`, means another process holds the database: `drain` cannot run while the daemon is up. `reconcile`, `ban` and `unban` do not need it stopped: run them inside its container and they hand the work to it.
 
 #### `operation not permitted` — seccomp blocked a storage syscall
 
@@ -379,7 +379,7 @@ The `stage` label on the metric identifies which step rejected the decision:
 
 | `stage` | Cause | Fix |
 |---------|-------|-----|
-| `1_action` | Decision type is neither `ban` nor `delete` (e.g. `captcha`) | Expected — only bans are enforced |
+| `1_action` | Decision type not in `BLOCK_DECISION_TYPES` (default `ban`), such as `captcha` | Expected for types you do not enforce; list a type in `BLOCK_DECISION_TYPES` (`ban,captcha`) to block it like a ban |
 | `2_scenario_exclude` | Scenario matches `BLOCK_SCENARIO_EXCLUDE` | Expected — excluded scenarios are intentional |
 | `3_origin` | Origin not in `CROWDSEC_ORIGINS` | Lower or remove `CROWDSEC_ORIGINS` |
 | `4_scope` | Scope is not `ip` or `range` (e.g. ASN, country) | UniFi only accepts single IPs and CIDRs; this is a limitation |
@@ -790,9 +790,12 @@ consecutive sync failures`, then `SyncDirty skipped` with the error
 `sync deferred: controller circuit breaker open` on each tick.
 
 **Cause:** The bouncer has seen `CIRCUIT_BREAKER_THRESHOLD` (default: 5)
-consecutive sync failures — typically due to the UniFi controller being
-unreachable or returning 5xx errors. A controller that answers HTTP 400
-(it refused the content of one shard) does not count toward the breaker.
+consecutive controller failures — typically due to the UniFi controller being
+unreachable or returning 5xx errors. Failed shard writes count, and so do
+reconcile reads and policy or rule checks that fail with a transport error,
+a timeout, a 5xx or a 401. A controller that answers HTTP 400 (it refused the
+content of one shard) or 429 does not count toward the breaker, nor does a
+404 or 409 on a reconcile read or check.
 
 **Resolution:**
 1. Check UniFi controller health and network connectivity from the bouncer container.

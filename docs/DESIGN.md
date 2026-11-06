@@ -343,12 +343,14 @@ A controller that answers `429 Too Many Requests` opens a rate-limit window of i
 ```mermaid
 stateDiagram-v2
     [*] --> Closed
-    Closed --> Open: CIRCUIT_BREAKER_THRESHOLD consecutive sync failures
+    Closed --> Open: CIRCUIT_BREAKER_THRESHOLD consecutive controller failures
     Open --> HalfOpen: CIRCUIT_BREAKER_RESET_INTERVAL elapsed, next pass admitted as probe
     HalfOpen --> Closed: probe pass succeeds
     HalfOpen --> Open: probe pass fails
     Closed --> Closed: successful write resets the count
 ```
+
+Two kinds of failure count toward the threshold. A failed shard write counts unless the controller answered `400` (it refused that shard's content) or `429`. A reconcile's membership reads and its policy or rule checks run while shard writes wait, so a controller that times out on them would otherwise never open the breaker: they count when the error suggests the controller is unreachable or failing (a transport error, a timeout, a `5xx` or a `401`), and not when it answers `400`, `404`, `409` or `429`.
 
 While the breaker is open `crowdsec_unifi_circuit_breaker_open` is `1` and syncs are suspended; the next admitted pass after the reset interval is the probe that closes or reopens it.
 
@@ -375,7 +377,7 @@ A shard's `groups` record saves its members when the shard is created, then at m
 
 The `events` bucket is a ring buffer. Keys are auto-incrementing uint64 values encoded as 8-byte big-endian, which guarantees chronological cursor iteration. When the entry count exceeds `HISTORY_MAX_EVENTS`, the oldest entries (lowest keys) are pruned in the same write transaction. The key count is determined by cursor iteration rather than `Stats().KeyN` (which reflects stats at transaction start, not after mid-transaction mutations).
 
-bbolt provides ACID transactions with a single writer at a time, and the daemon holds an exclusive lock on the file. The offline commands (`reconcile`, `drain`, `ban`, `unban`) open it themselves and need the daemon stopped; `status` reads a snapshot from the running daemon instead (see [Health endpoints](#health-endpoints)). `DRY_RUN` uses a store that reads `bouncer.db` if it exists and keeps every write in memory.
+bbolt provides ACID transactions with a single writer at a time, and the daemon holds an exclusive lock on the file. `status` reads a snapshot from the running daemon, and `reconcile`, `ban` and `unban` ask it to do the work through `/control/*`, so they run while it holds the lock (see [Health endpoints](#health-endpoints)); with the daemon stopped they open the file themselves. `drain` always opens it itself and needs the daemon stopped. `DRY_RUN` uses a store that reads `bouncer.db` if it exists and keeps every write in memory.
 
 ### Startup and periodic reconcile
 

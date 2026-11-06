@@ -27,7 +27,7 @@ It turns CrowdSec ban decisions into UniFi firewall objects, so malicious addres
 - **Several ban sources**: CrowdSec decisions, plain-text blocklist URLs, [borestad/blocklist-abuseipdb](https://github.com/borestad/blocklist-abuseipdb) lists with country filters, and manual `ban`/`unban` commands; an address stays banned while any source claims it
 - **Cloudflare whitelist**: optional ALLOW policies for Cloudflare's published ranges, kept ahead of the block policies
 - **Filtering**: origin, scenario, scope, private-address and whitelist filters, minimum durations and per-scenario duration overrides
-- **Observability**: 25 Prometheus metrics, liveness and readiness endpoints, CrowdSec usage metrics, a ban history audit trail and webhook alerts
+- **Observability**: 28 Prometheus metrics, liveness and readiness endpoints, CrowdSec usage metrics, a ban history audit trail and webhook alerts
 - **Hardened image**: distroless, runs as UID 65532 with a read-only root filesystem and a seccomp profile; releases are Cosign-signed with an SBOM
 
 ---

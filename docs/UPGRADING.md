@@ -439,7 +439,10 @@ setting.
   `CLOUDFLARE_IPV6_URL` must be absolute http(s) URLs,
   `BLOCKLIST_REFRESH_INTERVAL` must be positive when feeds are set, and
   `WEBHOOK_EVENTS` accepts only `circuit_breaker_open`,
-  `circuit_breaker_close` and `reconcile_drift`.
+  `circuit_breaker_close` and `reconcile_drift`, the events 2.0 sends. Later
+  releases add events; see
+  [Webhook Notifications](CONFIGURATION.md#webhook-notifications) for the
+  current list.
 - `FIREWALL_CONNECTION_STATES` (new) must be `ALL` or a list of `NEW`,
   `INVALID` and `ESTABLISHED`.
 

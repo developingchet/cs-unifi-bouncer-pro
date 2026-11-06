@@ -48,7 +48,7 @@ For full setup including CrowdSec registration, TLS, multi-site, and Docker Secr
 - **Shard rebalance** — merges under-filled shards after bans expire (`SHARD_MERGE_THRESHOLD`)
 - **Circuit breaker** — configurable failure threshold and cooldown; suspends syncs when the controller is unhealthy
 - **Crash-safe bbolt persistence** — bans are recorded before the controller write; startup and periodic reconciles correct drift
-- **25 Prometheus metrics** — decisions, API calls, active bans, unsynced bans, shard occupancy, decision latency, circuit breaker state
+- **28 Prometheus metrics** — decisions, API calls, active bans, unsynced bans, shard occupancy, decision latency, circuit breaker state
 - **Decision latency histogram** — time from receiving a ban to recording it in the ban database and its shard
 - **CrowdSec usage-metrics** — decision telemetry pushed to LAPI `/v1/usage-metrics` (default: 30 min; configurable)
 - **Egress blocking** — optional `EGRESS_ZONE_PAIRS` stops hosts in zones such as a DMZ or IoT network from connecting out to banned addresses, using the same ban lists
