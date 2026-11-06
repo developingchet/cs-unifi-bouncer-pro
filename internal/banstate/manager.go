@@ -125,6 +125,12 @@ func (m *Manager) Expire(ctx context.Context, ip string) (bool, error) {
 	}
 	now := time.Now().UTC()
 	claims := claimsFor(*entry)
+	if len(claims) == 0 {
+		// A ban without claims was stored by 1.x and not yet converted. It
+		// holds a legacy claim that ends with the ban, as ClaimLegacyBans
+		// would record it.
+		claims[LegacyClaim] = entry.ExpiresAt
+	}
 	changed := false
 	for source, expiry := range claims {
 		if !expiry.IsZero() && !expiry.After(now) {

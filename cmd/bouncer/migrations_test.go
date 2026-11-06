@@ -108,7 +108,7 @@ func TestUpgradeFrom1x(t *testing.T) {
 	if _, err := claims.Claim(ctx, decidedBan, false, upgradeDecision, expiry); err != nil {
 		t.Fatal(err)
 	}
-	retireLegacyClaims(store, claims, zerolog.Nop())()
+	retireLegacyClaims(claims, zerolog.Nop())()
 	if removed, err := claims.Release(ctx, decidedBan, upgradeDecision); err != nil || !removed {
 		t.Fatalf("decision deletion left the 1.x ban: removed=%v err=%v", removed, err)
 	}
@@ -118,71 +118,96 @@ func TestUpgradeFrom1x(t *testing.T) {
 	if len(fw.unbanned) != 1 || fw.unbanned[0] != decidedBan {
 		t.Fatalf("unbanned = %v, want [%s]", fw.unbanned, decidedBan)
 	}
-	for _, name := range []string{migrationClaimLegacyBans, migrationScopeCacheKeys, migrationBlocklistSources, migrationRetireLegacyClaims} {
-		if done, err := store.MigrationApplied(name); err != nil || !done {
-			t.Fatalf("migration %s recorded = %v, %v", name, done, err)
-		}
-	}
 }
 
-func TestMigrationsRunOnce(t *testing.T) {
+// reopenStore closes store and opens the database in dir again, as a restart
+// or a 2.x subcommand does.
+func reopenStore(t *testing.T, store storage.Store, dir string) storage.Store {
+	t.Helper()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openStore(upgradeConfig(dir), zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reopened
+}
+
+// The documented rollback runs drain with 2.x, then 1.x, which stores bans
+// without claims and cache records under bare names. Upgrading again must
+// convert them like a first upgrade: a ban whose decision is deleted is
+// lifted, and one that no decision claims expires.
+func TestRollbackLeavesNoUnexpirableBans(t *testing.T) {
 	dir := t.TempDir()
-	seed1xDatabase(t, dir, time.Now().Add(time.Hour))
+	expiry := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	seed1xDatabase(t, dir, expiry)
 	store, err := openStore(upgradeConfig(dir), zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Records written after the migrations ran are left alone on the next start.
-	if err := store.BanPut("203.0.113.99", storage.BanEntry{ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+	ctx := context.Background()
+	claims := banstate.New(store, &unbanRecorder{}, []string{upgradeSite}, false)
+	retireLegacyClaims(claims, zerolog.Nop())()
+
+	// drain opens the database through openStore as well.
+	store = reopenStore(t, store, dir)
+
+	// 1.x runs and writes in its own format.
+	const rolledBackDecided, rolledBackExpired = "203.0.113.70", "203.0.113.71"
+	rolledBack := map[string]storage.BanEntry{
+		rolledBackDecided: {ExpiresAt: expiry},
+		rolledBackExpired: {ExpiresAt: time.Now().Add(-time.Minute)},
+	}
+	if err := store.BanPutMany(rolledBack); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetGroup("crowdsec-block-v4-9", storage.GroupRecord{UnifiID: "group-9", Site: upgradeSite}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
 
-	store, err = openStore(upgradeConfig(dir), zerolog.Nop())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store = reopenStore(t, store, dir)
 	defer store.Close()
-	if entry, err := store.BanGet("203.0.113.99"); err != nil || entry == nil || entry.Claims != nil {
-		t.Fatalf("claim migration ran again: %+v, %v", entry, err)
+
+	for ip, want := range rolledBack {
+		entry, err := store.BanGet(ip)
+		if err != nil || entry == nil || len(entry.Claims) != 1 || !entry.Claims[banstate.LegacyClaim].Equal(want.ExpiresAt) {
+			t.Fatalf("%s after the second upgrade = %+v, %v; want a legacy claim ending %v", ip, entry, err, want.ExpiresAt)
+		}
 	}
-	if rec, err := store.GetGroup("crowdsec-block-v4-9"); err != nil || rec == nil {
-		t.Fatalf("cache key migration ran again: %+v, %v", rec, err)
+	if rec, err := store.GetGroup(upgradeSite + "\x00crowdsec-block-v4-9"); err != nil || rec == nil || rec.UnifiID != "group-9" {
+		t.Fatalf("group record written by 1.x = %+v, %v; want it under its site-scoped key", rec, err)
+	}
+
+	fw := &unbanRecorder{}
+	claims = banstate.New(store, fw, []string{upgradeSite}, false)
+	if _, err := claims.Claim(ctx, rolledBackDecided, false, upgradeDecision, expiry); err != nil {
+		t.Fatal(err)
+	}
+	retireLegacyClaims(claims, zerolog.Nop())()
+	if removed, err := claims.Release(ctx, rolledBackDecided, upgradeDecision); err != nil || !removed {
+		t.Fatalf("decision deletion left the ban 1.x stored: removed=%v err=%v", removed, err)
+	}
+	if removed, err := claims.Expire(ctx, rolledBackExpired); err != nil || !removed {
+		t.Fatalf("expired ban 1.x stored was kept: removed=%v err=%v", removed, err)
+	}
+	if len(fw.unbanned) != 2 {
+		t.Fatalf("unbanned = %v, want both bans 1.x stored", fw.unbanned)
 	}
 }
 
-func TestFailedMigrationRunsAgain(t *testing.T) {
+func TestLegacyConversionFailureStopsOpen(t *testing.T) {
 	store := testutil.NewMockStore()
-	runs := 0
-	failing := []dataMigration{{name: "example", run: func(storage.Store) error {
-		runs++
-		if runs == 1 {
-			return errors.New("disk full")
-		}
-		return nil
-	}}}
-	if err := runMigrations(store, failing); err == nil {
-		t.Fatal("expected the migration error")
+	if err := store.BanPut(undecidedBan, storage.BanEntry{ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
 	}
-	if done, _ := store.MigrationApplied("example"); done {
-		t.Fatal("failed migration was recorded")
-	}
-	for range 2 {
-		if err := runMigrations(store, failing); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if runs != 2 {
-		t.Fatalf("runs = %d, want 2", runs)
+	store.SetError("BanPutMany", errors.New("disk full"))
+	if err := convertLegacyData(store, &config.Config{}, zerolog.Nop()); err == nil {
+		t.Fatal("expected the write error")
 	}
 }
 
-func TestDryRunSkipsMigrations(t *testing.T) {
+func TestDryRunConvertsNothing(t *testing.T) {
 	dir := t.TempDir()
 	seed1xDatabase(t, dir, time.Now().Add(time.Hour))
 	cfg := upgradeConfig(dir)
@@ -192,9 +217,6 @@ func TestDryRunSkipsMigrations(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if done, err := store.MigrationApplied(migrationClaimLegacyBans); err != nil || done {
-		t.Fatalf("dry run recorded a migration: %v, %v", done, err)
-	}
 	if entry, err := store.BanGet(decidedBan); err != nil || entry == nil || entry.Claims != nil {
 		t.Fatalf("dry run changed a 1.x ban: %+v, %v", entry, err)
 	}

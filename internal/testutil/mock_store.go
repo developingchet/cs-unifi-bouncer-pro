@@ -15,9 +15,6 @@ type MockStore struct {
 	policies map[string]storage.PolicyRecord
 	events   []storage.EventEntry
 
-	// migrations holds the names of recorded data migrations.
-	migrations map[string]struct{}
-
 	// Error injection: method -> next error (consumed on first call)
 	errors map[string]error
 
@@ -31,13 +28,12 @@ type MockStore struct {
 // NewMockStore returns a zero-state MockStore ready for use.
 func NewMockStore() *MockStore {
 	return &MockStore{
-		bans:       make(map[string]storage.BanEntry),
-		groups:     make(map[string]storage.GroupRecord),
-		policies:   make(map[string]storage.PolicyRecord),
-		migrations: make(map[string]struct{}),
-		errors:     make(map[string]error),
-		calls:      make(map[string]int),
-		Size:       1024,
+		bans:     make(map[string]storage.BanEntry),
+		groups:   make(map[string]storage.GroupRecord),
+		policies: make(map[string]storage.PolicyRecord),
+		errors:   make(map[string]error),
+		calls:    make(map[string]int),
+		Size:     1024,
 	}
 }
 
@@ -316,28 +312,6 @@ func (m *MockStore) ListEventsForIP(ip string, limit int) ([]storage.EventEntry,
 		}
 	}
 	return result, nil
-}
-
-// --- Migrations -------------------------------------------------------------
-
-func (m *MockStore) MigrationApplied(name string) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.check("MigrationApplied"); err != nil {
-		return false, err
-	}
-	_, ok := m.migrations[name]
-	return ok, nil
-}
-
-func (m *MockStore) RecordMigration(name string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.check("RecordMigration"); err != nil {
-		return err
-	}
-	m.migrations[name] = struct{}{}
-	return nil
 }
 
 // --- Utility ----------------------------------------------------------------

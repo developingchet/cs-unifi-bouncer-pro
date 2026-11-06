@@ -17,11 +17,10 @@ import (
 )
 
 const (
-	bucketBans       = "bans"
-	bucketGroups     = "groups"
-	bucketPolicies   = "policies"
-	bucketEvents     = "events"
-	bucketMigrations = "migrations"
+	bucketBans     = "bans"
+	bucketGroups   = "groups"
+	bucketPolicies = "policies"
+	bucketEvents   = "events"
 
 	defaultMaxEvents = 10000
 )
@@ -44,7 +43,7 @@ func NewBboltStore(dataDir string, log zerolog.Logger, maxEvents int) (Store, er
 		return nil, fmt.Errorf("open bbolt at %s (stop the running bouncer before offline commands): %w", path, err)
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
-		for _, name := range []string{bucketBans, bucketGroups, bucketPolicies, bucketEvents, bucketMigrations} {
+		for _, name := range []string{bucketBans, bucketGroups, bucketPolicies, bucketEvents} {
 			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return fmt.Errorf("create bucket %s: %w", name, err)
 			}
@@ -405,32 +404,6 @@ func (s *bboltStore) ListEventsForIP(ip string, limit int) ([]EventEntry, error)
 		return nil
 	})
 	return events, err
-}
-
-// ---- Migrations ------------------------------------------------------------
-
-// MigrationApplied reports whether the named migration has been recorded. A
-// database opened read-only from before migrations were recorded has none.
-func (s *bboltStore) MigrationApplied(name string) (bool, error) {
-	var applied bool
-	err := s.db.View(func(tx *bolt.Tx) error {
-		if b := tx.Bucket([]byte(bucketMigrations)); b != nil {
-			applied = b.Get([]byte(name)) != nil
-		}
-		return nil
-	})
-	return applied, err
-}
-
-// RecordMigration records that the named migration has run, with the time.
-func (s *bboltStore) RecordMigration(name string) error {
-	stamp, err := time.Now().UTC().MarshalText()
-	if err != nil {
-		return err
-	}
-	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket([]byte(bucketMigrations)).Put([]byte(name), stamp)
-	})
 }
 
 // ---- Utility ---------------------------------------------------------------

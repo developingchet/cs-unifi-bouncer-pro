@@ -72,10 +72,6 @@ type Store interface {
 	ListEvents(limit int) ([]EventEntry, error)
 	ListEventsForIP(ip string, limit int) ([]EventEntry, error)
 
-	// One-time data migrations, recorded by name
-	MigrationApplied(name string) (bool, error)
-	RecordMigration(name string) error
-
 	// Utility
 	SizeBytes() (int64, error)
 	Close() error

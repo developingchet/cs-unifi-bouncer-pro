@@ -31,7 +31,7 @@ func openStore(cfg *config.Config, log zerolog.Logger) (storage.Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := runMigrations(store, startupMigrations(cfg, log)); err != nil {
+	if err := convertLegacyData(store, cfg, log); err != nil {
 		_ = store.Close()
 		return nil, err
 	}

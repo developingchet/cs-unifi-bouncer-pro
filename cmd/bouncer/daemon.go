@@ -164,7 +164,7 @@ func runDaemon() error {
 	// reconciling earlier would strip every enforced ban from the controller.
 	bnc.OnStartupSynced(health.MarkSynced)
 	if !cfg.DryRun {
-		bnc.OnStartupSynced(retireLegacyClaims(store, claims, log))
+		bnc.OnStartupSynced(retireLegacyClaims(claims, log))
 	}
 	gateReconciles(ctx, bnc.OnStartupSynced, store.BanCount, startupReconcileFallback, func() {
 		reconcilesOpen.Store(true)

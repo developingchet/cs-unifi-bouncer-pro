@@ -74,6 +74,27 @@ func TestJanitor_PrunesExpiredBans(t *testing.T) {
 	}
 }
 
+// A ban stored without claims, as 1.x stores them, expires with the ban.
+func TestJanitor_ExpiresBanWithoutClaims(t *testing.T) {
+	store := newJanitorTestStore(t)
+	bans := map[string]storage.BanEntry{
+		"203.0.113.60": {ExpiresAt: time.Now().Add(-time.Minute)},
+		"203.0.113.61": {ExpiresAt: time.Now().Add(time.Hour)},
+		"203.0.113.62": {},
+	}
+	if err := store.BanPutMany(bans); err != nil {
+		t.Fatal(err)
+	}
+
+	newTestJanitor(store, time.Hour).tick(context.Background())
+
+	for ip, want := range map[string]bool{"203.0.113.60": false, "203.0.113.61": true, "203.0.113.62": true} {
+		if exists, err := store.BanExists(ip); err != nil || exists != want {
+			t.Errorf("%s stored = %v, %v; want %v", ip, exists, err, want)
+		}
+	}
+}
+
 func TestJanitor_KeepsFreshBans(t *testing.T) {
 	store := newJanitorTestStore(t)
 

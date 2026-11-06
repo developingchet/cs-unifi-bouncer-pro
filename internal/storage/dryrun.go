@@ -104,13 +104,6 @@ func (s *dryRunStore) ListEventsForIP(ip string, limit int) ([]EventEntry, error
 	}
 	return s.base.ListEventsForIP(ip, limit)
 }
-func (s *dryRunStore) MigrationApplied(name string) (bool, error) {
-	if s.base == nil {
-		return false, nil
-	}
-	return s.base.MigrationApplied(name)
-}
-func (s *dryRunStore) RecordMigration(string) error { return nil }
 func (s *dryRunStore) SizeBytes() (int64, error) {
 	if s.base == nil {
 		return 0, nil

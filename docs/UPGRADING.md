@@ -112,15 +112,16 @@ Behaviour that changes without action:
   shard is created, then at most every 10 minutes, at each reconcile and on
   shutdown, instead of after every write to the controller. `status` reports
   `last_group_update` from those saves.
-- **Database migrations run once**: the conversions of data written by 1.x
-  (bans without claims, cache records keyed by name, blocklist claims keyed
-  by URL) run on the first start and are recorded in a new `migrations`
-  bucket, instead of being checked on every start or every request. A 1.x
-  database upgraded straight to 2.4 is converted the same way. A 1.x ban that
-  an active CrowdSec decision claims in the first LAPI batch is lifted when
-  that decision is deleted; one that no decision claims stays until it
-  expires. `DRY_RUN` runs no migration, so a dry run against a 1.x database
-  shows its bans without claims.
+- **1.x data converted when the database opens**: bans without claims,
+  cache records keyed by name and blocklist claims keyed by URL are
+  converted each time the database is opened, instead of being checked on
+  every request, so a database that 1.x wrote to after a rollback is
+  converted again on the next upgrade. A 1.x database upgraded straight to
+  2.4 is converted the same way. A 1.x ban that an active CrowdSec decision
+  claims in the first LAPI batch is lifted when that decision is deleted;
+  before, deleting any decision for the address lifted it. One that no
+  decision claims stays until it expires. `DRY_RUN` converts nothing, so a
+  dry run against a 1.x database shows its bans without claims.
 - **Legacy rules removed with their group**: when a shard's group is pruned,
   merged away or drained, every rule of the bouncer's that uses only that
   group is deleted first, with either block action (`drop` or `reject`) and
@@ -354,7 +355,9 @@ first; the rest describes behaviour that changes without any action.
 1. Back up the bouncer's database (`/data/bouncer.db` in the container, or the
    `DATA_DIR` you configured). 2.0 rewrites its cache keys on first start, and
    1.x cannot read them back. To roll back, restore the backup, or run
-   `cs-unifi-bouncer-pro drain` with 2.0 first.
+   `cs-unifi-bouncer-pro drain` with 2.x first and then start 1.x. Upgrading
+   again converts the bans and records 1.x wrote in the meantime, as on the
+   first upgrade.
 2. Run `cs-unifi-bouncer-pro validate` with the 2.0 image against your
    current environment. It checks the configuration without contacting the
    controller or the LAPI; only the `UNIFI_SITES` check against the
