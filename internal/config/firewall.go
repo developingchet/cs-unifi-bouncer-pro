@@ -86,6 +86,9 @@ func (c *Config) validateFirewall() error {
 		if c.FirewallMode == "zone" && len(pairs) == 0 {
 			return fmt.Errorf("ZONE_PAIRS must name at least one src->dst zone pair when FIREWALL_MODE=zone")
 		}
+		if err := checkDuplicatePairs("ZONE_PAIRS", pairs); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -110,17 +113,24 @@ func (c *Config) validateEgress() error {
 	if c.UnifiAPIKey == "" {
 		return fmt.Errorf("EGRESS_ZONE_PAIRS requires UNIFI_API_KEY; zone policies are managed through the integration API")
 	}
-	// A site's own pairs replace the unprefixed ones, so a pair may appear
-	// once without a prefix and again for a site.
+	return checkDuplicatePairs("EGRESS_ZONE_PAIRS", pairs)
+}
+
+// checkDuplicatePairs rejects a src->dst pair that setting names twice for
+// one site. A pair's policies and filter lists are named after its zones, so
+// a second pair with the same zones, even with other ports, would overwrite
+// the first. A site's own pairs replace the unprefixed ones, so a pair may
+// appear once without a prefix and again for a site.
+func checkDuplicatePairs(setting string, pairs []ZonePair) error {
 	seen := make(map[string]bool, len(pairs))
 	for _, p := range pairs {
 		zones := p.Src + "->" + p.Dst
 		key := p.Site + "/" + zones
 		if seen[key] {
 			if p.Site != "" {
-				return fmt.Errorf("EGRESS_ZONE_PAIRS names %s more than once for site %q", zones, p.Site)
+				return fmt.Errorf("%s names %s more than once for site %q", setting, zones, p.Site)
 			}
-			return fmt.Errorf("EGRESS_ZONE_PAIRS names %s more than once", zones)
+			return fmt.Errorf("%s names %s more than once", setting, zones)
 		}
 		seen[key] = true
 	}
@@ -146,8 +156,12 @@ func (c *Config) validateCloudflare() error {
 	if len(c.CloudflareZonePairs) == 0 {
 		return fmt.Errorf("CLOUDFLARE_WHITELIST_ENABLED is set but CLOUDFLARE_ZONE_PAIRS is empty")
 	}
-	if _, err := c.ParseCloudflareZonePairs(); err != nil {
+	cloudflarePairs, err := c.ParseCloudflareZonePairs()
+	if err != nil {
 		return fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: %w", err)
+	}
+	if err := checkDuplicatePairs("CLOUDFLARE_ZONE_PAIRS", cloudflarePairs); err != nil {
+		return err
 	}
 	if !isHTTPSURL(c.CloudflareIPv4URL) || !isHTTPSURL(c.CloudflareIPv6URL) {
 		return fmt.Errorf("CLOUDFLARE_IPV4_URL and CLOUDFLARE_IPV6_URL must be absolute https:// URLs")

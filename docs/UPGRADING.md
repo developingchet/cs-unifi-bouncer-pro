@@ -129,6 +129,17 @@ names, and `UNIFI_DIAL_IPV6` over `ENABLE_IPV6`. Replacing
 unless a per-family setting is larger than it: `SHARD_LIMIT` caps the
 per-family settings, `FIREWALL_GROUP_CAPACITY` did not.
 
+Settings now rejected. These configurations were accepted by 2.3 and now stop
+startup with a validation error, and a SIGHUP reload that introduces one is
+refused; run `validate` before upgrading:
+
+- **A zone pair named twice**: `ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS`
+  reject a `src->dst` pair that appears twice for one site, as
+  `EGRESS_ZONE_PAIRS` already did (`ZONE_PAIRS names External->Internal
+  more than once`). The two entries shared policy and filter list names and
+  overwrote each other, so only one was enforced. Merge them into one entry
+  with all the ports: `External->Internal:80,443`.
+
 ## From 2.2 to 2.3
 
 The periodic LAPI resync (`CROWDSEC_RESYNC_INTERVAL`) now accepts a decision

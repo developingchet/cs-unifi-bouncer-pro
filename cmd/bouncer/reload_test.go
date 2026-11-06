@@ -118,3 +118,19 @@ func TestReloadZonesKeepsConfigWhenZonePairsAreEmpty(t *testing.T) {
 		t.Errorf("log output %q is not at error level", out.String())
 	}
 }
+
+// Two inbound pairs with the same zones share policy and filter list names.
+// A reload that names one twice is refused like any invalid configuration.
+func TestReloadZonesRejectsDuplicatePairs(t *testing.T) {
+	probe := newReconcileProbe(t)
+	t.Setenv("ZONE_PAIRS", "External->Internal:80;External->Internal:443")
+	var out bytes.Buffer
+	reloadZones(context.Background(), &config.Config{UnifiSites: []string{"default"}}, probe,
+		func() bool { return true }, zerolog.New(&out))
+	if probe.reconciled != 0 || probe.repaired != 0 {
+		t.Errorf("reconciled %d, repaired %d; want neither", probe.reconciled, probe.repaired)
+	}
+	if !strings.Contains(out.String(), "ZONE_PAIRS names External->Internal more than once") {
+		t.Errorf("log output %q does not report the duplicate pair", out.String())
+	}
+}
