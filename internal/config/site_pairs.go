@@ -135,8 +135,9 @@ func (c *Config) pairSettings() ([]pairSetting, error) {
 }
 
 // validatePairSites checks that every site prefix names a site in
-// UNIFI_SITES, and that with FIREWALL_MODE=zone each site is left with a
-// ZONE_PAIRS pair. With UNIFI_SITES_AUTO the sites are known only once
+// UNIFI_SITES, and that each site is left with a ZONE_PAIRS pair with
+// FIREWALL_MODE=zone, or with FIREWALL_MODE=auto once a ZONE_PAIRS pair has a
+// site prefix. With UNIFI_SITES_AUTO the sites are known only once
 // discovered; UnknownPairSiteWarnings covers that case.
 func (c *Config) validatePairSites() error {
 	if c.UnifiSitesAuto {
@@ -154,10 +155,17 @@ func (c *Config) validatePairSites() error {
 			}
 		}
 	}
-	if c.FirewallMode != "zone" {
+	if c.FirewallMode == "legacy" {
 		return nil
 	}
+	// With FIREWALL_MODE=auto a site on the legacy firewall needs no pair.
+	// A site prefix only means something on the zone-based firewall, though,
+	// so once a pair has one every site must be left with a pair: a zone
+	// site without one fails startup and every SIGHUP reload.
 	inbound := settings[0].pairs
+	if c.FirewallMode == "auto" && len(PairSites(inbound)) == 0 {
+		return nil
+	}
 	for _, site := range c.UnifiSites {
 		if len(PairsForSite(inbound, site)) == 0 {
 			return fmt.Errorf("ZONE_PAIRS leaves site %q without a zone pair; add a pair without a site prefix or one starting with %q",

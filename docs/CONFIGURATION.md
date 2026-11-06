@@ -275,7 +275,7 @@ branch/Wan->Lan
 branch/Wan->Iot:22,23
 ```
 
-A prefix that names a site not in `UNIFI_SITES` fails validation, as does, with `FIREWALL_MODE=zone`, a site left without a `ZONE_PAIRS` pair. With `UNIFI_SITES_AUTO=true` the sites are known only after discovery, so an unknown prefix logs a warning at startup and its pairs apply to no site. At startup, and after each SIGHUP reload, the bouncer logs the pairs each site uses (`zone pairs for site`), and `validate` prints one `zone_pairs[site]` row per site when a setting has prefixes. A SIGHUP that changes one site's pairs adds and removes only that site's policies; each site's orphan sweep looks only at its own policies. Duplicate pairs in `ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS` are checked per site: a pair may appear once without a prefix and once more for a site.
+A prefix that names a site not in `UNIFI_SITES` fails validation, as does a site left without a `ZONE_PAIRS` pair, with `FIREWALL_MODE=zone` or, once a `ZONE_PAIRS` pair has a prefix, with `auto`. With `UNIFI_SITES_AUTO=true` the sites are known only after discovery, so an unknown prefix logs a warning at startup and its pairs apply to no site. At startup, and after each SIGHUP reload, the bouncer logs the pairs each site uses (`zone pairs for site`), and `validate` prints one `zone_pairs[site]` row per site when a setting has prefixes. A SIGHUP that changes one site's pairs adds and removes only that site's policies; each site's orphan sweep looks only at its own policies. Duplicate pairs in `ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS` are checked per site: a pair may appear once without a prefix and once more for a site.
 
 ### Port filtering for zone pairs
 

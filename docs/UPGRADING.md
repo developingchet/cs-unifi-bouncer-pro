@@ -80,7 +80,12 @@ Behaviour that changes without action:
   manage sites whose zones have different names (see
   [CONFIGURATION.md](CONFIGURATION.md#pairs-for-one-site)). Pairs without a
   prefix apply to every site as before. A zone name that contains `/` is now
-  read as a site prefix; use the zone's ID instead.
+  read as a site prefix; use the zone's ID instead. With
+  `FIREWALL_MODE=zone`, and with `auto` once a `ZONE_PAIRS` pair has a
+  prefix, validation requires every site in `UNIFI_SITES` to be left with a
+  pair (`ZONE_PAIRS leaves site "branch" without a zone pair; add a pair
+  without a site prefix or one starting with "branch/"`), since a site on
+  the zone-based firewall without one cannot start.
 - **Feed redirects through a proxy**: with `HTTPS_PROXY` or `HTTP_PROXY` set,
   a feed redirect to another host is followed only when that host name
   resolves, from the bouncer, to public addresses. A redirect to a name the
