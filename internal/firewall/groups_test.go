@@ -555,20 +555,35 @@ func TestAdd_NewShardOnOverflow_ReturnsNewIdx(t *testing.T) {
 	}
 }
 
-// TestPrunableTail verifies that PrunableTail returns ok=false when there is
-// only one shard, or when the last shard has members. It returns ok=true only
-// when there are multiple shards and the last shard is empty.
+// TestPrunableTail verifies that PrunableTail offers the last shard only when
+// it is Active and empty, shard 0 included.
 func TestPrunableTail(t *testing.T) {
-	t.Run("single shard not prunable", func(t *testing.T) {
+	t.Run("emptied shard 0 prunable", func(t *testing.T) {
+		ctx := context.Background()
 		ctrl := testutil.NewMockController()
 		store := newBboltStore(t)
 		sm := newV4ShardManager(t, 5, ctrl, store)
-		if err := sm.EnsureShards(context.Background()); err != nil {
+		if err := sm.EnsureShards(ctx); err != nil {
 			t.Fatalf("EnsureShards: %v", err)
 		}
-		_, _, ok := sm.PrunableTail()
-		if ok {
-			t.Error("PrunableTail: got ok=true for single shard; want false")
+		if _, _, ok := sm.PrunableTail(); ok {
+			t.Error("PrunableTail: got ok=true with no shard")
+		}
+		if _, _, err := sm.Add(ctx, "10.0.0.1"); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+		if err := sm.FlushDirty(ctx); err != nil {
+			t.Fatalf("FlushDirty: %v", err)
+		}
+		if _, _, ok := sm.PrunableTail(); ok {
+			t.Error("PrunableTail: got ok=true for shard 0 holding a ban")
+		}
+		if _, err := sm.Remove(ctx, "10.0.0.1"); err != nil {
+			t.Fatalf("Remove: %v", err)
+		}
+		_, idx, ok := sm.PrunableTail()
+		if !ok || idx != 0 {
+			t.Errorf("PrunableTail after the last unban: idx=%d ok=%v, want 0 true", idx, ok)
 		}
 	})
 
