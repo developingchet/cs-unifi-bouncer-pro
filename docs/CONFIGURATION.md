@@ -489,6 +489,8 @@ A fetch that looks damaged never prunes. A feed with a country filter whose entr
 
 Addresses are recorded and applied in batches of 500, so a large feed does not hold up CrowdSec decisions while it imports. Addresses the controller rejects stay recorded as pending and are retried by the next reconcile.
 
+A feed may redirect up to three times. A redirect from `https://` to `http://` is refused, and so is a redirect to a different host on a private, loopback, link-local or other internal address: literal addresses are refused before the request, and host names when they resolve to one at connect time. A feed URL configured with an internal address directly is fetched as configured. With `HTTPS_PROXY` or `HTTP_PROXY` set, the proxy connects to the redirect target, so the bouncer resolves the target name itself first and refuses the redirect when the name resolves to an internal address or does not resolve at all. The proxy can still resolve the name differently; limit where the proxy itself may connect if that matters in your network.
+
 ---
 
 ## AbuseIPDB Blocklist
