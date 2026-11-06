@@ -1,6 +1,6 @@
 # External References
 
-Relevant documentation and specifications referenced during development.
+Documentation and specifications the bouncer is built against.
 
 ## CrowdSec
 
@@ -13,7 +13,7 @@ Relevant documentation and specifications referenced during development.
 ## Ubiquiti / UniFi
 
 - **UniFi Network API (community documentation)** — https://ubntwiki.com/products/software/unifi-controller/api
-- **UniFi Developer Portal** — https://developer.ui.com
+- **UniFi Developer Portal** (integration API) — https://developer.ui.com
 - **UniFi Network Application release notes** — https://community.ui.com/releases
 
 ## Go Standard Library
@@ -22,17 +22,18 @@ Relevant documentation and specifications referenced during development.
 - **net/http** — https://pkg.go.dev/net/http
 - **crypto/tls** — https://pkg.go.dev/crypto/tls
 - **text/template** — https://pkg.go.dev/text/template (firewall object naming)
-- **database/sql** — not used; bbolt preferred for embedded ACID storage
 
 ## Go Dependencies
 
 - **zerolog (structured logging)** — https://github.com/rs/zerolog
+- **logrus** (logging of the go-cs-bouncer stream client, forwarded to zerolog) — https://github.com/sirupsen/logrus
 - **cobra (CLI framework)** — https://github.com/spf13/cobra
 - **koanf (configuration)** — https://github.com/knadh/koanf
 - **bbolt (embedded database)** — https://github.com/etcd-io/bbolt
 - **msgpack (serialisation)** — https://github.com/vmihailenco/msgpack
 - **prometheus/client_golang** — https://github.com/prometheus/client_golang
 - **golang.org/x/sync (errgroup)** — https://pkg.go.dev/golang.org/x/sync/errgroup
+- **golang.org/x/time/rate (decision rate limiter)** — https://pkg.go.dev/golang.org/x/time/rate
 
 ## Container Security
 
@@ -65,6 +66,9 @@ Relevant documentation and specifications referenced during development.
 ## Related Projects
 
 - **borestad/blocklist-abuseipdb** — https://github.com/borestad/blocklist-abuseipdb (source of the optional AbuseIPDB country-tagged lists)
-- **Teifun2/cs-unifi-bouncer** — https://github.com/Teifun2/cs-unifi-bouncer (the original bouncer this project improves upon)
 - **crowdsecurity/cs-firewall-bouncer** — https://github.com/crowdsecurity/cs-firewall-bouncer (iptables/nftables reference implementation)
 - **cs-abuseipdb-bouncer** — https://github.com/developingchet/cs-abuseipdb-bouncer (sister project — AbuseIPDB reporting bouncer)
+
+## Prior Art
+
+- **Teifun2/cs-unifi-bouncer** — https://github.com/Teifun2/cs-unifi-bouncer. An earlier CrowdSec bouncer for UniFi controllers that manages legacy firewall groups and rules, and the starting point of this project. cs-unifi-bouncer-pro has since been rebuilt around a ban database, sharded groups and zone-based policies; see [DESIGN.md](DESIGN.md) for how it works today.
