@@ -65,6 +65,11 @@ type Manager interface {
 	// CheckModeChange returns a *ModeChangeError when a site loaded in legacy
 	// mode now needs zone mode. Other failures are retried on the next call.
 	CheckModeChange(ctx context.Context) error
+
+	// SaveShardRecords writes the shard members that syncs flushed but left
+	// out of the group records, which are saved at most every 10 minutes and
+	// at each reconcile. Call it before closing the store.
+	SaveShardRecords() error
 }
 
 // ManagerConfig holds all firewall manager configuration.

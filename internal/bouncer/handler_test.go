@@ -86,6 +86,8 @@ func (m *mockFirewallManager) CheckModeChange(_ context.Context) error {
 	return nil
 }
 
+func (m *mockFirewallManager) SaveShardRecords() error { return nil }
+
 // newTestHandler returns a function that runs one job through the daemon's
 // job handler.
 func newTestHandler(store storage.Store, fwMgr firewall.Manager, cfg *config.Config) func(context.Context, SyncJob) error {

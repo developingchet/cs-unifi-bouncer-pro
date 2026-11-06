@@ -185,6 +185,11 @@ func runDaemon() error {
 	go repairAndSyncWhitelist(ctx, cfg, ctrl, fwMgr, cfPairs, notifier, done, log)
 	go func() { done <- bnc.Run(ctx) }()
 	err = awaitShutdown(ctx, cfg, done, log, webhookDone, recorderDone)
+	// Syncs save shard members to their group records only every few
+	// minutes; save the rest while the store is still open.
+	if saveErr := fwMgr.SaveShardRecords(); saveErr != nil {
+		log.Warn().Err(saveErr).Msg("failed to save shard group records on shutdown")
+	}
 	// A component that ends the daemon on its own (a firewall mode change)
 	// may just have queued a webhook; stop the notifier and let it deliver.
 	cancel()

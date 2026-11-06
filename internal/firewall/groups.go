@@ -79,6 +79,10 @@ type Shard struct {
 	// the refusal lapses (see putAcceptedMembers). They are left out of every
 	// write until they are released or the refusal lapses.
 	rejected map[string]time.Time
+
+	// recordStale is set when members were written to the controller since
+	// the shard's group record last saved them (see saveShardRecords).
+	recordStale bool
 }
 
 // GroupRef keeps a UniFi group ID paired with its actual shard number.
@@ -192,6 +196,9 @@ type ShardManager struct {
 	// metricsStale is set when membership changed since the shard gauges
 	// were last set (see refreshMetrics). Guarded by mu.
 	metricsStale bool
+
+	// recordsSavedAt is when saveShardRecords last ran. Guarded by mu.
+	recordsSavedAt time.Time
 }
 
 // NewShardManager creates a ShardManager. Call EnsureShards to initialize from the API.

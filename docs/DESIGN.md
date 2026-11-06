@@ -367,6 +367,8 @@ Persistent state is stored in a single [bbolt](https://github.com/etcd-io/bbolt)
 | `policies` | site and policy name | msgpack-encoded `PolicyRecord` with UniFi ID and firewall mode |
 | `events` | uint64 big-endian sequence | JSON-encoded `EventEntry` {Action, Origin, Scenario, IP, RecordedAt} |
 
+A shard's `groups` record saves its members when the shard is created, then at most every 10 minutes during syncs, at the end of each reconcile and at shutdown, rather than after every flush. The members are read only at startup, to restore a shard whose controller list was emptied or deleted while the bouncer was down; they are checked against `bans` first, and the startup reconcile adds any ban the record missed.
+
 The `events` bucket is a ring buffer. Keys are auto-incrementing uint64 values encoded as 8-byte big-endian, which guarantees chronological cursor iteration. When the entry count exceeds `HISTORY_MAX_EVENTS`, the oldest entries (lowest keys) are pruned in the same write transaction. The key count is determined by cursor iteration rather than `Stats().KeyN` (which reflects stats at transaction start, not after mid-transaction mutations).
 
 bbolt provides ACID transactions with a single writer at a time, and the daemon holds an exclusive lock on the file. The offline commands (`reconcile`, `drain`, `ban`, `unban`) open it themselves and need the daemon stopped; `status` reads a snapshot from the running daemon instead (see [Health endpoints](#health-endpoints)). `DRY_RUN` uses a store that reads `bouncer.db` if it exists and keeps every write in memory.

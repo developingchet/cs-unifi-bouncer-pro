@@ -829,6 +829,9 @@ func TestSyncShard_SendsPlaceholderWhenEmpty(t *testing.T) {
 	if got := ctrl.Calls("UpdateTrafficMatchingList") - beforeFlush; got != 1 {
 		t.Errorf("UpdateTrafficMatchingList calls: got %d, want 1", got)
 	}
+	if err := sm.saveShardRecords(); err != nil {
+		t.Fatalf("saveShardRecords: %v", err)
+	}
 	rec, err := store.GetGroup(cacheKey(testSite, "crowdsec-block-v4-0"))
 	if err != nil || rec == nil || len(rec.Members) != 0 {
 		t.Fatalf("placeholder leaked into cache: %+v, %v", rec, err)

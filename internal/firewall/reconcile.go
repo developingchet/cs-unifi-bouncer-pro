@@ -17,6 +17,7 @@ import (
 func (m *managerImpl) reconcileWrites(ctx context.Context, site string, v4Mgr, v6Mgr *ShardManager) (missing, extra int, errs []error) {
 	m.syncMu.Lock()
 	defer m.syncMu.Unlock()
+	defer m.saveSiteShardRecords(site, v4Mgr, v6Mgr)
 
 	if err := m.admitWrites(); err != nil {
 		m.log.Info().Err(err).Str("site", site).Msg("reconcile: controller writes deferred")

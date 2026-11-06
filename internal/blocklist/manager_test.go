@@ -52,6 +52,7 @@ func (m *mockFWManager) SyncDirty(_ context.Context, _ []string) error { return 
 func (m *mockFWManager) Drain(_ context.Context, _ []string) error     { return nil }
 func (m *mockFWManager) ZoneManager() *firewall.ZoneManager            { return nil }
 func (m *mockFWManager) CheckModeChange(_ context.Context) error       { return nil }
+func (m *mockFWManager) SaveShardRecords() error                       { return nil }
 
 func newTestManager(url string) (*Manager, *testutil.MockStore, *mockFWManager) {
 	store := testutil.NewMockStore()

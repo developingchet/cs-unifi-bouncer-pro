@@ -40,6 +40,7 @@ func (nopFWManager) SyncDirty(_ context.Context, _ []string) error            { 
 func (nopFWManager) Drain(_ context.Context, _ []string) error                { return nil }
 func (nopFWManager) ZoneManager() *firewall.ZoneManager                       { return nil }
 func (nopFWManager) CheckModeChange(context.Context) error                    { return nil }
+func (nopFWManager) SaveShardRecords() error                                  { return nil }
 
 func newTestJanitor(store storage.Store, interval time.Duration) *Janitor {
 	return NewJanitor(store, banstate.New(store, nopFWManager{}, []string{"default"}, false), interval, zerolog.Nop())

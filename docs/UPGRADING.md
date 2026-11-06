@@ -92,6 +92,10 @@ Behaviour that changes without action:
 - **`crowdsec_unifi_active_bans` per site**: the gauge counts the addresses in
   each site's shards, so a site whose ban could not be applied shows fewer.
   Before, every site showed the size of the whole ban database.
+- **Shard records in the database**: a shard's member list is saved when the
+  shard is created, then at most every 10 minutes, at each reconcile and on
+  shutdown, instead of after every write to the controller. `status` reports
+  `last_group_update` from those saves.
 
 Renamed settings. The old names keep working with the same effect, and each
 one in use logs a deprecation warning at startup:

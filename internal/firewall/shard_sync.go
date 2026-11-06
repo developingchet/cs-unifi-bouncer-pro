@@ -58,6 +58,7 @@ func (sm *ShardManager) syncAllFamilies(ctx context.Context) error {
 			break
 		}
 	}
+	sm.saveShardRecordsIfDue()
 	return firstErr
 }
 
@@ -128,7 +129,7 @@ func (sm *ShardManager) syncShard(ctx context.Context, shard *Shard) error {
 		return sm.handleSyncFailure(ctx, shard, putErr, sentCount, shardLabel, start)
 	}
 
-	sm.commitSyncedMembers(shard, sentMembers, shardLabel)
+	sm.commitSyncedMembers(shard, sentMembers, shardLabel, wasCreating)
 
 	if wasCreating {
 		sm.markCreatedActive(shard)
@@ -250,11 +251,18 @@ func (sm *ShardManager) markCreatedActive(shard *Shard) {
 	sm.mu.Unlock()
 }
 
-// commitSyncedMembers records sentMembers as the shard's flushed content and
-// caches them in bbolt.
-func (sm *ShardManager) commitSyncedMembers(shard *Shard, sentMembers []string, shardLabel string) {
+// commitSyncedMembers records sentMembers as the shard's flushed content. The
+// group record of a shard this flush created saves them at once; any other
+// shard's record is left to saveShardRecords.
+func (sm *ShardManager) commitSyncedMembers(shard *Shard, sentMembers []string, shardLabel string, created bool) {
 	shard.IPs.CommitFlushedExcept(sentMembers, sm.refusedMembers(shard))
 	metrics.ShardIPCount.WithLabelValues(shard.Family, shardLabel, sm.site).Set(float64(len(sentMembers)))
+	if !created {
+		sm.mu.Lock()
+		shard.recordStale = true
+		sm.mu.Unlock()
+		return
+	}
 	if err := sm.store.SetGroup(cacheKey(sm.site, shard.Name), storage.GroupRecord{
 		UnifiID: shard.ID,
 		Site:    sm.site,
