@@ -200,9 +200,15 @@ func (b *Bouncer) consumeStream(ctx context.Context, stream <-chan *models.Decis
 				// Run closes the stream immediately before returning its error.
 				return streamError(<-runErr)
 			}
-			b.handleDecisionBlock(ctx, decisions, "stream")
+			complete := b.handleDecisionBlock(ctx, decisions, "stream")
 			if err := b.fwMgr.SyncDirty(ctx, b.cfg.UnifiSites); err != nil {
 				b.log.Warn().Err(err).Msg("SyncDirty after decision block failed")
+			}
+			if !complete {
+				// Only shutdown cuts a block short. The startup callbacks
+				// assume every active decision has been applied, so after a
+				// cut-short first block they wait for the next start.
+				return nil
 			}
 			if !startupSynced {
 				startupSynced = true
@@ -230,11 +236,12 @@ const decisionBatchSize = 500
 // handleDecisionBlock applies one batch of decisions, new ones before
 // deleted ones, in batches of up to decisionBatchSize. source labels the
 // decisions_processed metric: "stream" for the LAPI stream, "resync" for the
-// periodic full pull.
-func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.DecisionsStreamResponse, source string) {
+// periodic full pull. It reports false when ctx ended before every decision
+// of the block was admitted.
+func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.DecisionsStreamResponse, source string) bool {
 	if decisions == nil {
 		b.log.Warn().Msg("ignoring empty CrowdSec decision block")
-		return
+		return true
 	}
 	batch := make([]SyncJob, 0, min(len(decisions.New)+len(decisions.Deleted), decisionBatchSize))
 	defer func() {
@@ -253,7 +260,7 @@ func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.Dec
 				continue
 			}
 			if !b.admit(ctx, &batch) {
-				return
+				return false
 			}
 			if job.Action == "ban" {
 				job.ReceivedAt = time.Now()
@@ -265,6 +272,7 @@ func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.Dec
 			}
 		}
 	}
+	return true
 }
 
 // admit waits for the rate limiter, when one is configured. When it is out
