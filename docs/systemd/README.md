@@ -55,7 +55,7 @@ are enabled.
 
 ## Hot-Reload (SIGHUP)
 
-To reload zone pair configuration without restarting the daemon:
+To reload the zone pairs (`ZONE_PAIRS`, `EGRESS_ZONE_PAIRS`) without restarting the daemon:
 ```bash
 sudo systemctl reload cs-unifi-bouncer-pro
 # or equivalently:

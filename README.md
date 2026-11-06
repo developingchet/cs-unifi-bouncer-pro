@@ -217,7 +217,7 @@ A SIGHUP that arrives before the startup reconcile has run (the bouncer is still
 
 Filter changes stage a new block policy before removing the old one. If policy reconciliation fails after the configuration commits, the error is logged and the next reconciliation retries; some pairs may already have updated.
 
-Only zone pair changes (`ZONE_PAIRS`) are applied via SIGHUP. All other config changes require a restart. In legacy mode (no site resolved to zone mode), SIGHUP logs a warning that zone reload is skipped and does nothing else.
+Only zone pair changes (`ZONE_PAIRS` and `EGRESS_ZONE_PAIRS`) are applied via SIGHUP. All other config changes require a restart. In legacy mode (no site resolved to zone mode), SIGHUP logs `SIGHUP: ZoneManager not available (legacy mode?), skipping reload` and does nothing else; with `DRY_RUN=true` it logs `[DRY-RUN] skipping zone reload`.
 
 ---
 

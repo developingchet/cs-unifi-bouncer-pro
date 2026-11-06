@@ -243,6 +243,8 @@ sequenceDiagram
 
 A bouncer that runs through the controller upgrade exits once and comes back in zone mode; the converted policies stay in place until its own block policies cover the same lists, so the bans are enforced throughout.
 
+Network 11 also adds `reportFlowEnabled` to firewall policies (whether matches appear in Insights Flows) and sets it to true when a write leaves it out. The bouncer does not manage it: new policies leave it out, and every update, staged replacement and recreation sends the value the policy already has, so a choice made in the UniFi UI survives repairs. Controllers before 11 neither report nor receive it.
+
 ### Zone policy constraints
 
 The UniFi zone policy API has these filter constraints:

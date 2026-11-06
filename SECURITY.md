@@ -215,6 +215,10 @@ cosign download attestation developingchet/cs-unifi-bouncer-pro:2.3.0 \
   | jq -r '.payload | @base64d | fromjson | .predicate'
 ```
 
+Releases also publish the same image, with its signature and attestations, to
+`ghcr.io/developingchet/cs-unifi-bouncer-pro`; the commands above work with that
+name in place of `developingchet/cs-unifi-bouncer-pro`.
+
 To verify downloaded release binaries:
 
 ```bash
