@@ -783,18 +783,6 @@ func tmlItemToWire(item TrafficMatchingListItem) apiTMLItemV1 {
 	return apiTMLItemV1{Type: t, Value: item.Value}
 }
 
-// resolveTMLType returns the wire Type for a TML, inferring it from
-// GroupType when the caller hasn't set Type explicitly.
-func resolveTMLType(list TrafficMatchingList) string {
-	if list.Type != "" {
-		return list.Type
-	}
-	if list.GroupType == "ipv6-address-group" {
-		return "IPV6_ADDRESSES"
-	}
-	return "IPV4_ADDRESSES"
-}
-
 func tmlItemsToWire(list TrafficMatchingList) []apiTMLItemV1 {
 	items := make([]apiTMLItemV1, 0, len(list.Items))
 	for _, item := range list.Items {
@@ -804,11 +792,11 @@ func tmlItemsToWire(list TrafficMatchingList) []apiTMLItemV1 {
 }
 
 func tmlToWire(list TrafficMatchingList) apiTMLV1 {
-	return apiTMLV1{ID: list.ID, Type: resolveTMLType(list), Name: list.Name, Items: tmlItemsToWire(list)}
+	return apiTMLV1{ID: list.ID, Type: list.Type, Name: list.Name, Items: tmlItemsToWire(list)}
 }
 
 func tmlToWireUpdate(list TrafficMatchingList) apiTMLV1Update {
-	return apiTMLV1Update{Type: resolveTMLType(list), Name: list.Name, Items: tmlItemsToWire(list)}
+	return apiTMLV1Update{Type: list.Type, Name: list.Name, Items: tmlItemsToWire(list)}
 }
 
 // --- Zone Policies (integration v1) -----------------------------------------

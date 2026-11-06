@@ -71,21 +71,18 @@ func (sm *ShardManager) doCreateUniFiGroup(ctx context.Context, name string) (st
 
 // createShardObject sends the create request for a shard object.
 func (sm *ShardManager) createShardObject(ctx context.Context, name string) (string, error) {
-	groupType := "address-group"
-	if sm.ipv6 {
-		groupType = "ipv6-address-group"
-	}
 	if sm.mode == "zone" {
 		created, err := sm.ctrl.CreateTrafficMatchingList(ctx, sm.site, controller.TrafficMatchingList{
-			Name:      name,
-			Type:      tmlTypeForFamily(Family(sm.ipv6)),
-			GroupType: groupType,
-			Items:     tmlPlaceholderItems(sm.ipv6), // API requires non-empty items on create
+			Name:  name,
+			Type:  tmlTypeForFamily(Family(sm.ipv6)),
+			Items: tmlPlaceholderItems(sm.ipv6), // API requires non-empty items on create
 		})
 		return created.ID, err
 	}
+	groupType := "address-group"
 	placeholder := TMLPlaceholderV4
 	if sm.ipv6 {
+		groupType = "ipv6-address-group"
 		placeholder = TMLPlaceholderV6
 	}
 	created, err := sm.ctrl.CreateFirewallGroup(ctx, sm.site, controller.FirewallGroup{

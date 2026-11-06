@@ -65,11 +65,10 @@ type Zone struct {
 
 // TrafficMatchingList represents an integration v1 IP/port list (zone mode).
 type TrafficMatchingList struct {
-	ID        string
-	Type      string // "IPV4_ADDRESSES", "IPV6_ADDRESSES", "PORTS"
-	Name      string
-	GroupType string // legacy compat hint: "address-group", "ipv6-address-group"
-	Items     []TrafficMatchingListItem
+	ID    string
+	Type  string // "IPV4_ADDRESSES", "IPV6_ADDRESSES", "PORTS"
+	Name  string
+	Items []TrafficMatchingListItem
 }
 
 // TrafficMatchingListItem is one entry in a TrafficMatchingList.

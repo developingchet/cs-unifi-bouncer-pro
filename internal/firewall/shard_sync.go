@@ -186,11 +186,10 @@ func (sm *ShardManager) putShardMembers(ctx context.Context, shard *Shard, ips [
 			items = append(items, controller.TrafficMatchingListItem{Type: addressItemType(ip), Value: ip})
 		}
 		return len(ips), sm.ctrl.UpdateTrafficMatchingList(ctx, sm.site, controller.TrafficMatchingList{
-			ID:        shard.ID,
-			Name:      shard.Name,
-			Type:      tmlTypeForFamily(shard.Family),
-			GroupType: groupType,
-			Items:     items,
+			ID:    shard.ID,
+			Name:  shard.Name,
+			Type:  tmlTypeForFamily(shard.Family),
+			Items: items,
 		})
 	}
 	return len(ips), sm.ctrl.UpdateFirewallGroup(ctx, sm.site, controller.FirewallGroup{
