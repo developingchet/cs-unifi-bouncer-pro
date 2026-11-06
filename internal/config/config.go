@@ -44,8 +44,8 @@ type Config struct {
 	FirewallMode              string        `koanf:"firewall_mode"`
 	FirewallBlockAction       string        `koanf:"firewall_block_action"`
 	FirewallEnableIPv6        bool          `koanf:"firewall_enable_ipv6"`
-	EnableIPv6                bool          `koanf:"enable_ipv6"` // HTTP client IPv6 dialing
-	FirewallGroupCapacity     int           `koanf:"firewall_group_capacity"`
+	UnifiDialIPv6             bool          `koanf:"unifi_dial_ipv6"`         // controller client IPv6 dialing; ENABLE_IPV6 is the deprecated name
+	FirewallGroupCapacity     int           `koanf:"firewall_group_capacity"` // deprecated shard limit names; see ShardCapacities
 	FirewallGroupCapacityV4   int           `koanf:"firewall_group_capacity_v4"`
 	FirewallGroupCapacityV6   int           `koanf:"firewall_group_capacity_v6"`
 	FirewallAPIShardDelay     time.Duration `koanf:"firewall_api_shard_delay"`
@@ -57,6 +57,10 @@ type Config struct {
 	// Shard Management (integration v1)
 	SyncInterval time.Duration `koanf:"sync_interval"`
 	ShardLimit   int           `koanf:"shard_limit"`
+	// ShardLimitV4 and ShardLimitV6 lower ShardLimit for one address family;
+	// 0 uses ShardLimit.
+	ShardLimitV4 int `koanf:"shard_limit_v4"`
+	ShardLimitV6 int `koanf:"shard_limit_v6"`
 	// ShardMergeThreshold is read from env var SHARD_MERGE_THRESHOLD.
 	// 0 = auto (50% of ShardLimit). -1 = disable shard rebalancing.
 	ShardMergeThreshold int `koanf:"shard_merge_threshold"`
@@ -403,8 +407,6 @@ func defaults() map[string]interface{} {
 		"firewall_mode":                  "auto",
 		"firewall_block_action":          "drop",
 		"firewall_enable_ipv6":           true,
-		"enable_ipv6":                    false,
-		"firewall_group_capacity":        10000,
 		"firewall_api_shard_delay":       "250ms",
 		"firewall_connection_states":     "NEW,INVALID",
 		"egress_connection_states":       "NEW",
@@ -542,6 +544,7 @@ func Load() (*Config, error) {
 
 	// Strip Docker env-file quoting from all string values
 	cfg.sanitise()
+	cfg.applySettingAliases(k)
 
 	// Deprecation alias: FIREWALL_BATCH_WINDOW → SYNC_INTERVAL.
 	// If the user set the old variable but not the new one, migrate the value.
@@ -575,6 +578,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateTiming(); err != nil {
+		return err
+	}
+	if err := c.validateShardLimits(); err != nil {
 		return err
 	}
 	if err := c.validateFeeds(); err != nil {

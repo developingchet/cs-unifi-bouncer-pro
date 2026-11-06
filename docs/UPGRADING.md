@@ -78,6 +78,22 @@ Behaviour that changes without action:
   need `site` added or summed away, for example
   `sum by (endpoint) (rate(crowdsec_unifi_api_calls_total[5m]))`.
 
+Renamed settings. The old names keep working with the same effect, and each
+one in use logs a deprecation warning at startup:
+
+| Old name | New name |
+|----------|----------|
+| `FIREWALL_GROUP_CAPACITY` | `SHARD_LIMIT` |
+| `FIREWALL_GROUP_CAPACITY_V4` | `SHARD_LIMIT_V4` |
+| `FIREWALL_GROUP_CAPACITY_V6` | `SHARD_LIMIT_V6` |
+| `ENABLE_IPV6` | `UNIFI_DIAL_IPV6` |
+
+`SHARD_LIMIT_V4` and `SHARD_LIMIT_V6` take precedence over the old per-family
+names, and `UNIFI_DIAL_IPV6` over `ENABLE_IPV6`. Replacing
+`FIREWALL_GROUP_CAPACITY` with `SHARD_LIMIT` keeps the same shard sizes
+unless a per-family setting is larger than it: `SHARD_LIMIT` caps the
+per-family settings, `FIREWALL_GROUP_CAPACITY` did not.
+
 ## From 2.2 to 2.3
 
 The periodic LAPI resync (`CROWDSEC_RESYNC_INTERVAL`) now accepts a decision

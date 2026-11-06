@@ -58,7 +58,7 @@ External->Internal@192.168.1.10
 | `UNIFI_HTTP_TIMEOUT` | `120s` | No | HTTP request timeout for UniFi API calls. Must be greater than 0. |
 | `UNIFI_API_DEBUG` | `false` | No | Log each UniFi API call's method, URL, status and timing, plus connection trace events (DNS, connect, TLS handshake, first response byte). Logged at `debug` level only, so it also needs `LOG_LEVEL=debug` or `trace`; startup warns when the level hides it. Headers, cookies, CSRF tokens, API keys and request/response bodies are never logged, and the login request is not traced. |
 | `UNIFI_REQUIRE_HTTPS` | `true` | No | Refuses to start if `UNIFI_URL` uses `http://`. Set to `false` explicitly to allow a plaintext controller connection. |
-| `ENABLE_IPV6` | `false` | No | Enable IPv6 dialing for the HTTP client. Set to `true` only if your controller is reachable over IPv6 with a working network path. This is separate from `FIREWALL_ENABLE_IPV6`. |
+| `UNIFI_DIAL_IPV6` | `false` | No | Let the controller client dial IPv6 as well as IPv4. Set to `true` only if your controller is reachable over IPv6 with a working network path. This is separate from `FIREWALL_ENABLE_IPV6`, which decides whether IPv6 addresses are banned. `ENABLE_IPV6` is the deprecated name of this setting: it still works when `UNIFI_DIAL_IPV6` is unset, and logs a deprecation warning at startup. |
 
 ### Authentication priority
 
@@ -100,10 +100,7 @@ UNIFI_SITES=default,homelab,iot
 |----------|---------|----------|-------------|
 | `FIREWALL_MODE` | `auto` | No | `auto`, `legacy`, or `zone`. `auto` checks each site for firewall zones on startup: with an API key it asks the integration API; with username/password it reads the site's zone list. A site without zones uses legacy mode. A site with zones but no API key stops startup with an error asking for `UNIFI_API_KEY` (or, on UniFi Network 10.x and earlier, `FIREWALL_MODE=legacy`). On UniFi Network 11 and later, legacy mode stops startup, whether set or detected. |
 | `FIREWALL_BLOCK_ACTION` | `drop` | No | Action of legacy rules: `drop` or `reject`. Zone block policies always use `BLOCK`. |
-| `FIREWALL_ENABLE_IPV6` | `true` | No | Create separate IPv6 firewall groups and rules. Distinct from `ENABLE_IPV6` which controls HTTP client IPv6 dialing. With `false`, IPv6 decisions are ignored. Setting it to `false` stops IPv6 enforcement: startup removes the IPv6 rules or policies but leaves the IPv6 groups and their members, so setting it back to `true` restores them. Run `drain` to remove the groups too. |
-| `FIREWALL_GROUP_CAPACITY` | `10000` | No | Maximum IPs per shard, 1 to 10000 (used if family-specific overrides are not set). Capped at `SHARD_LIMIT`. |
-| `FIREWALL_GROUP_CAPACITY_V4` | — | No | Override capacity for IPv4 shards, 1 to 10000 (takes precedence over `FIREWALL_GROUP_CAPACITY`). `0` or unset uses `FIREWALL_GROUP_CAPACITY`. |
-| `FIREWALL_GROUP_CAPACITY_V6` | — | No | Override capacity for IPv6 shards, 1 to 10000 (takes precedence over `FIREWALL_GROUP_CAPACITY`). `0` or unset uses `FIREWALL_GROUP_CAPACITY`. |
+| `FIREWALL_ENABLE_IPV6` | `true` | No | Create separate IPv6 firewall groups and rules. Distinct from `UNIFI_DIAL_IPV6` which controls HTTP client IPv6 dialing. With `false`, IPv6 decisions are ignored. Setting it to `false` stops IPv6 enforcement: startup removes the IPv6 rules or policies but leaves the IPv6 groups and their members, so setting it back to `true` restores them. Run `drain` to remove the groups too. |
 | `FIREWALL_API_SHARD_DELAY` | `250ms` | No | Pause before structural writes: before each legacy rule create after the first, before creating the rule or policies for a newly created shard, and before deleting a pruned or drained group. Group membership updates (`PUT`) are not delayed. Gives the UDM time to finish regenerating its ruleset between structural changes. Set `0` to disable; negative values are rejected. |
 | `FIREWALL_LOG_DROPS` | `false` | No | Enable logging on managed firewall rules and zone policies. Existing zone policies are updated on reconcile. |
 | `FIREWALL_CONNECTION_STATES` | `NEW,INVALID` | No | Connection states matched by zone block policies. Allowed values: `NEW`, `INVALID`, `ESTABLISHED`, or `ALL` for unrestricted matching. `ALL` can block replies to outbound connections. |
@@ -115,10 +112,14 @@ UNIFI_SITES=default,homelab,iot
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `SYNC_INTERVAL` | `30s` | No | Retry interval for dirty shard flushes that failed after a decision batch. Shards are also flushed immediately after every decision batch. Minimum: `5s`. |
-| `SHARD_LIMIT` | `10000` | No | Maximum IPs per shard in both modes: Traffic Matching Lists in zone mode and firewall groups in legacy mode. The effective per-group capacity is the smaller of `FIREWALL_GROUP_CAPACITY` (or its `_V4`/`_V6` override) and `SHARD_LIMIT`. When a shard is full, a new shard (group plus its rule or zone policies) is created automatically; no IPs are dropped. Lowering the limit takes effect on restart: members beyond it move from existing shards into new ones. UniFi integration v1 supports up to 10,000 items per TML. |
+| `SHARD_LIMIT` | `10000` | No | Maximum IPs per shard in both modes: Traffic Matching Lists in zone mode and firewall groups in legacy mode, 1 to 10000. When a shard is full, a new shard (group plus its rule or zone policies) is created automatically; no IPs are dropped. Lowering the limit takes effect on restart: members beyond it move from existing shards into new ones. UniFi integration v1 supports up to 10,000 items per TML. |
+| `SHARD_LIMIT_V4` | — | No | Maximum IPs per IPv4 shard, 1 to 10000. `0` or unset uses `SHARD_LIMIT`; a value above `SHARD_LIMIT` is capped at it. |
+| `SHARD_LIMIT_V6` | — | No | Maximum IPs per IPv6 shard, 1 to 10000. `0` or unset uses `SHARD_LIMIT`; a value above `SHARD_LIMIT` is capped at it. |
 | `SHARD_MERGE_THRESHOLD` | `0` | No | IPs at or below this count make a shard eligible for consolidation into another shard. `0` = auto (50% of `SHARD_LIMIT`). `-1` disables rebalancing. |
 | `CIRCUIT_BREAKER_THRESHOLD` | `5` | No | Consecutive shard sync failures before the circuit breaker opens and suspends syncs. Must be at least 1. |
 | `CIRCUIT_BREAKER_RESET_INTERVAL` | `60s` | No | How long the open breaker waits before allowing a probe request (half-open). Must be greater than 0. |
+
+`FIREWALL_GROUP_CAPACITY`, `FIREWALL_GROUP_CAPACITY_V4` and `FIREWALL_GROUP_CAPACITY_V6` are the deprecated names of the shard limits. They still work, and each logs a deprecation warning at startup. A family's capacity is the first of these that is set and non-zero, capped at `SHARD_LIMIT`: `SHARD_LIMIT_V4` (or `_V6`), then `FIREWALL_GROUP_CAPACITY_V4` (or `_V6`), then `FIREWALL_GROUP_CAPACITY`. With none of them set, a family uses `SHARD_LIMIT`.
 
 ### Firewall mode details
 

@@ -77,7 +77,7 @@ func controllerConfig(cfg *config.Config) controller.ClientConfig {
 		ReauthMinGap:  cfg.SessionReauthMinGap,
 		ReauthTimeout: cfg.SessionReauthTimeout,
 		DryRun:        cfg.DryRun,
-		EnableIPv6:    cfg.EnableIPv6,
+		EnableIPv6:    cfg.UnifiDialIPv6,
 	}
 }
 
@@ -145,32 +145,11 @@ func buildFWManager(cfg *config.Config,
 	}, ctrl, store, namer, log), nil
 }
 
-// resolveCapacities determines effective v4/v6 group capacities from config,
-// applying the per-family overrides and falling back to the shared capacity.
+// resolveCapacities returns the effective IPv4 and IPv6 shard capacities.
+// SHARD_LIMIT is the ceiling for each managed list; the per-family settings
+// may lower it but never exceed it.
 func resolveCapacities(cfg *config.Config) (v4Cap, v6Cap int) {
-	v4Cap = cfg.FirewallGroupCapacityV4
-	if v4Cap == 0 {
-		v4Cap = cfg.FirewallGroupCapacity
-	}
-	// Each family falls back to the shared FIREWALL_GROUP_CAPACITY, so a
-	// FIREWALL_GROUP_CAPACITY_V4 override does not also shrink IPv6 groups.
-	v6Cap = cfg.FirewallGroupCapacityV6
-	if v6Cap == 0 {
-		v6Cap = cfg.FirewallGroupCapacity
-	}
-	// SHARD_LIMIT is the controller's hard ceiling for each managed list.
-	// Per-family capacity settings may lower it but must not exceed it.
-	limit := cfg.ShardLimit
-	if limit == 0 {
-		limit = firewall.ShardLimit
-	}
-	if v4Cap == 0 || v4Cap > limit {
-		v4Cap = limit
-	}
-	if v6Cap == 0 || v6Cap > limit {
-		v6Cap = limit
-	}
-	return v4Cap, v6Cap
+	return cfg.ShardCapacities(firewall.ShardLimit)
 }
 
 // buildLogger constructs a zerolog.Logger based on config.

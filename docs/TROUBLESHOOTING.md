@@ -174,23 +174,22 @@ A controller that is still starting answers with an error status instead; the bo
 error: init UniFi client: probe controller at https://192.168.1.1: ... context deadline exceeded
 ```
 
-**Cause:** With `ENABLE_IPV6=true` the HTTP client dials both IPv6 and IPv4 (happy eyeballs). When the host has IPv6 interfaces but no working IPv6 route to the controller, the IPv6 SYN stalls instead of being rejected, and each connection waits for it before falling back to IPv4.
+**Cause:** With `UNIFI_DIAL_IPV6=true` (or its deprecated name `ENABLE_IPV6=true`) the HTTP client dials both IPv6 and IPv4 (happy eyeballs). When the host has IPv6 interfaces but no working IPv6 route to the controller, the IPv6 SYN stalls instead of being rejected, and each connection waits for it before falling back to IPv4.
 
-**Fix:** Leave `ENABLE_IPV6` at its default, `false`:
+**Fix:** Leave `UNIFI_DIAL_IPV6` at its default, `false`, and remove `ENABLE_IPV6`:
 
 ```bash
-grep ENABLE_IPV6 .env
-# Should output nothing or "ENABLE_IPV6=false"
+grep -E '^(UNIFI_DIAL_IPV6|ENABLE_IPV6)=' .env
+# Should output nothing or "UNIFI_DIAL_IPV6=false"
 ```
 
-If it is set to `true`, change it to `false` and recreate the container:
+If either is set to `true`, set `UNIFI_DIAL_IPV6=false`, delete the `ENABLE_IPV6` line and recreate the container:
 
 ```bash
-sed -i 's/ENABLE_IPV6=true/ENABLE_IPV6=false/' .env
 docker compose up -d --force-recreate cs-unifi-bouncer-pro
 ```
 
-`ENABLE_IPV6` only controls how the bouncer dials the controller. `FIREWALL_ENABLE_IPV6`, which controls whether IPv6 bans are enforced, is independent of it.
+`UNIFI_DIAL_IPV6` only controls how the bouncer dials the controller. `FIREWALL_ENABLE_IPV6`, which controls whether IPv6 bans are enforced, is independent of it.
 
 To confirm the dial network, enable the request trace:
 
@@ -201,7 +200,7 @@ docker compose up -d --force-recreate cs-unifi-bouncer-pro
 docker logs cs-unifi-bouncer-pro 2>&1 | grep "httptrace: ConnectStart"
 ```
 
-With `ENABLE_IPV6=false` every line carries `"network":"tcp4"`; `tcp` means dual-stack dialing is on.
+With `UNIFI_DIAL_IPV6=false` every line carries `"network":"tcp4"`; `tcp` means dual-stack dialing is on.
 
 ---
 

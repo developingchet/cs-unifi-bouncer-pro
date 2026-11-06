@@ -70,7 +70,7 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 
 	// dialNetwork is "tcp4" by default to avoid happy eyeballs stalls where IPv6
 	// attempts to the UniFi controller blackhole silently for 15 seconds.
-	// Set EnableIPv6 = true (ENABLE_IPV6=true) only if your controller is
+	// Set EnableIPv6 = true (UNIFI_DIAL_IPV6=true) only if your controller is
 	// reachable over IPv6 with a working path.
 	dialNetwork := "tcp4"
 	if cfg.EnableIPv6 {
