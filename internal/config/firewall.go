@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -64,6 +65,11 @@ func (c *Config) validateFirewall() error {
 	if err := c.validateEgress(); err != nil {
 		return err
 	}
+	if c.FirewallMode != "zone" {
+		if err := c.validateLegacy(); err != nil {
+			return err
+		}
+	}
 
 	for _, pair := range []struct{ name, tmpl string }{
 		{"GROUP_NAME_TEMPLATE", c.GroupNameTemplate},
@@ -88,6 +94,49 @@ func (c *Config) validateFirewall() error {
 		}
 		if err := checkDuplicatePairs("ZONE_PAIRS", pairs); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// legacyRulesetsV4 and legacyRulesetsV6 are the rulesets the classic firewall
+// API accepts for each address family.
+var (
+	legacyRulesetsV4 = []string{
+		"WAN_IN", "WAN_OUT", "WAN_LOCAL", "LAN_IN", "LAN_OUT", "LAN_LOCAL", "GUEST_IN", "GUEST_OUT", "GUEST_LOCAL",
+	}
+	legacyRulesetsV6 = []string{
+		"WANv6_IN", "WANv6_OUT", "WANv6_LOCAL", "LANv6_IN", "LANv6_OUT", "LANv6_LOCAL", "GUESTv6_IN", "GUESTv6_OUT", "GUESTv6_LOCAL",
+	}
+)
+
+// maxLegacyRuleIndex is the highest rule index the legacy settings accept.
+// Shards take consecutive indexes from the start value.
+const maxLegacyRuleIndex = 99999
+
+// validateLegacy checks the legacy rule settings, which apply with
+// FIREWALL_MODE=legacy and to sites that auto mode resolves to legacy.
+func (c *Config) validateLegacy() error {
+	for _, rs := range []struct {
+		name, value string
+		allowed     []string
+	}{
+		{"LEGACY_RULESET_V4", c.LegacyRulesetV4, legacyRulesetsV4},
+		{"LEGACY_RULESET_V6", c.LegacyRulesetV6, legacyRulesetsV6},
+	} {
+		if !slices.Contains(rs.allowed, rs.value) {
+			return fmt.Errorf("%s must be one of %s; got %q", rs.name, strings.Join(rs.allowed, ","), rs.value)
+		}
+	}
+	for _, idx := range []struct {
+		name  string
+		value int
+	}{
+		{"LEGACY_RULE_INDEX_START_V4", c.LegacyRuleIndexStartV4},
+		{"LEGACY_RULE_INDEX_START_V6", c.LegacyRuleIndexStartV6},
+	} {
+		if idx.value < 1 || idx.value > maxLegacyRuleIndex {
+			return fmt.Errorf("%s must be between 1 and %d; got %d", idx.name, maxLegacyRuleIndex, idx.value)
 		}
 	}
 	return nil

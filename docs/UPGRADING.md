@@ -147,6 +147,22 @@ refused; run `validate` before upgrading:
   more than once`). The two entries shared policy and filter list names and
   overwrote each other, so only one was enforced. Merge them into one entry
   with all the ports: `External->Internal:80,443`.
+- **`METRICS_ADDR` and `HEALTH_ADDR` on one port**: the addresses are
+  compared as listen addresses, so `0.0.0.0:8081` and `:8081` clash; before,
+  only identical strings were refused and the second listener failed at
+  startup.
+- **Negative durations**: `LAPI_METRICS_PUSH_INTERVAL` and
+  `BLOCK_MIN_DURATION` reject negative values (`0` still disables them).
+- **`FIREWALL_BATCH_WINDOW`** that is not a duration fails validation
+  instead of being ignored.
+- **Legacy rule settings**: with `FIREWALL_MODE=legacy` or `auto`,
+  `LEGACY_RULESET_V4` must be one of the classic IPv4 rulesets (`WAN_IN`,
+  `WAN_LOCAL`, `LAN_IN`, ...) and `LEGACY_RULESET_V6` one of the IPv6 ones
+  (`WANv6_IN`, ...), and `LEGACY_RULE_INDEX_START_V4` and `_V6` must be
+  between 1 and 99999.
+- **CA certificate files**: `UNIFI_CA_CERT` and `CROWDSEC_LAPI_CA_CERT` must
+  name a readable file holding a PEM certificate. Before, a wrong path passed
+  `validate` and stopped the daemon when it built its HTTP client.
 
 ## From 2.2 to 2.3
 

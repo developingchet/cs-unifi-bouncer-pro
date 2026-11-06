@@ -100,6 +100,9 @@ Other settings checked at startup:
 
 - `GROUP_NAME_TEMPLATE`, `RULE_NAME_TEMPLATE` and `POLICY_NAME_TEMPLATE` must render a non-empty name that includes `{{.Index}}`, using only `.Family`, `.Index`, `.Site`, `.SrcZone` and `.DstZone`.
 - `WEBHOOK_EVENTS` accepts only the event names listed in [Webhook Notifications](CONFIGURATION.md#supported-event-names).
+- `ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS` name each `src->dst` pair once per site. `ZONE_PAIRS names External->Internal more than once` means two entries share their zones; merge them into one entry with all the ports (`External->Internal:80,443`).
+- `UNIFI_CA_CERT: cannot read /certs/ca.pem: ...` (or `CROWDSEC_LAPI_CA_CERT`) means the path is wrong or the file is not mounted into the container.
+- `METRICS_ADDR "0.0.0.0:8081" and HEALTH_ADDR ":8081" listen on the same port` means the two endpoints would compete for one socket; give them different ports.
 - Removed settings such as `ZONE_PAIRS_SCENARIO_MAP` are refused; see [Removed and Renamed Settings](CONFIGURATION.md#removed-and-renamed-settings).
 
 `validate` runs the same checks without contacting anything:

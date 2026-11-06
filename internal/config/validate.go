@@ -1,9 +1,11 @@
 package config
 
 import (
+	"crypto/x509"
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -65,6 +67,9 @@ func (c *Config) validateController() error {
 		c.DeprecationWarnings = append(c.DeprecationWarnings,
 			"UNIFI_VERIFY_TLS=false disables controller certificate validation; a network attacker could intercept credentials. Set UNIFI_VERIFY_TLS=true and configure UNIFI_CA_CERT for self-signed controllers")
 	}
+	if err := validateCACert("UNIFI_CA_CERT", c.UnifiCACert); err != nil {
+		return err
+	}
 	if c.CrowdSecLAPIKey == "" {
 		return fmt.Errorf("CROWDSEC_LAPI_KEY is required")
 	}
@@ -115,11 +120,19 @@ func (c *Config) validateOperational() error {
 	if lapiURL.Scheme == "http" && !isLoopbackHost(lapiURL.Hostname()) && !c.CrowdSecLAPIAllowHTTP {
 		return fmt.Errorf("CROWDSEC_LAPI_URL uses plaintext HTTP outside loopback; set CROWDSEC_LAPI_ALLOW_HTTP=true only on a trusted local network")
 	}
+	if err := validateCACert("CROWDSEC_LAPI_CA_CERT", c.CrowdSecLAPICACert); err != nil {
+		return err
+	}
 	if c.HealthAddr == "" {
 		return fmt.Errorf("HEALTH_ADDR must not be empty; the healthcheck subcommand probes %s when it is unset", defaultHealthAddr)
 	}
-	if c.MetricsEnabled && c.MetricsAddr == c.HealthAddr {
-		return fmt.Errorf("METRICS_ADDR and HEALTH_ADDR must differ; both are %q", c.MetricsAddr)
+	if c.MetricsEnabled {
+		if c.MetricsAddr == c.HealthAddr {
+			return fmt.Errorf("METRICS_ADDR and HEALTH_ADDR must differ; both are %q", c.MetricsAddr)
+		}
+		if listenAddrsClash(c.MetricsAddr, c.HealthAddr) {
+			return fmt.Errorf("METRICS_ADDR %q and HEALTH_ADDR %q listen on the same port; give them different ports", c.MetricsAddr, c.HealthAddr)
+		}
 	}
 	if len(c.UnifiSites) == 0 && !c.UnifiSitesAuto {
 		return fmt.Errorf("UNIFI_SITES must list at least one site, or set UNIFI_SITES_AUTO=true")
@@ -191,6 +204,8 @@ func (c *Config) validateTiming() error {
 		{"FIREWALL_API_SHARD_DELAY", c.FirewallAPIShardDelay},
 		{"FIREWALL_RECONCILE_INTERVAL", c.FirewallReconcileInterval},
 		{"SESSION_REAUTH_MIN_GAP", c.SessionReauthMinGap},
+		{"LAPI_METRICS_PUSH_INTERVAL", c.LAPIMetricsPushInterval},
+		{"BLOCK_MIN_DURATION", c.BlockMinDuration},
 	} {
 		if d.value < 0 {
 			return fmt.Errorf("%s must not be negative; got %s", d.name, d.value)
@@ -246,6 +261,66 @@ func isHTTPURL(raw string) bool {
 func isHTTPSURL(raw string) bool {
 	u, err := url.Parse(raw)
 	return err == nil && u.Host != "" && u.Scheme == "https"
+}
+
+// validateCACert checks that the CA bundle named by setting can be read and
+// holds at least one PEM certificate, so `validate` reports a wrong path
+// instead of the daemon failing when it builds its HTTP client.
+func validateCACert(setting, path string) error {
+	if path == "" {
+		return nil
+	}
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("%s: cannot read %s: %w", setting, path, err)
+	}
+	if !x509.NewCertPool().AppendCertsFromPEM(pem) {
+		return fmt.Errorf("%s: %s contains no PEM certificates", setting, path)
+	}
+	return nil
+}
+
+// listenAddrsClash reports whether two listen addresses would compete for the
+// same socket: the same port with the same host, or with a wildcard host
+// ("", 0.0.0.0 or ::) on either side, which takes every address. Port 0 asks
+// for any free port and never clashes. Addresses that do not parse are
+// compared as written.
+func listenAddrsClash(a, b string) bool {
+	hostA, portA, errA := net.SplitHostPort(a)
+	hostB, portB, errB := net.SplitHostPort(b)
+	if errA != nil || errB != nil {
+		return a == b
+	}
+	numA, errA := net.LookupPort("tcp", portA)
+	numB, errB := net.LookupPort("tcp", portB)
+	if errA != nil || errB != nil {
+		if portA != portB {
+			return false
+		}
+	} else if numA != numB || numA == 0 {
+		return false
+	}
+	if isWildcardHost(hostA) || isWildcardHost(hostB) {
+		return true
+	}
+	ipA, ipB := net.ParseIP(hostA), net.ParseIP(hostB)
+	switch {
+	case ipA != nil && ipB != nil:
+		return ipA.Equal(ipB)
+	case strings.EqualFold(hostA, "localhost"):
+		return isLoopbackHost(hostB)
+	case strings.EqualFold(hostB, "localhost"):
+		return isLoopbackHost(hostA)
+	}
+	return strings.EqualFold(hostA, hostB)
+}
+
+func isWildcardHost(host string) bool {
+	if host == "" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsUnspecified()
 }
 
 // isLoopbackHost reports whether host is the loopback address or "localhost".

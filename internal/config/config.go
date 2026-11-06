@@ -226,10 +226,13 @@ func Load() (*Config, error) {
 
 	// Deprecation alias: FIREWALL_BATCH_WINDOW → SYNC_INTERVAL.
 	// If the user set the old variable but not the new one, migrate the value.
-	if bw := os.Getenv("FIREWALL_BATCH_WINDOW"); bw != "" && os.Getenv("SYNC_INTERVAL") == "" {
-		if d, parseErr := time.ParseDuration(bw); parseErr == nil {
-			cfg.SyncInterval = d
+	// SYNC_INTERVAL is looked up in the environment: koanf holds its default.
+	if bw := strings.TrimSpace(k.String("firewall_batch_window")); bw != "" && strings.TrimSpace(os.Getenv("SYNC_INTERVAL")) == "" {
+		d, parseErr := time.ParseDuration(bw)
+		if parseErr != nil {
+			return nil, fmt.Errorf("FIREWALL_BATCH_WINDOW (deprecated; use SYNC_INTERVAL) must be a duration such as 30s; got %q", bw)
 		}
+		cfg.SyncInterval = d
 		cfg.DeprecationWarnings = append(cfg.DeprecationWarnings,
 			"FIREWALL_BATCH_WINDOW is deprecated; use SYNC_INTERVAL instead")
 	}
