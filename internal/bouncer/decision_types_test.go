@@ -23,9 +23,9 @@ func TestBouncer_BlockDecisionTypes(t *testing.T) {
 			cfg := &config.Config{UnifiSites: []string{"default"}, BanTTL: time.Hour, BlockDecisionTypes: tt.types}
 			b := newTestBouncer(t, cfg)
 			var jobs []SyncJob
-			b.handler = func(_ context.Context, job SyncJob) error {
-				jobs = append(jobs, job)
-				return nil
+			b.handler = func(_ context.Context, batch []SyncJob) []error {
+				jobs = append(jobs, batch...)
+				return make([]error, len(batch))
 			}
 			typ, scope, ip := "captcha", "ip", "198.51.100.9"
 			d := &models.Decision{ID: 7, Type: &typ, Scope: &scope, Value: &ip}

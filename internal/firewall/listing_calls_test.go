@@ -27,10 +27,10 @@ func countListings(ctrl *testutil.MockController) listingCalls {
 
 func recordBans(t *testing.T, store *testutil.MockStore, v4, v6 string) {
 	t.Helper()
-	if err := store.BanRecord(v4, time.Time{}, false); err != nil {
+	if err := testutil.PutBan(store, v4, time.Time{}, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.BanRecord(v6, time.Time{}, true); err != nil {
+	if err := testutil.PutBan(store, v6, time.Time{}, true); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -107,7 +107,7 @@ func TestZoneReconcileCreatingAShardListsOnce(t *testing.T) {
 	}
 	// Capacity is 5: five more bans fill shard 0 and open shard 1.
 	for i := 2; i <= 6; i++ {
-		if err := store.BanRecord(fmt.Sprintf("198.51.100.%d", i), time.Time{}, false); err != nil {
+		if err := testutil.PutBan(store, fmt.Sprintf("198.51.100.%d", i), time.Time{}, false); err != nil {
 			t.Fatal(err)
 		}
 	}
