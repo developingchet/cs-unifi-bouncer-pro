@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 )
 
 // Reconcile performs a full diff between bbolt state and UniFi API state.
 func (m *managerImpl) Reconcile(ctx context.Context, sites []string) (*ReconcileResult, error) {
+	ctx, endPass := controller.BeginPass(ctx)
+	defer endPass()
 	start := time.Now()
 	result := &ReconcileResult{}
 

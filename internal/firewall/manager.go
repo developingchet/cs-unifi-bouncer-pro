@@ -142,8 +142,11 @@ type managerImpl struct {
 	bgCtxMu sync.Once
 }
 
-// NewManager constructs a Manager.
+// NewManager constructs a Manager. Reconcile, EnsureInfrastructure,
+// LoadInfrastructure and RepairInfrastructure each run as one listing pass
+// (see controller.BeginPass).
 func NewManager(cfg ManagerConfig, ctrl controller.Controller, store storage.Store, namer *Namer, log zerolog.Logger) Manager {
+	ctrl = controller.WithListingPasses(ctrl)
 	legacyMgr := NewLegacyManager(cfg.LegacyCfg, namer, ctrl, store, log)
 	zoneMgr := NewZoneManager(cfg.ZoneCfg, namer, ctrl, store, log)
 
@@ -165,6 +168,8 @@ func NewManager(cfg ManagerConfig, ctrl controller.Controller, store storage.Sto
 
 // EnsureInfrastructure bootstraps all groups and rules/policies for every site.
 func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) error {
+	ctx, endPass := controller.BeginPass(ctx)
+	defer endPass()
 	if err := m.LoadInfrastructure(ctx, sites); err != nil {
 		return err
 	}
@@ -175,6 +180,8 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 // Shards that cannot be provisioned are retried on later syncs and do not
 // fail the call.
 func (m *managerImpl) RepairInfrastructure(ctx context.Context, sites []string) error {
+	ctx, endPass := controller.BeginPass(ctx)
+	defer endPass()
 	for _, site := range sites {
 		m.mu.RLock()
 		v4Mgr := m.v4Mgrs[site]
@@ -218,6 +225,8 @@ func (m *managerImpl) RepairInfrastructure(ctx context.Context, sites []string) 
 func (m *managerImpl) LoadInfrastructure(ctx context.Context, sites []string) error {
 	m.bgCtxMu.Do(func() { m.bgCtx = ctx })
 	m.sites = sites
+	ctx, endPass := controller.BeginPass(ctx)
+	defer endPass()
 
 	for _, site := range sites {
 		// Callers (main.go runDaemon and reconcileCmd) pre-resolve capacities
@@ -307,8 +316,9 @@ func (m *managerImpl) wireShardManager(site string, ipv6 bool, sm *ShardManager)
 	// Provision infrastructure when Pending shards become Active. Use m.bgCtx
 	// (the long-lived daemon context) rather than the callback's ctx so that
 	// a cancelled startup context does not abort mid-run shard provisioning.
-	sm.SetActivationCallback(func(_ context.Context, shardIdx int, groupID string) error {
-		if err := m.ensureNewShardInfrastructure(m.bgCtx, site, ipv6, shardIdx, sm); err != nil {
+	// The listing pass of the flush that activated the shard still applies.
+	sm.SetActivationCallback(func(ctx context.Context, shardIdx int, groupID string) error {
+		if err := m.ensureNewShardInfrastructure(controller.WithPassOf(m.bgCtx, ctx), site, ipv6, shardIdx, sm); err != nil {
 			m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).Str("group_id", groupID).
 				Msg(activationFailedMsg)
 			return err

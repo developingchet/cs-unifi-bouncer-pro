@@ -39,7 +39,7 @@ type LegacyManager struct {
 
 // NewLegacyManager constructs a LegacyManager.
 func NewLegacyManager(cfg LegacyConfig, namer *Namer, ctrl controller.Controller, store storage.Store, log zerolog.Logger) *LegacyManager {
-	return &LegacyManager{cfg: cfg, namer: namer, ctrl: ctrl, store: store, log: log}
+	return &LegacyManager{cfg: cfg, namer: namer, ctrl: controller.WithListingPasses(ctrl), store: store, log: log}
 }
 
 // EnsureRules idempotently creates drop rules for each group shard.
@@ -407,9 +407,10 @@ func (lm *LegacyManager) DeleteRules(ctx context.Context, site string) error {
 
 // lookupRuleByName finds a firewall rule by name. It is used for conflict
 // recovery: when a create reports the rule already exists, the bouncer adopts
-// it instead of creating another.
+// it instead of creating another. The rule is not in the listing the conflict
+// was decided on, so the controller is listed afresh.
 func (lm *LegacyManager) lookupRuleByName(ctx context.Context, site, name string) (controller.FirewallRule, bool, error) {
-	rules, err := lm.ctrl.ListFirewallRules(ctx, site)
+	rules, err := lm.ctrl.ListFirewallRules(controller.FreshListing(ctx), site)
 	if err != nil {
 		return controller.FirewallRule{}, false, fmt.Errorf("list firewall rules: %w", err)
 	}

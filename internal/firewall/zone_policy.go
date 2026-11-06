@@ -505,7 +505,7 @@ func (zm *ZoneManager) stageReplacementPolicy(ctx context.Context, site string, 
 	if !errors.As(err, &conflict) {
 		return controller.ZonePolicy{}, fmt.Errorf("create staged policy %s: %w", stagedName, err)
 	}
-	policies, listErr := zm.ctrl.ListZonePolicies(ctx, site)
+	policies, listErr := zm.ctrl.ListZonePolicies(controller.FreshListing(ctx), site)
 	if listErr != nil {
 		return controller.ZonePolicy{}, fmt.Errorf("find staged policy %s: %w", stagedName, listErr)
 	}
@@ -591,9 +591,10 @@ func sameConnectionStates(a, b []string) bool {
 }
 
 // lookupPolicyByName finds a zone policy by name. It is used for conflict
-// recovery and to confirm a 404 before recreating a policy.
+// recovery and to confirm a 404 before recreating a policy, so it lists the
+// controller afresh rather than reading the pass's listing.
 func (zm *ZoneManager) lookupPolicyByName(ctx context.Context, site, name string) (controller.ZonePolicy, bool, error) {
-	policies, err := zm.ctrl.ListZonePolicies(ctx, site)
+	policies, err := zm.ctrl.ListZonePolicies(controller.FreshListing(ctx), site)
 	if err != nil {
 		return controller.ZonePolicy{}, false, fmt.Errorf("list zone policies: %w", err)
 	}

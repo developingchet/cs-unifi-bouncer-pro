@@ -50,7 +50,7 @@ type ZoneManager struct {
 
 // NewZoneManager constructs a ZoneManager.
 func NewZoneManager(cfg ZoneConfig, namer *Namer, ctrl controller.Controller, store storage.Store, log zerolog.Logger) *ZoneManager {
-	return &ZoneManager{cfg: cfg, namer: namer, ctrl: ctrl, store: store, log: log}
+	return &ZoneManager{cfg: cfg, namer: namer, ctrl: controller.WithListingPasses(ctrl), store: store, log: log}
 }
 
 // Bootstrap performs fail-fast startup discovery for all configured sites:

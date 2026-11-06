@@ -72,8 +72,14 @@ func whitelistName(kind string, pair ZonePairConfig, suffix string) string {
 }
 
 // Sync fetches current Cloudflare IPs and ensures TMLs are up to date.
-// Call at startup and on each weekly tick.
+// Call at startup and on each weekly tick. A sync is one listing pass (see
+// controller.BeginPass): with a Controller wrapped by
+// controller.WithListingPasses, each site's lists are fetched once and the
+// steps share that listing.
 func (m *Manager) Sync(ctx context.Context, zonePairs []ZonePairConfig) error {
+	ctx, endPass := controller.BeginPass(ctx)
+	defer endPass()
+
 	ipv4, err := m.provider.FetchIPv4(ctx)
 	if err != nil {
 		return fmt.Errorf("fetch Cloudflare IPv4: %w", err)
@@ -222,7 +228,7 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 
 	// Sweep a fresh listing: policies recreated above may have taken the IDs of
 	// the ones they replaced.
-	current, err := m.ctrl.ListZonePolicies(ctx, site)
+	current, err := m.ctrl.ListZonePolicies(controller.FreshListing(ctx), site)
 	if err != nil {
 		return errors.Join(append(orderErrs, fmt.Errorf("list zone policies for site %s: %w", site, err))...)
 	}
@@ -519,8 +525,10 @@ func orderError(site string, wrong []misorderedBlock, err error) error {
 
 // blocksAheadOfAllow lists the enabled blocks of pair's zones and address
 // family that the controller evaluates before one of the allows in policyIDs.
+// The order is the controller's, which every create or delete may change, so
+// the policies are listed afresh.
 func (m *Manager) blocksAheadOfAllow(ctx context.Context, site string, pair ZonePairConfig, policyIDs []string) ([]misorderedBlock, error) {
-	policies, err := m.ctrl.ListZonePolicies(ctx, site)
+	policies, err := m.ctrl.ListZonePolicies(controller.FreshListing(ctx), site)
 	if err != nil {
 		return nil, fmt.Errorf("list policies to verify Cloudflare order in site %s: %w", site, err)
 	}

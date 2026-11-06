@@ -162,6 +162,14 @@ func (m *MockController) Calls(method string) int {
 	return m.calls[method]
 }
 
+// ResetCalls clears every call count, so a test can count the calls of one
+// operation after setting up for it.
+func (m *MockController) ResetCalls() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clear(m.calls)
+}
+
 // popError returns and clears any pending error for the given method.
 func (m *MockController) popError(method string) error {
 	err := m.errors[method]

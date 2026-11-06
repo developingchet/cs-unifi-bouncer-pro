@@ -44,11 +44,14 @@ func runDaemon() error {
 		}
 	}
 
-	ctrl, err := controller.NewClient(context.Background(), controllerConfig(cfg), log)
+	client, err := controller.NewClient(context.Background(), controllerConfig(cfg), log)
 	if err != nil {
 		return fmt.Errorf("init UniFi client: %w", err)
 	}
-	defer ctrl.Close()
+	defer client.Close()
+	// Reconciles and whitelist syncs each list a site's objects once and share
+	// that listing between their steps (see controller.BeginPass).
+	ctrl := controller.WithListingPasses(client)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
