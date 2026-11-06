@@ -418,7 +418,7 @@ func (m *managerImpl) ApplyBan(ctx context.Context, site, ip string, ipv6 bool) 
 		return fmt.Errorf("no shard manager for site %s (ipv6=%v)", site, ipv6)
 	}
 
-	_, newShardIdx, err := sm.Add(ctx, ip)
+	newShardIdx, err := sm.Add(ctx, ip)
 	if err != nil {
 		return err
 	}
@@ -454,7 +454,7 @@ func (m *managerImpl) ApplyUnban(ctx context.Context, site, ip string, ipv6 bool
 		return nil // site not managed
 	}
 
-	if _, err := sm.Remove(ctx, ip); err != nil {
+	if err := sm.Remove(ctx, ip); err != nil {
 		return err
 	}
 	return nil

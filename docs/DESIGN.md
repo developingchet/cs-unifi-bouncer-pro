@@ -500,6 +500,8 @@ The `source` label of the feed metrics is the feed's claim source, `blocklist:sh
 
 The `shard` label is the group name (e.g. `crowdsec-block-v4-0`) on `firewall_group_size` and `shard_occupancy_ratio`, and the numeric shard index on `shard_ip_count`, `shard_sync_total` and `shard_sync_duration_seconds`.
 
+`firewall_group_size`, `shard_occupancy_ratio` and `unsynced_ips` follow shard membership at each sync (after every decision batch and every `SYNC_INTERVAL` tick, including ticks that write nothing because of a rate limit or an open breaker) and each reconcile, rather than at every added address.
+
 ### CrowdSec usage metrics
 
 The bouncer pushes decision telemetry to the CrowdSec LAPI `/v1/usage-metrics` endpoint every `LAPI_METRICS_PUSH_INTERVAL` (default 30 minutes, at least 10 minutes; `0` disables it). Each push reports a delta window, and the counters reset after every push:

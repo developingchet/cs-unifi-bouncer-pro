@@ -230,7 +230,7 @@ func TestAdd_Basic(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	_, _, err := sm.Add(context.Background(), "10.0.0.1")
+	_, err := sm.Add(context.Background(), "10.0.0.1")
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -257,8 +257,8 @@ func TestAdd_Idempotent(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	_, _, _ = sm.Add(context.Background(), "10.0.0.1")
-	_, _, _ = sm.Add(context.Background(), "10.0.0.1")
+	_, _ = sm.Add(context.Background(), "10.0.0.1")
+	_, _ = sm.Add(context.Background(), "10.0.0.1")
 
 	members := sm.AllMembers()
 	count := 0
@@ -288,7 +288,7 @@ func TestAdd_NewShardOnOverflow(t *testing.T) {
 	// Fill first shard to capacity, then add one more.
 	for i := 0; i <= capacity; i++ {
 		ip := fmt.Sprintf("10.0.0.%d", i+1)
-		if _, _, err := sm.Add(context.Background(), ip); err != nil {
+		if _, err := sm.Add(context.Background(), ip); err != nil {
 			t.Fatalf("Add(%s): %v", ip, err)
 		}
 	}
@@ -315,10 +315,10 @@ func TestRemove_Basic(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+	if _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	if _, err := sm.Remove(context.Background(), "10.0.0.1"); err != nil {
+	if err := sm.Remove(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 
@@ -338,7 +338,7 @@ func TestRemove_Idempotent(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	if _, err := sm.Remove(context.Background(), "192.168.1.1"); err != nil {
+	if err := sm.Remove(context.Background(), "192.168.1.1"); err != nil {
 		t.Fatalf("Remove of missing IP returned error: %v", err)
 	}
 }
@@ -354,7 +354,7 @@ func TestFlushDirty_UpdatesAPI(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+	if _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := sm.FlushDirty(context.Background()); err != nil {
@@ -397,7 +397,7 @@ func TestFlushDirty_APIError(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 
-	if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+	if _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
@@ -422,7 +422,7 @@ func TestAllMembers_AcrossShards(t *testing.T) {
 
 	ips := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
 	for _, ip := range ips {
-		if _, _, err := sm.Add(context.Background(), ip); err != nil {
+		if _, err := sm.Add(context.Background(), ip); err != nil {
 			t.Fatalf("Add(%s): %v", ip, err)
 		}
 	}
@@ -457,7 +457,7 @@ func TestGroupIDs(t *testing.T) {
 	// Force a second shard by overflowing the first.
 	for i := 0; i <= capacity; i++ {
 		ip := fmt.Sprintf("10.0.0.%d", i+1)
-		if _, _, err := sm.Add(context.Background(), ip); err != nil {
+		if _, err := sm.Add(context.Background(), ip); err != nil {
 			t.Fatalf("Add(%s): %v", ip, err)
 		}
 	}
@@ -499,11 +499,11 @@ func TestConcurrentAddRemove(t *testing.T) {
 		ip := fmt.Sprintf("10.1.%d.%d", i/256, i%256)
 		go func(ip string) {
 			defer wg.Done()
-			_, _, _ = sm.Add(context.Background(), ip)
+			_, _ = sm.Add(context.Background(), ip)
 		}(ip)
 		go func(ip string) {
 			defer wg.Done()
-			_, _ = sm.Remove(context.Background(), ip)
+			_ = sm.Remove(context.Background(), ip)
 		}(ip)
 	}
 
@@ -525,7 +525,7 @@ func TestAdd_NewShardOnOverflow_ReturnsNewIdx(t *testing.T) {
 
 	// With lazy creation, first IP creates shard 0 (newIdx = 0).
 	ip := fmt.Sprintf("10.0.0.%d", 1)
-	_, newIdx, err := sm.Add(context.Background(), ip)
+	newIdx, err := sm.Add(context.Background(), ip)
 	if err != nil {
 		t.Fatalf("Add(%s): %v", ip, err)
 	}
@@ -536,7 +536,7 @@ func TestAdd_NewShardOnOverflow_ReturnsNewIdx(t *testing.T) {
 	// Fill first shard to capacity — newShardIdx should be -1 for remaining IPs.
 	for i := 1; i < capacity; i++ {
 		ip := fmt.Sprintf("10.0.0.%d", i+1)
-		_, newIdx, err := sm.Add(context.Background(), ip)
+		newIdx, err := sm.Add(context.Background(), ip)
 		if err != nil {
 			t.Fatalf("Add(%s): %v", ip, err)
 		}
@@ -546,7 +546,7 @@ func TestAdd_NewShardOnOverflow_ReturnsNewIdx(t *testing.T) {
 	}
 
 	// One more IP forces a new shard — newShardIdx should be 1.
-	_, overflowIdx, err := sm.Add(context.Background(), "10.0.0.99")
+	overflowIdx, err := sm.Add(context.Background(), "10.0.0.99")
 	if err != nil {
 		t.Fatalf("Add overflow IP: %v", err)
 	}
@@ -569,7 +569,7 @@ func TestPrunableTail(t *testing.T) {
 		if _, _, ok := sm.PrunableTail(); ok {
 			t.Error("PrunableTail: got ok=true with no shard")
 		}
-		if _, _, err := sm.Add(ctx, "10.0.0.1"); err != nil {
+		if _, err := sm.Add(ctx, "10.0.0.1"); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
 		if err := sm.FlushDirty(ctx); err != nil {
@@ -578,7 +578,7 @@ func TestPrunableTail(t *testing.T) {
 		if _, _, ok := sm.PrunableTail(); ok {
 			t.Error("PrunableTail: got ok=true for shard 0 holding a ban")
 		}
-		if _, err := sm.Remove(ctx, "10.0.0.1"); err != nil {
+		if err := sm.Remove(ctx, "10.0.0.1"); err != nil {
 			t.Fatalf("Remove: %v", err)
 		}
 		_, idx, ok := sm.PrunableTail()
@@ -595,10 +595,10 @@ func TestPrunableTail(t *testing.T) {
 			t.Fatalf("EnsureShards: %v", err)
 		}
 		// Create two shards, both with IPs
-		if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+		if _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
-		if _, _, err := sm.Add(context.Background(), "10.0.0.2"); err != nil {
+		if _, err := sm.Add(context.Background(), "10.0.0.2"); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
 		_, _, ok := sm.PrunableTail()
@@ -616,16 +616,16 @@ func TestPrunableTail(t *testing.T) {
 		}
 		// Add two IPs to overflow into shard 1, flush to make both Active,
 		// then remove the overflow IP leaving shard 1 empty and prunable.
-		if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+		if _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 			t.Fatalf("Add shard0: %v", err)
 		}
-		if _, _, err := sm.Add(context.Background(), "10.0.0.2"); err != nil {
+		if _, err := sm.Add(context.Background(), "10.0.0.2"); err != nil {
 			t.Fatalf("Add shard1 overflow: %v", err)
 		}
 		if err := sm.FlushDirty(context.Background()); err != nil {
 			t.Fatalf("FlushDirty: %v", err)
 		}
-		if _, err := sm.Remove(context.Background(), "10.0.0.2"); err != nil {
+		if err := sm.Remove(context.Background(), "10.0.0.2"); err != nil {
 			t.Fatalf("Remove: %v", err)
 		}
 		// Now shard 1 is empty and there are 2 shards → prunable
@@ -650,16 +650,16 @@ func TestRemoveTail(t *testing.T) {
 	}
 
 	// Create two shards via overflow, flush to make both Active, then empty shard 1.
-	if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+	if _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Add shard0: %v", err)
 	}
-	if _, _, err := sm.Add(context.Background(), "10.0.0.2"); err != nil {
+	if _, err := sm.Add(context.Background(), "10.0.0.2"); err != nil {
 		t.Fatalf("Add shard1: %v", err)
 	}
 	if err := sm.FlushDirty(context.Background()); err != nil {
 		t.Fatalf("FlushDirty: %v", err)
 	}
-	if _, err := sm.Remove(context.Background(), "10.0.0.2"); err != nil {
+	if err := sm.Remove(context.Background(), "10.0.0.2"); err != nil {
 		t.Fatalf("Remove shard1 IP: %v", err)
 	}
 
@@ -701,7 +701,7 @@ func TestCreateShard_SendsNonEmptyItems(t *testing.T) {
 	}
 
 	// Add an IP to trigger shard creation (in Pending state)
-	if _, newIdx, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+	if newIdx, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Add: %v", err)
 	} else if newIdx != 0 {
 		t.Errorf("Add: newIdx = %d, want 0", newIdx)
@@ -732,7 +732,7 @@ func TestPendingShardRetriesUpdateWithoutRecreating(t *testing.T) {
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
-	if _, _, err := sm.Add(context.Background(), "198.51.100.41"); err != nil {
+	if _, err := sm.Add(context.Background(), "198.51.100.41"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
@@ -760,7 +760,7 @@ func TestActivationFailureRetriesWithoutRewritingGroup(t *testing.T) {
 	if err := sm.EnsureShards(context.Background()); err != nil {
 		t.Fatalf("EnsureShards: %v", err)
 	}
-	if _, _, err := sm.Add(context.Background(), "198.51.100.42"); err != nil {
+	if _, err := sm.Add(context.Background(), "198.51.100.42"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
@@ -802,7 +802,7 @@ func TestSyncShard_SendsPlaceholderWhenEmpty(t *testing.T) {
 	}
 
 	// Add an IP and flush to transition the shard to Active.
-	if _, newIdx, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+	if newIdx, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Add: %v", err)
 	} else if newIdx != 0 {
 		t.Errorf("Add: newIdx = %d, want 0", newIdx)
@@ -917,7 +917,7 @@ func TestSyncShard_PutNotFound_ResetsToPending(t *testing.T) {
 	sm.mu.RUnlock()
 
 	// Add a new IP to make the shard dirty.
-	if _, _, err := sm.Add(context.Background(), "10.0.0.2"); err != nil {
+	if _, err := sm.Add(context.Background(), "10.0.0.2"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 

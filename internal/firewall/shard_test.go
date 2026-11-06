@@ -44,11 +44,11 @@ func newShardTestManager(t *testing.T, mode string, capacity int) (*ShardManager
 		t.Fatalf("EnsureShards: %v", err)
 	}
 	// With lazy creation, add a dummy IP to create shard 0 for testing
-	if _, _, err := sm.Add(context.Background(), "10.0.0.0"); err != nil {
+	if _, err := sm.Add(context.Background(), "10.0.0.0"); err != nil {
 		t.Fatalf("Add dummy IP: %v", err)
 	}
 	// Remove it so the shard exists but is empty for capacity testing
-	if _, err := sm.Remove(context.Background(), "10.0.0.0"); err != nil {
+	if err := sm.Remove(context.Background(), "10.0.0.0"); err != nil {
 		t.Fatalf("Remove dummy IP: %v", err)
 	}
 	return sm, ctrl
@@ -265,7 +265,7 @@ func TestNoDuplicatesAcrossShards(t *testing.T) {
 	if err := sm.AddIP(context.Background(), ip); err != nil {
 		t.Fatalf("AddIP: %v", err)
 	}
-	if _, _, err := sm.Add(context.Background(), ip); err != nil {
+	if _, err := sm.Add(context.Background(), ip); err != nil {
 		t.Fatalf("Add wrapper: %v", err)
 	}
 

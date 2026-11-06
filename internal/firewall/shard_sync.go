@@ -36,6 +36,7 @@ func (sm *ShardManager) countDirty() int {
 // still attempted, except after a rate limit or once the manager has paused writes: the
 // controller is refusing requests then, and the rest stay dirty for the next tick.
 func (sm *ShardManager) syncAllFamilies(ctx context.Context) error {
+	sm.refreshMetrics()
 	// Snapshot shard pointers under read lock.
 	// Individual shard operations (IPSet) are internally lock-protected,
 	// so iterating snapshots outside the lock is safe.

@@ -33,7 +33,7 @@ func TestDiffFamilyConfirmsChangesAgainstBanDatabase(t *testing.T) {
 		}
 	}
 	for _, ip := range []string{kept, fresh, stale} {
-		if _, _, err := sm.Add(ctx, ip); err != nil {
+		if _, err := sm.Add(ctx, ip); err != nil {
 			t.Fatal(err)
 		}
 	}

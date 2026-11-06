@@ -29,13 +29,13 @@ func ensuredV4Shard(t *testing.T, ctrl controller.Controller, store storage.Stor
 	}
 	// With lazy creation, add a dummy IP to trigger shard allocation, then flush
 	// to transition Pending→Active (giving the shard a real UniFi ID), then remove.
-	if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+	if _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Add dummy IP: %v", err)
 	}
 	if err := sm.FlushDirty(context.Background()); err != nil {
 		t.Fatalf("FlushDirty: %v", err)
 	}
-	if _, err := sm.Remove(context.Background(), "10.0.0.1"); err != nil {
+	if err := sm.Remove(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Remove dummy IP: %v", err)
 	}
 	return sm
@@ -49,13 +49,13 @@ func ensuredV6Shard(t *testing.T, ctrl controller.Controller, store storage.Stor
 	}
 	// With lazy creation, add a dummy IP to trigger shard allocation, then flush
 	// to transition Pending→Active (giving the shard a real UniFi ID), then remove.
-	if _, _, err := sm.Add(context.Background(), "2001:db8::1"); err != nil {
+	if _, err := sm.Add(context.Background(), "2001:db8::1"); err != nil {
 		t.Fatalf("Add dummy IP: %v", err)
 	}
 	if err := sm.FlushDirty(context.Background()); err != nil {
 		t.Fatalf("FlushDirty: %v", err)
 	}
-	if _, err := sm.Remove(context.Background(), "2001:db8::1"); err != nil {
+	if err := sm.Remove(context.Background(), "2001:db8::1"); err != nil {
 		t.Fatalf("Remove dummy IP: %v", err)
 	}
 	return sm

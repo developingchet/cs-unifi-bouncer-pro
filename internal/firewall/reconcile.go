@@ -56,7 +56,7 @@ func (m *managerImpl) diffFamily(ctx context.Context, sm *ShardManager, desired 
 		if !recorded {
 			continue
 		}
-		if _, _, err := sm.Add(ctx, ip); err != nil {
+		if _, err := sm.Add(ctx, ip); err != nil {
 			errs = append(errs, err)
 		} else {
 			added++
@@ -78,7 +78,7 @@ func (m *managerImpl) diffFamily(ctx context.Context, sm *ShardManager, desired 
 		if recorded {
 			continue
 		}
-		if _, err := sm.Remove(ctx, ip); err != nil {
+		if err := sm.Remove(ctx, ip); err != nil {
 			errs = append(errs, err)
 		} else {
 			removed++
@@ -131,6 +131,7 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 		}
 	}
 
+	m.refreshShardMetrics([]string{site})
 	if m.cfg.DryRun {
 		if added > 0 || removed > 0 {
 			m.log.Info().Str("site", site).Int("would_add", added).Int("would_remove", removed).

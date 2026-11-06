@@ -455,7 +455,7 @@ func TestReconcile_RemovesExtra(t *testing.T) {
 	v4 := mi.v4Mgrs[testSite]
 	mi.mu.RUnlock()
 
-	if _, _, err := v4.Add(context.Background(), "10.0.0.99"); err != nil {
+	if _, err := v4.Add(context.Background(), "10.0.0.99"); err != nil {
 		t.Fatalf("direct shard Add: %v", err)
 	}
 	// Flush to create the shard Active in UniFi so Reconcile's sync can update it.

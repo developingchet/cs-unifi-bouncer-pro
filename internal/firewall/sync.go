@@ -188,6 +188,9 @@ type dirtyFamily struct {
 // breaker that appears mid-pass ends the pass; the remaining shards wait for
 // the next tick.
 func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
+	// The shard gauges follow membership even while writes are held back,
+	// when unsynced_ips matters most.
+	m.refreshShardMetrics(sites)
 	if m.cfg.DryRun {
 		m.log.Debug().Msg("[DRY-RUN] skipping shard sync")
 		return nil
@@ -264,6 +267,18 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 		metrics.LastSyncTimestamp.Set(float64(time.Now().Unix()))
 	}
 	return errors.Join(syncErrors...)
+}
+
+// refreshShardMetrics brings the shard gauges of sites up to date.
+func (m *managerImpl) refreshShardMetrics(sites []string) {
+	for _, site := range sites {
+		v4, v6 := m.siteShardMgrs(site)
+		for _, sm := range []*ShardManager{v4, v6} {
+			if sm != nil {
+				sm.refreshMetrics()
+			}
+		}
+	}
 }
 
 // siteShardMgrs returns the IPv4 and IPv6 shard managers of site; either may be nil.
