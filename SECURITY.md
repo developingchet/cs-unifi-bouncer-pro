@@ -214,12 +214,12 @@ To verify a release image:
 
 ```bash
 # Verify Cosign signature
-cosign verify developingchet/cs-unifi-bouncer-pro:latest \
+cosign verify developingchet/cs-unifi-bouncer-pro:2.3.0 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 
 # Download and verify SBOM
-cosign download attestation developingchet/cs-unifi-bouncer-pro:latest \
+cosign download attestation developingchet/cs-unifi-bouncer-pro:2.3.0 \
   | jq -r '.payload | @base64d | fromjson | .predicate'
 ```
 

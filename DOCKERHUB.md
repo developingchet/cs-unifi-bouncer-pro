@@ -21,7 +21,7 @@ It auto-detects zone-based (UniFi Network ≥ 8.x) or legacy WAN_IN firewall mod
 ```yaml
 services:
   bouncer:
-    image: developingchet/cs-unifi-bouncer-pro:latest
+    image: developingchet/cs-unifi-bouncer-pro:2.3.0
     restart: unless-stopped
     environment:
       UNIFI_URL: https://192.168.1.1

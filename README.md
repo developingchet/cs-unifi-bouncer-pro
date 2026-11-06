@@ -65,12 +65,21 @@ CROWDSEC_LAPI_KEY=paste-key-here       # from step 1
 # Set CROWDSEC_LAPI_URL to a reachable HTTPS endpoint, or explicitly allow HTTP on a trusted local network.
 EOF
 
-# 4. Start
+# 4. Check the image signature (needs cosign; the compose file pins this release)
+cosign verify developingchet/cs-unifi-bouncer-pro:2.3.0 \
+  --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
+  --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
+
+# 5. Start
 docker compose -f docker-compose.standalone.yml up -d
 
-# 5. Verify
+# 6. Verify
 docker logs -f cs-unifi-bouncer-pro
 ```
+
+The compose file runs a fixed release rather than `latest`, so an image is
+only replaced when you choose to update. Set `BOUNCER_IMAGE` in `.env` to pin
+a different release or an `@sha256:` digest.
 
 For the full setup guide including advanced configuration, multi-site deployments,
 TLS setup, and Docker Secrets support, see [docs/SETUP.md](docs/SETUP.md).
