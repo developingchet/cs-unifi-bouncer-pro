@@ -46,6 +46,36 @@ During and after the upgrade:
   policies that block that list, then forgets the old rules. A converted
   policy whose list has no block policy yet is kept, so bans stay enforced.
 
+## From 2.3 to 2.4
+
+**Compose files run a fixed release.** `docker-compose.yml` and
+`docker-compose.standalone.yml` used `developingchet/cs-unifi-bouncer-pro:latest`,
+so `docker compose pull` moved to whatever that tag pointed at. They now run
+the release they ship with (`${BOUNCER_IMAGE:-developingchet/cs-unifi-bouncer-pro:<version>}`),
+and `docker compose pull` alone no longer updates the bouncer. To update,
+check the new release's signature and set `BOUNCER_IMAGE` in `.env`, as
+described in [SETUP.md](SETUP.md#updating). A compose file you keep from an
+earlier release, still naming `latest`, behaves as before until you replace
+it.
+
+Behaviour that changes without action:
+
+- **Egress blocking**: `EGRESS_ZONE_PAIRS` is new; nothing changes until it
+  is set (see [CONFIGURATION.md](CONFIGURATION.md#egress-blocking)).
+- **Refused ban entries are retried**: an entry the controller refuses is
+  left out of its shard for an hour and then offered again, instead of until
+  the next restart. A shard leaves out at most 10 entries; past that the
+  write fails.
+- **SIGHUP before the first CrowdSec batch** only repairs the block policies
+  for the new zone pairs; bans are reconciled once the startup reconcile runs.
+- **Feed redirects through a proxy**: with `HTTPS_PROXY` or `HTTP_PROXY` set,
+  a feed redirect to another host is followed only when that host name
+  resolves, from the bouncer, to public addresses. A redirect to a name the
+  bouncer cannot resolve itself now fails the fetch, and the feed keeps its
+  previous bans.
+- **Flow reports on Network 11**: repairs keep a zone policy's Insights flow
+  report setting (`reportFlowEnabled`) instead of resetting it to on.
+
 ## From 2.2 to 2.3
 
 The periodic LAPI resync (`CROWDSEC_RESYNC_INTERVAL`) now accepts a decision
