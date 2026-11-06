@@ -77,6 +77,11 @@ jobs:
           # other events the CLI would look up comments for a nonexistent PR.
           if [ -n "$PR_NUMBER" ]; then
             args+=(--scm github --pr-number "$PR_NUMBER")
+            # Scan a pull request under the base branch's Socket settings, so
+            # the change being scanned cannot relax the policy that gates it.
+            # HEAD is the merge commit; its first parent is the base branch.
+            git show HEAD^1:socket.yml > socket.yml
+            rm -f .socket.facts.json
           fi
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then
             args+=(--default-branch --disable-blocking)
