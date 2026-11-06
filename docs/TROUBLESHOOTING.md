@@ -778,7 +778,13 @@ in the old form are rekeyed at startup (logged once as "rekeyed bans stored as
 /32 or /128 host prefixes"). If the controller refuses any other entry and names
 it in the error, that entry alone is left out of its shard, logged as
 "controller refused a ban entry", and counted in
-`crowdsec_unifi_unsynced_ips`; the rest of the shard is still written.
+`crowdsec_unifi_unsynced_ips`; the rest of the shard is still written. The
+entry is offered again after an hour (drift detection reports it missing and
+the shard is rewritten), so a refusal that does not recur does not leave the ban
+unenforced. A shard leaves out at most 10 entries at once; a controller that
+refuses more fails the write instead ("controller refused more ban entries than
+a shard leaves out"), since every entry is already a canonical address or
+prefix and that many refusals point at the controller or the connection to it.
 
 ---
 

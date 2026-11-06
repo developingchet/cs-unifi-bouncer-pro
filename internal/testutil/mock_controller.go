@@ -60,6 +60,13 @@ func (m *MockController) RefuseGroupMember(member string) {
 	m.refusedMembers[member] = true
 }
 
+// AcceptGroupMember undoes RefuseGroupMember for member.
+func (m *MockController) AcceptGroupMember(member string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.refusedMembers, member)
+}
+
 // NewMockController returns a zero-state MockController ready for use.
 func NewMockController() *MockController {
 	return &MockController{

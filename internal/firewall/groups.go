@@ -75,9 +75,10 @@ type Shard struct {
 	createFailures int
 	createRetryAt  time.Time
 
-	// rejected holds members the controller refused for this shard (see
-	// putAcceptedMembers). They are left out of every write until released.
-	rejected map[string]struct{}
+	// rejected holds members the controller refused for this shard and when
+	// the refusal lapses (see putAcceptedMembers). They are left out of every
+	// write until they are released or the refusal lapses.
+	rejected map[string]time.Time
 }
 
 // GroupRef keeps a UniFi group ID paired with its actual shard number.
@@ -181,6 +182,9 @@ type ShardManager struct {
 	// instance's templates render but its database has no record of, found by
 	// the last EnsureShards. Guarded by mu.
 	unknownObjects []string
+
+	// now is the clock refusal holds are measured against.
+	now func() time.Time
 }
 
 // NewShardManager creates a ShardManager. Call EnsureShards to initialize from the API.
@@ -209,6 +213,7 @@ func NewShardManager(site string, ipv6 bool, capacity int, namer *Namer,
 		flushDelay: flushDelay,
 		dryRun:     dryRun,
 		mode:       mode,
+		now:        time.Now,
 		fam: &ShardFamily{
 			Shards:  []*Shard{},
 			ipOwner: make(map[string]int),
@@ -482,7 +487,7 @@ func (sm *ShardManager) updateMetricsLocked() {
 		if s.ID == "" || s.activationPending {
 			unsynced += s.IPs.Len()
 		} else {
-			unsynced += len(s.rejected)
+			unsynced += s.refusedCount(sm.now())
 		}
 		name := s.Name // rendered once at allocation; this runs on every add
 		count := float64(s.IPs.Len())
