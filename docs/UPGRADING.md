@@ -112,6 +112,14 @@ Behaviour that changes without action:
   that decision is deleted; one that no decision claims stays until it
   expires. `DRY_RUN` runs no migration, so a dry run against a 1.x database
   shows its bans without claims.
+- **Quoted lists**: a quoted list value such as
+  `CROWDSEC_ORIGINS="crowdsec,lists"` is unquoted before it is split. Before,
+  the quotes stayed on the first and last elements, so that origin filter
+  matched no decision and `UNIFI_SITES="default,branch"` named sites that do
+  not exist. Every setting is now unquoted the same way, including
+  `UNIFI_SITES_EXCLUDE`, `BLOCKLIST_URLS`, `WEBHOOK_URL`, `WEBHOOK_EVENTS`,
+  `BLOCK_SCENARIO_DURATION_MAP`, durations, numbers and booleans, which kept
+  their quotes before.
 
 Renamed settings. The old names keep working with the same effect, and each
 one in use logs a deprecation warning at startup:

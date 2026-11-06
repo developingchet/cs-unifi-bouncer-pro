@@ -187,6 +187,9 @@ func Load() (*Config, error) {
 	if err := injectFileSettings(k); err != nil {
 		return nil, fmt.Errorf("read _FILE settings: %w", err)
 	}
+	if err := unquoteValues(k); err != nil {
+		return nil, err
+	}
 
 	cfg := &Config{}
 	if err := k.UnmarshalWithConf("", cfg, koanf.UnmarshalConf{Tag: "koanf"}); err != nil {
@@ -218,7 +221,6 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("ZONE_PAIRS_SCENARIO_MAP is not supported: per-scenario firewall policies are not provisioned")
 	}
 
-	// Strip Docker env-file quoting from all string values
 	cfg.sanitise()
 	cfg.applySettingAliases(k)
 

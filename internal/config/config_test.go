@@ -757,6 +757,64 @@ func TestLoad_QuotedEnvValues(t *testing.T) {
 	}
 }
 
+// A quoted list keeps its first and last elements whole: the quotes are
+// removed from the value before it is split.
+func TestLoad_QuotedListValues(t *testing.T) {
+	tests := []struct {
+		env  string
+		val  string
+		got  func(*Config) any
+		want any
+	}{
+		{"CROWDSEC_ORIGINS", `"crowdsec,lists"`, func(c *Config) any { return c.CrowdSecOrigins }, []string{"crowdsec", "lists"}},
+		{"BLOCK_SCENARIO_EXCLUDE", `'crowdsecurity/ssh-bf,crowdsecurity/http-probing'`,
+			func(c *Config) any { return c.BlockScenarioExclude }, []string{"crowdsecurity/ssh-bf", "crowdsecurity/http-probing"}},
+		{"BLOCK_DECISION_TYPES", `"ban,captcha"`, func(c *Config) any { return c.BlockDecisionTypes }, []string{"ban", "captcha"}},
+		{"BLOCK_WHITELIST", `"10.0.0.1,10.0.0.2"`, func(c *Config) any { return c.BlockWhitelist }, []string{"10.0.0.1", "10.0.0.2"}},
+		{"UNIFI_SITES", `"default,branch"`, func(c *Config) any { return c.UnifiSites }, []string{"default", "branch"}},
+		{"UNIFI_SITES_EXCLUDE", `"lab,test"`, func(c *Config) any { return c.UnifiSitesExclude }, []string{"lab", "test"}},
+		{"ZONE_PAIRS", `"External->Dmz,External->Internal"`, func(c *Config) any { return c.ZonePairs },
+			[]string{"External->Dmz", "External->Internal"}},
+		{"EGRESS_ZONE_PAIRS", `'Dmz->External;IoT->External'`, func(c *Config) any { return c.EgressZonePairs },
+			[]string{"Dmz->External", "IoT->External"}},
+		{"BLOCKLIST_URLS", `"https://a.example/list.txt,https://b.example/list.txt"`, func(c *Config) any { return c.BlocklistURLs },
+			[]string{"https://a.example/list.txt", "https://b.example/list.txt"}},
+		{"WEBHOOK_EVENTS", `"circuit_breaker_open,reconcile_drift"`, func(c *Config) any { return c.WebhookEvents },
+			[]string{"circuit_breaker_open", "reconcile_drift"}},
+		{"WEBHOOK_URL", `"https://hooks.example/notify"`, func(c *Config) any { return c.WebhookURL }, "https://hooks.example/notify"},
+		{"BLOCK_SCENARIO_DURATION_MAP", `"ssh-bf=168h;http-probing=24h"`, func(c *Config) any { return c.BlockScenarioDurationMap },
+			map[string]time.Duration{"ssh-bf": 168 * time.Hour, "http-probing": 24 * time.Hour}},
+		{"SYNC_INTERVAL", `"45s"`, func(c *Config) any { return c.SyncInterval }, 45 * time.Second},
+		{"FIREWALL_ENABLE_IPV6", `"false"`, func(c *Config) any { return c.FirewallEnableIPv6 }, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.env, func(t *testing.T) {
+			baseEnv(t)
+			setEnv(t, tc.env, tc.val)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := tc.got(cfg); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("%s=%s: got %#v, want %#v", tc.env, tc.val, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_QuotedCloudflareZonePairs(t *testing.T) {
+	baseEnv(t)
+	setEnv(t, "CLOUDFLARE_WHITELIST_ENABLED", "true")
+	setEnv(t, "CLOUDFLARE_ZONE_PAIRS", `"External->Internal:80,443;External->Dmz"`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := []string{"External->Internal:80,443", "External->Dmz"}; !reflect.DeepEqual(cfg.CloudflareZonePairs, want) {
+		t.Errorf("CloudflareZonePairs = %q, want %q", cfg.CloudflareZonePairs, want)
+	}
+}
+
 // baseEnv sets the minimum required fields for a valid config and clears
 // fields that might cause spurious validation failures between test cases.
 func baseEnv(t *testing.T) {

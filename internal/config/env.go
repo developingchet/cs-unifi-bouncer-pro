@@ -10,59 +10,38 @@ import (
 	"github.com/knadh/koanf/v2"
 )
 
-// sanitise removes a single layer of matching surrounding quotes from all string
-// fields and string slice elements. This normalises values from Docker --env-file
-// which does not strip shell quoting.
-func (c *Config) sanitise() {
-	c.UnifiURL = stripEnvQuotes(c.UnifiURL)
-	c.UnifiUsername = stripEnvQuotes(c.UnifiUsername)
-	c.UnifiPassword = stripEnvQuotes(c.UnifiPassword)
-	c.UnifiAPIKey = stripEnvQuotes(c.UnifiAPIKey)
-	c.UnifiCACert = stripEnvQuotes(c.UnifiCACert)
-	c.CrowdSecLAPIURL = stripEnvQuotes(c.CrowdSecLAPIURL)
-	c.CrowdSecLAPICACert = stripEnvQuotes(c.CrowdSecLAPICACert)
-	c.CrowdSecLAPIKey = stripEnvQuotes(c.CrowdSecLAPIKey)
-	c.FirewallMode = stripEnvQuotes(c.FirewallMode)
-	c.FirewallBlockAction = stripEnvQuotes(c.FirewallBlockAction)
-	c.FirewallConnectionStates = stripEnvQuotes(c.FirewallConnectionStates)
-	c.EgressConnectionStates = stripEnvQuotes(c.EgressConnectionStates)
-	c.LegacyRulesetV4 = stripEnvQuotes(c.LegacyRulesetV4)
-	c.LegacyRulesetV6 = stripEnvQuotes(c.LegacyRulesetV6)
-	c.GroupNameTemplate = stripEnvQuotes(c.GroupNameTemplate)
-	c.RuleNameTemplate = stripEnvQuotes(c.RuleNameTemplate)
-	c.PolicyNameTemplate = stripEnvQuotes(c.PolicyNameTemplate)
-	c.ObjectDescription = stripEnvQuotes(c.ObjectDescription)
-	c.DataDir = stripEnvQuotes(c.DataDir)
-	c.LogLevel = stripEnvQuotes(c.LogLevel)
-	c.LogFormat = stripEnvQuotes(c.LogFormat)
-	c.MetricsAddr = stripEnvQuotes(c.MetricsAddr)
-	c.HealthAddr = stripEnvQuotes(c.HealthAddr)
-	c.CloudflareIPv4URL = stripEnvQuotes(c.CloudflareIPv4URL)
-	c.CloudflareIPv6URL = stripEnvQuotes(c.CloudflareIPv6URL)
-	c.AbuseIPDBList = strings.ToLower(strings.TrimSpace(stripEnvQuotes(c.AbuseIPDBList)))
-	c.AbuseIPDBURLOverride = stripEnvQuotes(c.AbuseIPDBURLOverride)
+// unquoteValues removes a single layer of matching surrounding quotes from
+// every setting, as Docker's --env-file passes shell quoting through. It runs
+// before list settings are split, so CROWDSEC_ORIGINS="crowdsec,lists" keeps
+// both origins whole instead of becoming `"crowdsec` and `lists"`.
+func unquoteValues(k *koanf.Koanf) error {
+	for key, value := range k.All() {
+		s, ok := value.(string)
+		if !ok {
+			continue
+		}
+		if unquoted := stripEnvQuotes(s); unquoted != s {
+			if err := k.Set(key, unquoted); err != nil {
+				return fmt.Errorf("unquote %s: %w", strings.ToUpper(key), err)
+			}
+		}
+	}
+	return nil
+}
 
-	// Slice fields: strip each element
-	for i, s := range c.UnifiSites {
-		c.UnifiSites[i] = stripEnvQuotes(s)
-	}
-	for i, s := range c.CrowdSecOrigins {
-		c.CrowdSecOrigins[i] = stripEnvQuotes(s)
-	}
-	for i, s := range c.BlockWhitelist {
-		c.BlockWhitelist[i] = stripEnvQuotes(s)
-	}
-	for i, s := range c.BlockScenarioExclude {
-		c.BlockScenarioExclude[i] = stripEnvQuotes(s)
-	}
-	for i, s := range c.ZonePairs {
-		c.ZonePairs[i] = stripEnvQuotes(s)
-	}
-	for i, s := range c.CloudflareZonePairs {
-		c.CloudflareZonePairs[i] = stripEnvQuotes(s)
-	}
-	for i, s := range c.EgressZonePairs {
-		c.EgressZonePairs[i] = stripEnvQuotes(s)
+// sanitise removes a single layer of matching surrounding quotes from each
+// element of the list settings, for lists written as 'a','b'. Whole values
+// are unquoted before they are split (see unquoteValues).
+func (c *Config) sanitise() {
+	c.AbuseIPDBList = strings.ToLower(strings.TrimSpace(c.AbuseIPDBList))
+
+	for _, list := range [][]string{
+		c.UnifiSites, c.UnifiSitesExclude, c.CrowdSecOrigins, c.BlockWhitelist, c.BlockScenarioExclude,
+		c.ZonePairs, c.CloudflareZonePairs, c.EgressZonePairs, c.BlocklistURLs, c.WebhookEvents,
+	} {
+		for i, s := range list {
+			list[i] = stripEnvQuotes(s)
+		}
 	}
 }
 

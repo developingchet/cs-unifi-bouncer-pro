@@ -1,6 +1,6 @@
 # Configuration Reference
 
-All configuration is provided through environment variables (or `_FILE` variants for secrets and zone pairs). Copy `.env.example` from the repository to `.env` and edit as needed. Values wrapped in one pair of matching single or double quotes are unquoted, because Docker's `--env-file` passes quotes through.
+All configuration is provided through environment variables (or `_FILE` variants for secrets and zone pairs). Copy `.env.example` from the repository to `.env` and edit as needed. Values wrapped in one pair of matching single or double quotes are unquoted, because Docker's `--env-file` passes quotes through. This applies to every setting, including the contents of `_FILE` files; a list such as `CROWDSEC_ORIGINS="crowdsec,lists"` is unquoted as a whole before it is split, and each element is unquoted again (`'crowdsec','lists'`).
 
 `UNIFI_API_KEY`, `UNIFI_USERNAME`, `UNIFI_PASSWORD` and `CROWDSEC_LAPI_KEY` support Docker secrets and Kubernetes secrets via the `_FILE` suffix: set the variable to the path of a file containing the secret, and the application reads and trims its contents at startup.
 
