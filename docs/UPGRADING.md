@@ -72,6 +72,11 @@ Behaviour that changes without action:
   previous bans.
 - **Flow reports on Network 11**: repairs keep a zone policy's Insights flow
   report setting (`reportFlowEnabled`) instead of resetting it to on.
+- **API metrics by site**: `crowdsec_unifi_api_calls_total` and
+  `crowdsec_unifi_api_duration_seconds` carry a `site` label, empty for calls
+  that belong to no site. Queries that select series by their exact label set
+  need `site` added or summed away, for example
+  `sum by (endpoint) (rate(crowdsec_unifi_api_calls_total[5m]))`.
 
 ## From 2.2 to 2.3
 

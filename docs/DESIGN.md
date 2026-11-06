@@ -468,8 +468,8 @@ The per-pair filter lists, staged policies and Cloudflare whitelist objects have
 | `crowdsec_unifi_decision_latency_seconds` | Histogram | | Time from receiving a ban decision to recording it in the ban database and in-memory shard. Measured before the controller write, so it does not include UniFi API time; use `shard_sync_duration_seconds` and `unsynced_ips` for that. Buckets: 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0 s |
 | `crowdsec_unifi_active_bans` | Gauge | `family`, `site` | Bans the bouncer tracks, including any not yet on the controller |
 | `crowdsec_unifi_unsynced_ips` | Gauge | `family`, `site` | Bans held in shards that are not enforced yet: the shard object or its block policy/rule is missing on the controller, or the controller refused the entry itself. Alert when above 0 for more than a few minutes |
-| `crowdsec_unifi_api_calls_total` | Counter | `endpoint`, `status` | UniFi API calls |
-| `crowdsec_unifi_api_duration_seconds` | Histogram | `endpoint` | UniFi API call latency |
+| `crowdsec_unifi_api_calls_total` | Counter | `endpoint`, `status`, `site` | UniFi API calls. `site` is empty for calls that belong to no site, such as the ping and the site list |
+| `crowdsec_unifi_api_duration_seconds` | Histogram | `endpoint`, `site` | UniFi API call latency |
 | `crowdsec_unifi_auth_errors_total` | Counter | | Failed username/password logins to the controller |
 | `crowdsec_unifi_reauth_total` | Counter | | Successful username/password logins, including the initial login |
 | `crowdsec_unifi_reconcile_duration_seconds` | Histogram | `trigger` (`startup`, `periodic`, `manual`) | Full reconcile duration |
