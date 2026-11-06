@@ -99,6 +99,9 @@ func (m *managerImpl) Drain(ctx context.Context, sites []string) error {
 			if err := m.drainConvertedRules(ctx, site, groupIDs); err != nil {
 				drainErrors = append(drainErrors, err)
 			}
+			if err := m.drainGroupRules(ctx, site, groupIDs); err != nil {
+				drainErrors = append(drainErrors, err)
+			}
 			continue
 		}
 
@@ -107,6 +110,9 @@ func (m *managerImpl) Drain(ctx context.Context, sites []string) error {
 		// rule records that DeleteRules removes.
 		policyErr := errors.Join(m.drainConvertedRules(ctx, site, groupIDs),
 			m.zoneMgr.DeletePolicies(ctx, site), m.legacyMgr.DeleteRules(ctx, site))
+		if policyErr == nil {
+			policyErr = m.drainGroupRules(ctx, site, groupIDs)
+		}
 		if policyErr != nil {
 			drainErrors = append(drainErrors, fmt.Errorf("delete policies for site %s: %w", site, policyErr))
 			continue
@@ -154,6 +160,24 @@ func (m *managerImpl) Drain(ctx context.Context, sites []string) error {
 		Bool("dry_run", m.cfg.DryRun).
 		Msg("drain complete")
 	return errors.Join(drainErrors...)
+}
+
+// drainGroupRules removes, or with dry-run previews, the legacy rules that
+// still use a group being drained after the recorded rules are gone: rules
+// the database has no record of, such as ones a settings change left behind.
+// Zone sites have no legacy rules of their own.
+func (m *managerImpl) drainGroupRules(ctx context.Context, site string, groupIDs map[string]struct{}) error {
+	if m.cachedMode(site) != "legacy" || len(groupIDs) == 0 {
+		return nil
+	}
+	ids := make(map[string]bool, len(groupIDs))
+	for id := range groupIDs {
+		ids[id] = true
+	}
+	if err := m.legacyMgr.DeleteGroupRules(ctx, site, ids, m.cfg.DryRun); err != nil {
+		return fmt.Errorf("delete legacy rules of drained groups for site %s: %w", site, err)
+	}
+	return nil
 }
 
 // drainZoneExtras removes, or with dry-run previews, the zone-mode objects

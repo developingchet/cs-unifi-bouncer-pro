@@ -329,7 +329,7 @@ func TestLegacyManager_DeleteRuleForShard(t *testing.T) {
 	}
 
 	// Delete
-	if err := lm.DeleteRuleForShard(context.Background(), testSite, false, 0); err != nil {
+	if err := lm.DeleteRuleForShard(context.Background(), testSite, "group-without-rules", false, 0); err != nil {
 		t.Fatalf("DeleteRuleForShard: %v", err)
 	}
 
@@ -348,7 +348,7 @@ func TestLegacyManager_DeleteRuleForShard_NoOp(t *testing.T) {
 	lm := newTestLegacyManager(ctrl, store, namer)
 
 	// No rule was ever created
-	if err := lm.DeleteRuleForShard(context.Background(), testSite, false, 0); err != nil {
+	if err := lm.DeleteRuleForShard(context.Background(), testSite, "group-without-rules", false, 0); err != nil {
 		t.Fatalf("DeleteRuleForShard (no-op): %v", err)
 	}
 	if got := ctrl.Calls("DeleteFirewallRule"); got != 0 {

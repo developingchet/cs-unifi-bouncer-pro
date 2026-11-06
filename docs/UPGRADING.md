@@ -121,6 +121,14 @@ Behaviour that changes without action:
   that decision is deleted; one that no decision claims stays until it
   expires. `DRY_RUN` runs no migration, so a dry run against a 1.x database
   shows its bans without claims.
+- **Legacy rules removed with their group**: when a shard's group is pruned,
+  merged away or drained, every rule of the bouncer's that uses only that
+  group is deleted first, with either block action (`drop` or `reject`) and
+  any ruleset. A rule left by an
+  earlier `FIREWALL_BLOCK_ACTION` or `LEGACY_RULESET_*` whose database record
+  was lost no longer keeps the group from being deleted or stays behind
+  after `drain`. Pruning and draining a legacy shard list the site's rules
+  once more to find them.
 - **IPv6 warning per site**: the warning that IPv6 bans have no policy to
   enforce them is checked for each site with the pairs that site uses, and
   names the site. It is logged once the sites are known (after discovery

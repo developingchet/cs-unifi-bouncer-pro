@@ -205,6 +205,8 @@ Rules are indexed sequentially from the start value across shards: `22000`, `220
 
 These settings are validated with `FIREWALL_MODE=legacy` and `auto`, and ignored with `zone`.
 
+Changing `FIREWALL_BLOCK_ACTION` or a ruleset updates the rules of the current shards at the next startup or reconcile. A rule that keeps the old action or ruleset, because its database record was lost, is not removed by the orphan sweep, which leaves alone rules it could not have created; it is deleted when its shard's group is pruned or drained, so it never keeps `drain` from deleting the group.
+
 ---
 
 ## Zone-Based Firewall Mode

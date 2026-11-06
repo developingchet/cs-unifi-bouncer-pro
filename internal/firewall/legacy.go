@@ -343,9 +343,12 @@ func (lm *LegacyManager) EnsureRuleForShard(ctx context.Context, site, groupID s
 	return err
 }
 
-// DeleteRuleForShard deletes the firewall rule for the given shard index.
-// Called during shard pruning.
-func (lm *LegacyManager) DeleteRuleForShard(ctx context.Context, site string, ipv6 bool, shardIdx int) error {
+// DeleteRuleForShard deletes the firewall rule of the shard whose group,
+// groupID, is about to be deleted by a prune or drain. Besides the recorded
+// rule it deletes any other rule of the bouncer's that still uses the group
+// (see deleteGroupRules), since the controller refuses to delete a group a
+// rule references.
+func (lm *LegacyManager) DeleteRuleForShard(ctx context.Context, site, groupID string, ipv6 bool, shardIdx int) error {
 	lm.opMu.Lock()
 	defer lm.opMu.Unlock()
 
@@ -361,20 +364,101 @@ func (lm *LegacyManager) DeleteRuleForShard(ctx context.Context, site string, ip
 		return fmt.Errorf("lookup policy %s: %w", ruleName, lookupErr)
 	}
 
-	if existing == nil || existing.UnifiID == "" {
-		return nil // Already gone
+	deletedID := ""
+	if existing != nil && existing.UnifiID != "" {
+		if err := lm.ctrl.DeleteFirewallRule(ctx, site, existing.UnifiID); err != nil {
+			return fmt.Errorf("delete legacy rule %s: %w", ruleName, err)
+		}
+		if err := deleteCachedPolicy(lm.store, site, ruleName); err != nil {
+			lm.log.Warn().Err(err).Str("rule", ruleName).Msg("failed to delete policy from bbolt")
+		}
+		lm.log.Info().Str("name", ruleName).Msg("deleted legacy firewall rule for pruned shard")
+		deletedID = existing.UnifiID
 	}
-
-	if err := lm.ctrl.DeleteFirewallRule(ctx, site, existing.UnifiID); err != nil {
-		return fmt.Errorf("delete legacy rule %s: %w", ruleName, err)
+	if groupID == "" {
+		return nil
 	}
+	return lm.deleteGroupRules(ctx, site, map[string]bool{groupID: true}, deletedID, false)
+}
 
-	if err := deleteCachedPolicy(lm.store, site, ruleName); err != nil {
-		lm.log.Warn().Err(err).Str("rule", ruleName).Msg("failed to delete policy from bbolt")
+// DeleteGroupRules deletes the bouncer's rules that use one of groupIDs, the
+// groups a drain is about to delete. With dryRun it only logs them.
+func (lm *LegacyManager) DeleteGroupRules(ctx context.Context, site string, groupIDs map[string]bool, dryRun bool) error {
+	lm.opMu.Lock()
+	defer lm.opMu.Unlock()
+	return lm.deleteGroupRules(ctx, site, groupIDs, "", dryRun)
+}
+
+// deleteGroupRules deletes every rule of the bouncer's whose source group is
+// one of groupIDs, other than skipID, which was just deleted. The orphan sweep
+// in EnsureRules leaves alone a rule whose action or ruleset differs from the
+// current settings, so after FIREWALL_BLOCK_ACTION or LEGACY_RULESET_* has
+// changed, a rule the database has no record of can outlive its shard and
+// keep the controller from deleting the group. Such a rule is the bouncer's
+// when its only source group is one the bouncer is deleting, its action is
+// one the bouncer creates, and it has the managed name prefix with the
+// managed description or none (the classic API does not store descriptions),
+// or a database record. The caller holds opMu.
+func (lm *LegacyManager) deleteGroupRules(ctx context.Context, site string, groupIDs map[string]bool, skipID string, dryRun bool) error {
+	rules, err := lm.ctrl.ListFirewallRules(controller.FreshListing(ctx), site)
+	if err != nil {
+		return fmt.Errorf("list firewall rules: %w", err)
 	}
+	var errs []error
+	for _, r := range rules {
+		if r.ID == skipID || len(r.SrcFirewallGroupIDs) != 1 || !groupIDs[r.SrcFirewallGroupIDs[0]] ||
+			(r.Action != "drop" && r.Action != "reject") {
+			continue
+		}
+		owned, err := lm.ownsGroupRule(site, r)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !owned {
+			continue
+		}
+		rec, err := getCachedPolicy(lm.store, site, r.Name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("lookup policy %s: %w", r.Name, err))
+			continue
+		}
+		recorded := rec != nil && rec.UnifiID == r.ID
+		if dryRun {
+			// A drain preview lists recorded rules already.
+			if !recorded {
+				lm.log.Info().Str("site", site).Str("rule", r.Name).Str("group_id", r.SrcFirewallGroupIDs[0]).
+					Msg("[DRY-RUN] would delete legacy rule referencing a deleted shard group")
+			}
+			continue
+		}
+		if err := lm.ctrl.DeleteFirewallRule(ctx, site, r.ID); err != nil {
+			errs = append(errs, fmt.Errorf("delete legacy rule %s: %w", r.Name, err))
+			continue
+		}
+		lm.log.Info().Str("site", site).Str("rule", r.Name).Str("rule_id", r.ID).Str("group_id", r.SrcFirewallGroupIDs[0]).
+			Str("action", r.Action).Str("ruleset", r.Ruleset).
+			Msg("deleted legacy rule referencing a deleted shard group")
+		if recorded {
+			if err := deleteCachedPolicy(lm.store, site, r.Name); err != nil {
+				errs = append(errs, fmt.Errorf("remove legacy rule %s from storage: %w", r.Name, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
 
-	lm.log.Info().Str("name", ruleName).Msg("deleted legacy firewall rule for pruned shard")
-	return nil
+// ownsGroupRule reports whether r is the bouncer's by name and description or
+// by its database record. Unlike ownsRule, an empty description with the
+// managed name prefix suffices, because the caller has already matched the
+// rule's source group to a group the bouncer manages.
+func (lm *LegacyManager) ownsGroupRule(site string, r controller.FirewallRule) (bool, error) {
+	if r.Description == "" {
+		if prefix := lm.namer.RulePrefix(); prefix != "" && strings.HasPrefix(r.Name, prefix) {
+			return true, nil
+		}
+	}
+	return lm.ownsRule(site, r)
 }
 
 // DeleteRules removes all managed legacy rules for a site.

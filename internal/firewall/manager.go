@@ -339,7 +339,7 @@ func (m *managerImpl) wireShardManager(site string, ipv6 bool, sm *ShardManager)
 	sm.SetDrainCallback(func(ctx context.Context, shardIdx int, groupID string) error {
 		switch m.cachedMode(site) {
 		case "legacy":
-			if err := m.legacyMgr.DeleteRuleForShard(ctx, site, ipv6, shardIdx); err != nil {
+			if err := m.legacyMgr.DeleteRuleForShard(ctx, site, groupID, ipv6, shardIdx); err != nil {
 				return fmt.Errorf("delete rule for drained %s shard %d: %w", fam, shardIdx, err)
 			}
 		case "zone":

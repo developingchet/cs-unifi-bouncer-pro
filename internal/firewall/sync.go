@@ -364,7 +364,7 @@ func (m *managerImpl) pruneEmptyTailShards(ctx context.Context, site string, v4,
 			// UniFi will reject group deletion if policies/rules still reference it.
 			switch mode {
 			case "legacy":
-				if err := m.legacyMgr.DeleteRuleForShard(ctx, site, e.ipv6, shardIdx); err != nil {
+				if err := m.legacyMgr.DeleteRuleForShard(ctx, site, unifiID, e.ipv6, shardIdx); err != nil {
 					m.log.Error().Err(err).Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
 						Msg("failed to delete rule for pruned shard; aborting group delete to avoid orphans")
 					break pruneLoop // stop pruning on error to avoid orphaning the group
