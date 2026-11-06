@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -172,6 +173,21 @@ func (e *ErrBadRequest) Error() string {
 	return fmt.Sprintf("bad request: %s", e.Body)
 }
 
+// classicIDInvalid reports whether err is the classic API's 400 for an object
+// ID it does not hold.
+func classicIDInvalid(err error) bool {
+	var bad *ErrBadRequest
+	if !errors.As(err, &bad) {
+		return false
+	}
+	var body struct {
+		Meta struct {
+			Msg string `json:"msg"`
+		} `json:"meta"`
+	}
+	return json.Unmarshal([]byte(bad.Body), &body) == nil && body.Meta.Msg == "api.err.IdInvalid"
+}
+
 // ErrConflict is returned when a create operation would cause a duplicate.
 type ErrConflict struct {
 	Msg string
@@ -187,13 +203,15 @@ func (e *ErrConflict) Error() string {
 // the caller forget an object that still exists. So when delErr wraps
 // *ErrNotFound, the collection is listed through stillListed and the delete
 // counts as done only if the listing succeeds and the object is not in it.
+// The classic API answers a delete of an ID it no longer holds with a 400
+// api.err.IdInvalid instead of a 404, and is confirmed the same way.
 // Every other delErr, including nil, is returned as it is, so a delete that
 // succeeds costs no extra request. The errors returned for an unconfirmed
 // 404 deliberately do not wrap *ErrNotFound: callers read that type as
 // "already gone".
 func confirmDeleted(delErr error, what string, stillListed func() (bool, error)) error {
 	var nf *ErrNotFound
-	if !errors.As(delErr, &nf) {
+	if !errors.As(delErr, &nf) && !classicIDInvalid(delErr) {
 		return delErr
 	}
 	listed, err := stillListed()

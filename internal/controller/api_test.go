@@ -851,6 +851,41 @@ func TestConfirmDeletedTreatsWrappedNotFoundAsUnconfirmed(t *testing.T) {
 	}
 }
 
+func TestConfirmDeletedTreatsClassicIDInvalidLikeNotFound(t *testing.T) {
+	idInvalid := &ErrBadRequest{Body: `{"meta":{"rc":"error","msg":"api.err.IdInvalid"},"data":[]}`}
+	if err := confirmDeleted(idInvalid, "rule", func() (bool, error) { return false, nil }); err != nil {
+		t.Errorf("rule absent from the listing: got %v, want nil", err)
+	}
+	if err := confirmDeleted(idInvalid, "rule", func() (bool, error) { return true, nil }); err == nil {
+		t.Error("rule still listed: got nil, want error")
+	}
+	other := &ErrBadRequest{Body: `{"meta":{"rc":"error","msg":"api.err.InvalidPayload"},"data":[]}`}
+	if err := confirmDeleted(other, "rule", func() (bool, error) {
+		t.Error("collection listed for another bad request")
+		return false, nil
+	}); err != other {
+		t.Errorf("other bad request: got %v, want it back", err)
+	}
+}
+
+func TestDeleteFirewallRuleAlreadyGone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"meta":{"rc":"error","msg":"api.err.IdInvalid"},"data":[]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"meta":{"rc":"ok"},"data":[]}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "test-key")
+	if err := c.DeleteFirewallRule(context.Background(), "default", "65a1b2c3d4e5f60718293a4b"); err != nil {
+		t.Fatalf("delete of a rule the controller no longer holds: %v", err)
+	}
+}
+
 // ---- Additional endpoint coverage ------------------------------------------
 
 func TestUpdateFirewallRule(t *testing.T) {
