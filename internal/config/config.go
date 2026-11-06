@@ -29,7 +29,7 @@ type Config struct {
 	// UniFi Sites
 	UnifiSites        []string `koanf:"unifi_sites"`
 	UnifiSitesAuto    bool     `koanf:"unifi_sites_auto"`
-	UnifiSitesExclude []string `koanf:"-"` // parsed from UNIFI_SITES_EXCLUDE CSV
+	UnifiSitesExclude []string `koanf:"-" setting:"UNIFI_SITES_EXCLUDE"`
 
 	// UniFi Security
 	UnifiRequireHTTPS bool `koanf:"unifi_require_https"`
@@ -103,12 +103,12 @@ type Config struct {
 	CrowdSecResyncInterval  time.Duration `koanf:"crowdsec_resync_interval"`
 	LAPIMetricsPushInterval time.Duration `koanf:"lapi_metrics_push_interval"`
 	BlockScenarioExclude    []string      `koanf:"block_scenario_exclude"`
-	BlockDecisionTypes      []string      `koanf:"-"` // parsed from BLOCK_DECISION_TYPES CSV
+	BlockDecisionTypes      []string      `koanf:"-" setting:"BLOCK_DECISION_TYPES"`
 	BlockWhitelist          []string      `koanf:"block_whitelist"`
 	BlockMinDuration        time.Duration `koanf:"block_min_duration"`
 	// BlockScenarioDurationMap overrides the ban duration for specific scenarios.
 	// Parsed from BLOCK_SCENARIO_DURATION_MAP=ssh-bf=168h,http-probing=24h
-	BlockScenarioDurationMap map[string]time.Duration `koanf:"-"`
+	BlockScenarioDurationMap map[string]time.Duration `koanf:"-" setting:"BLOCK_SCENARIO_DURATION_MAP"`
 
 	// Decision Rate Limiting
 	DecisionRateLimit int `koanf:"decision_rate_limit"` // decisions/second, 0 = unlimited
@@ -137,7 +137,7 @@ type Config struct {
 	HistoryMaxEvents int `koanf:"history_max_events"`
 
 	// Blocklist import
-	BlocklistURLs            []string      `koanf:"-"` // parsed from BLOCKLIST_URLS CSV
+	BlocklistURLs            []string      `koanf:"-" setting:"BLOCKLIST_URLS"`
 	BlocklistRefreshInterval time.Duration `koanf:"blocklist_refresh_interval"`
 	// BlocklistMinPrefixV4 and V6 are the shortest prefix lengths a feed
 	// entry may have. Shorter ranges are skipped like any other unbannable
@@ -149,13 +149,13 @@ type Config struct {
 	// AbuseIPDB feed (github.com/borestad/blocklist-abuseipdb)
 	AbuseIPDBList            string        `koanf:"abuseipdb_list"`
 	AbuseIPDBURLOverride     string        `koanf:"abuseipdb_url"`
-	AbuseIPDBCountryInclude  []string      `koanf:"-"` // parsed from ABUSEIPDB_COUNTRY_INCLUDE CSV
-	AbuseIPDBCountryExclude  []string      `koanf:"-"` // parsed from ABUSEIPDB_COUNTRY_EXCLUDE CSV
+	AbuseIPDBCountryInclude  []string      `koanf:"-" setting:"ABUSEIPDB_COUNTRY_INCLUDE"`
+	AbuseIPDBCountryExclude  []string      `koanf:"-" setting:"ABUSEIPDB_COUNTRY_EXCLUDE"`
 	AbuseIPDBRefreshInterval time.Duration `koanf:"abuseipdb_refresh_interval"`
 
 	// Webhook notifications
 	WebhookURL    string   `koanf:"webhook_url"`
-	WebhookEvents []string `koanf:"-"` // parsed from WEBHOOK_EVENTS CSV
+	WebhookEvents []string `koanf:"-" setting:"WEBHOOK_EVENTS"`
 
 	// DeprecationWarnings holds warnings about deprecated env vars that were
 	// used. Callers should log these after building the logger.

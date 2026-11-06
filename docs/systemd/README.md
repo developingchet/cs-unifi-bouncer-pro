@@ -55,10 +55,12 @@ are enabled.
 
 ## Hot-Reload (SIGHUP)
 
-A reload re-reads the zone pairs (`ZONE_PAIRS`, `EGRESS_ZONE_PAIRS`) without
+A reload re-reads the zone pairs (`ZONE_PAIRS`, `EGRESS_ZONE_PAIRS`, and
+`CLOUDFLARE_ZONE_PAIRS` while the Cloudflare whitelist runs) without
 restarting the daemon. systemd reads `bouncer.env` only when the service
 starts, so keep pairs that should change live in a file and point
-`ZONE_PAIRS_FILE` (and `EGRESS_ZONE_PAIRS_FILE`) at it, for example
+`ZONE_PAIRS_FILE` (and `EGRESS_ZONE_PAIRS_FILE` or
+`CLOUDFLARE_ZONE_PAIRS_FILE`) at it, for example
 `/etc/cs-unifi-bouncer-pro/zone-pairs` with one pair per line. Edit the file,
 then:
 ```bash
@@ -68,6 +70,8 @@ sudo kill -HUP $(systemctl show -p MainPID --value cs-unifi-bouncer-pro)
 ```
 
 `ExecReload=/bin/kill -HUP $MAINPID` maps directly to the bouncer's SIGHUP handler.
+Other settings, including rotated `_FILE` secrets, need a restart; the reload
+logs their names (see [SIGHUP Hot-Reload](../../README.md#sighup-hot-reload)).
 
 ## State Directory
 

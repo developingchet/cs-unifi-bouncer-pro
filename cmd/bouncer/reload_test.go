@@ -81,7 +81,7 @@ func newReconcileProbe(t *testing.T) *reconcileProbe {
 func TestReloadZonesBeforeTheGateOpensOnlyRepairsPolicies(t *testing.T) {
 	probe := newReconcileProbe(t)
 	var out bytes.Buffer
-	reloadZones(context.Background(), &config.Config{UnifiSites: []string{"default"}}, probe,
+	reloadZones(context.Background(), &config.Config{UnifiSites: []string{"default"}}, probe, nil,
 		func() bool { return false }, zerolog.New(&out))
 	if probe.reconciled != 0 {
 		t.Errorf("reload reconciled %d times before the gate opened", probe.reconciled)
@@ -94,7 +94,7 @@ func TestReloadZonesBeforeTheGateOpensOnlyRepairsPolicies(t *testing.T) {
 func TestReloadZonesAfterTheGateOpensReconciles(t *testing.T) {
 	probe := newReconcileProbe(t)
 	var out bytes.Buffer
-	reloadZones(context.Background(), &config.Config{UnifiSites: []string{"default"}}, probe,
+	reloadZones(context.Background(), &config.Config{UnifiSites: []string{"default"}}, probe, nil,
 		func() bool { return true }, zerolog.New(&out))
 	if probe.reconciled != 1 || probe.repaired != 0 {
 		t.Errorf("reconciled %d, repaired %d; want a single reconcile; log: %s", probe.reconciled, probe.repaired, out.String())
@@ -110,7 +110,7 @@ func TestReloadZonesKeepsConfigWhenZonePairsAreEmpty(t *testing.T) {
 
 	var out bytes.Buffer
 	log := zerolog.New(&out)
-	reloadZones(context.Background(), &config.Config{UnifiSites: []string{"default"}}, probe, func() bool { return true }, log)
+	reloadZones(context.Background(), &config.Config{UnifiSites: []string{"default"}}, probe, nil, func() bool { return true }, log)
 
 	if probe.reconciled != 0 || probe.repaired != 0 {
 		t.Errorf("reconciled %d, repaired %d; want neither", probe.reconciled, probe.repaired)
@@ -135,7 +135,7 @@ func TestReloadZonesSkipsLegacyDeploymentsWithoutError(t *testing.T) {
 			t.Setenv("ZONE_PAIRS", "")
 
 			var out bytes.Buffer
-			reloadZones(context.Background(), &config.Config{UnifiSites: []string{"default"}}, legacyProbe{t: t},
+			reloadZones(context.Background(), &config.Config{UnifiSites: []string{"default"}}, legacyProbe{t: t}, nil,
 				func() bool { return true }, zerolog.New(&out))
 
 			if !strings.Contains(out.String(), "SIGHUP: ZoneManager not available (legacy mode?), skipping reload") {
@@ -154,7 +154,7 @@ func TestReloadZonesRejectsDuplicatePairs(t *testing.T) {
 	probe := newReconcileProbe(t)
 	t.Setenv("ZONE_PAIRS", "External->Internal:80;External->Internal:443")
 	var out bytes.Buffer
-	reloadZones(context.Background(), &config.Config{UnifiSites: []string{"default"}}, probe,
+	reloadZones(context.Background(), &config.Config{UnifiSites: []string{"default"}}, probe, nil,
 		func() bool { return true }, zerolog.New(&out))
 	if probe.reconciled != 0 || probe.repaired != 0 {
 		t.Errorf("reconciled %d, repaired %d; want neither", probe.reconciled, probe.repaired)

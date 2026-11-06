@@ -62,9 +62,18 @@ Behaviour that changes without action:
   write fails.
 - **SIGHUP before the first CrowdSec batch** only repairs the block policies
   for the new zone pairs; bans are reconciled once the startup reconcile runs.
-- **Zone pairs from a file**: `ZONE_PAIRS_FILE` and `EGRESS_ZONE_PAIRS_FILE`
-  are new. A SIGHUP reads them again, so pairs kept in a file change without
-  a restart; pairs in the environment still need one.
+- **Zone pairs from a file**: `ZONE_PAIRS_FILE`, `EGRESS_ZONE_PAIRS_FILE`
+  and `CLOUDFLARE_ZONE_PAIRS_FILE` are new. A SIGHUP reads them again, so
+  pairs kept in a file change without a restart; pairs in the environment
+  still need one.
+- **Cloudflare pairs on SIGHUP**: while the Cloudflare whitelist runs, a
+  SIGHUP applies a changed `CLOUDFLARE_ZONE_PAIRS` and syncs the whitelist
+  at once; before, it needed a restart. A failed sync fires
+  `cloudflare_whitelist_sync_failed` with the new phase `reload`.
+- **What SIGHUP does not apply**: a SIGHUP logs, at info, the names of
+  changed settings it does not apply (`SIGHUP: changed settings take effect
+  only after a restart`), such as a rotated `_FILE` secret, which still
+  needs a restart.
 - **Zone pairs for one site**: a `site/` prefix (`branch/Wan->Lan`) limits a
   `ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` or `CLOUDFLARE_ZONE_PAIRS` pair to one
   site, and a site with prefixed pairs uses only those, so one instance can

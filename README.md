@@ -196,7 +196,7 @@ zone_discovery[default]  PASS    3 zones found
 
 ## SIGHUP Hot-Reload
 
-Sending `SIGHUP` to the running daemon reloads the zone pairs (`ZONE_PAIRS` and `EGRESS_ZONE_PAIRS`) without a restart. A running process cannot see a changed `.env`, `EnvironmentFile` or ConfigMap environment, so pairs that should change live go in files named by `ZONE_PAIRS_FILE` and `EGRESS_ZONE_PAIRS_FILE`, one pair per line, and the reload reads those files again:
+Sending `SIGHUP` to the running daemon reloads the zone pairs (`ZONE_PAIRS` and `EGRESS_ZONE_PAIRS`, and `CLOUDFLARE_ZONE_PAIRS` while the Cloudflare whitelist runs) without a restart. A running process cannot see a changed `.env`, `EnvironmentFile` or ConfigMap environment, so pairs that should change live go in files named by `ZONE_PAIRS_FILE`, `EGRESS_ZONE_PAIRS_FILE` and `CLOUDFLARE_ZONE_PAIRS_FILE`, one pair per line, and the reload reads those files again:
 
 ```bash
 # Docker: mount the directory holding the file, for example ./config:/config:ro,
@@ -222,7 +222,15 @@ A SIGHUP that arrives before the startup reconcile has run (the bouncer is still
 
 Filter changes stage a new block policy before removing the old one. If policy reconciliation fails after the configuration commits, the error is logged and the next reconciliation retries; some pairs may already have updated.
 
-Only zone pair changes (`ZONE_PAIRS` and `EGRESS_ZONE_PAIRS`) are applied via SIGHUP. All other config changes require a restart. In legacy mode (no site resolved to zone mode), SIGHUP logs `SIGHUP: ZoneManager not available (legacy mode?), skipping reload` and does nothing else; with `DRY_RUN=true` it logs `[DRY-RUN] skipping zone reload`.
+A changed `CLOUDFLARE_ZONE_PAIRS` is handed to the Cloudflare whitelist, which syncs at once (`SIGHUP: Cloudflare zone pairs reloaded; the whitelist syncs them now`, then `Cloudflare whitelist synced with the reloaded zone pairs`): ALLOW policies and filter lists are created for new pairs and removed for dropped ones, as on a periodic refresh. A failed sync logs `Cloudflare whitelist sync of the reloaded zone pairs failed` and fires `cloudflare_whitelist_sync_failed` with phase `reload`; the next refresh retries it. Turning the whitelist on or off needs a restart.
+
+What a SIGHUP applies, exactly:
+
+- **Applied:** `ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` and their `_FILE` variants; `CLOUDFLARE_ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS_FILE` when `CLOUDFLARE_WHITELIST_ENABLED=true` both at startup and in the reloaded configuration.
+- **Read but not applied:** every other setting, including secrets read from `_FILE` files. A rotated `UNIFI_PASSWORD_FILE`, `UNIFI_API_KEY_FILE` or `CROWDSEC_LAPI_KEY_FILE` takes effect only after a restart. The reload logs the names (never the values) of the settings that changed, at info level: `SIGHUP: changed settings take effect only after a restart` with a `settings` list.
+- **Refused as a whole:** the reloaded configuration must pass the same validation as at startup. If any setting fails, for example a `_FILE` secret that cannot be read, the reload logs `SIGHUP: reload config failed` with the error and changes nothing, zone pairs included: a configuration that fails validation would also stop the next restart, so it has to be fixed first.
+
+In legacy mode (no site resolved to zone mode), SIGHUP logs `SIGHUP: ZoneManager not available (legacy mode?), skipping reload` and applies no zone pairs; with `DRY_RUN=true` it logs `[DRY-RUN] skipping zone reload`.
 
 ---
 

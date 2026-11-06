@@ -149,6 +149,7 @@ var fileSecretKeys = []string{
 var fileZonePairKeys = []string{
 	"zone_pairs",
 	"egress_zone_pairs",
+	"cloudflare_zone_pairs",
 }
 
 // injectFileSettings replaces each setting that has a <NAME>_FILE variable

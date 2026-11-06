@@ -127,7 +127,7 @@ func TestReloadZonesAppliesEachSitesPairs(t *testing.T) {
 	} {
 		writePairs(step.content)
 		var out bytes.Buffer
-		reloadZones(context.Background(), running, probe, func() bool { return true }, zerolog.New(&out))
+		reloadZones(context.Background(), running, probe, nil, func() bool { return true }, zerolog.New(&out))
 		log := out.String()
 		for _, line := range []string{
 			`{"level":"info","site":"default","zone_pairs":["External->Internal"],"message":"zone pairs for site"}`,

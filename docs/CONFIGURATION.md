@@ -12,7 +12,9 @@ UNIFI_PASSWORD=mypassword
 UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 ```
 
-`ZONE_PAIRS_FILE` and `EGRESS_ZONE_PAIRS_FILE` read the zone pairs from a file in the same way. Each line holds one pair (or a list in the variable's own syntax); blank lines and lines starting with `#` are skipped. A file setting takes precedence over the plain variable. The files are read again on SIGHUP, which is how pairs change without a restart; mount the directory that holds the file rather than the file itself, and on Kubernetes do not use `subPath` (see [SIGHUP Hot-Reload](../README.md#sighup-hot-reload)).
+`ZONE_PAIRS_FILE`, `EGRESS_ZONE_PAIRS_FILE` and `CLOUDFLARE_ZONE_PAIRS_FILE` read the zone pairs from a file in the same way. Each line holds one pair (or a list in the variable's own syntax); blank lines and lines starting with `#` are skipped. A file setting takes precedence over the plain variable. The files are read again on SIGHUP, which is how pairs change without a restart; mount the directory that holds the file rather than the file itself, and on Kubernetes do not use `subPath` (see [SIGHUP Hot-Reload](../README.md#sighup-hot-reload)).
+
+A SIGHUP applies only the zone pair settings. It reads the whole configuration again, so a setting that fails validation, such as a `_FILE` secret that cannot be read, refuses the reload with `SIGHUP: reload config failed` and keeps the running pairs. Every other setting, including a rotated `_FILE` secret, takes effect only after a restart; the reload logs the names of those that changed (`SIGHUP: changed settings take effect only after a restart`).
 
 ```text
 # /config/zone-pairs
@@ -355,7 +357,7 @@ When enabled, the bouncer periodically fetches current Cloudflare IP ranges and 
 | `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | No | How often to re-fetch Cloudflare IP ranges and update the IP TMLs (default: weekly). |
 | `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | No | `https://` URL to fetch the current Cloudflare IPv4 CIDR list. |
 | `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | No | `https://` URL to fetch the current Cloudflare IPv6 CIDR list. |
-| `CLOUDFLARE_ZONE_PAIRS` | — | If enabled | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]` format. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. Use semicolons between pairs when a pair contains comma-separated ports or IPs. Each `src->dst` pair may appear only once for a site. Zones are resolved separately for each site. A `site/` prefix limits a pair to one site (see [Pairs for one site](#pairs-for-one-site)); a site left without a pair has its whitelist policies and lists removed. Filter creation failure prevents a broader ALLOW policy from being created. |
+| `CLOUDFLARE_ZONE_PAIRS` | — | If enabled | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]` format. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. Use semicolons between pairs when a pair contains comma-separated ports or IPs. Each `src->dst` pair may appear only once for a site. Zones are resolved separately for each site. A `site/` prefix limits a pair to one site (see [Pairs for one site](#pairs-for-one-site)); a site left without a pair has its whitelist policies and lists removed. Filter creation failure prevents a broader ALLOW policy from being created. `CLOUDFLARE_ZONE_PAIRS_FILE` variant supported. Reloaded on SIGHUP while the whitelist runs: a change syncs the whitelist at once. |
 
 A fetched list is applied only if every entry passes validation: IPv4 ranges no broader than a /12, IPv6 ranges no broader than a /29, no private, loopback, link-local, multicast or other non-public ranges, and at most 1000 entries per list. A list that fails validation, or an empty one, is rejected with an error and the ranges from the last successful sync stay in place.
 
@@ -602,7 +604,7 @@ The bouncer can POST a JSON notification to a webhook URL when significant event
 | `firewall_mode_changed` | The bouncer exits because a site loaded in legacy mode now needs zone mode (see [Firewall mode details](#firewall-mode-details)); its restart policy starts it again | `{"site": "...", "reason": "..."}` |
 | `shard_create_failed` | A shard object could not be created on the controller, so the bans assigned to it are not enforced. Repeats at most once an hour per shard | `{"site", "family", "shard", "unsynced_ips", "consecutive_failures", "retry_in_seconds"}` |
 | `ban_entry_refused` | The controller refused a ban entry, which is left out of its shard for an hour and then offered again. Repeats at most once an hour per entry and site | `{"site", "family", "shard", "entry", "retry_in_seconds"}` |
-| `cloudflare_whitelist_sync_failed` | The initial or a periodic Cloudflare whitelist sync failed. Repeats at most once an hour | `{"phase": "initial"}` or `{"phase": "refresh"}` |
+| `cloudflare_whitelist_sync_failed` | The initial, a periodic, or a SIGHUP-triggered Cloudflare whitelist sync failed. Repeats at most once an hour | `{"phase": "initial"}`, `{"phase": "refresh"}` or `{"phase": "reload"}` |
 
 The events that repeat at most once an hour add `"suppressed": N` to `detail` when N more of them were held back since the previous one, so a persistent failure does not flood the receiver. The controller's error text is in the bouncer's log, not in the payload.
 

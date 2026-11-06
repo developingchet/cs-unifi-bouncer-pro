@@ -75,6 +75,10 @@ func runDaemon() error {
 	if err != nil {
 		return err
 	}
+	var cfSource *cloudflarePairSource
+	if cfg.CloudflareWhitelistEnabled {
+		cfSource = newCloudflarePairSource(cfPairs)
+	}
 	if cfg.UnifiSitesAuto {
 		discovered, err := ctrl.DiscoverSites(ctx)
 		if err != nil {
@@ -116,7 +120,7 @@ func runDaemon() error {
 	// reconcilesOpen is set once gateReconciles lets reconciles run; a SIGHUP
 	// before then must not reconcile bans against a database still empty.
 	var reconcilesOpen atomic.Bool
-	go watchSIGHUP(ctx, notifySIGHUP(), cfg, fwMgr, reconcilesOpen.Load, log)
+	go watchSIGHUP(ctx, notifySIGHUP(), cfg, fwMgr, cfSource, reconcilesOpen.Load, log)
 	actions, err := newManualActions(cfg, claims, fwMgr, store, log)
 	if err != nil {
 		return err
@@ -177,7 +181,7 @@ func runDaemon() error {
 	// take minutes on a large ban list. They run alongside the decision stream
 	// and the health server, so new bans are applied and the health check
 	// answers meanwhile.
-	go repairAndSyncWhitelist(ctx, cfg, ctrl, fwMgr, cfPairs, notifier, done, log)
+	go repairAndSyncWhitelist(ctx, cfg, ctrl, fwMgr, cfSource, notifier, done, log)
 	go func() { done <- bnc.Run(ctx) }()
 	err = awaitShutdown(ctx, cfg, done, log, webhookDone, recorderDone)
 	// Syncs save shard members to their group records only every few
