@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -481,10 +482,20 @@ func TestGetSiteID_Found(t *testing.T) {
 	}
 }
 
+func noSiteRetryDelay(t *testing.T) {
+	t.Helper()
+	saved := emptySiteListRetryDelay
+	emptySiteListRetryDelay = 0
+	t.Cleanup(func() { emptySiteListRetryDelay = saved })
+}
+
 func TestGetSiteID_NotFound(t *testing.T) {
+	noSiteRetryDelay(t)
 	respBody := makeV1Page() // empty list — site not found
+	var requests atomic.Int32
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(respBody)
@@ -495,6 +506,48 @@ func TestGetSiteID_NotFound(t *testing.T) {
 	_, err := getSiteID(context.Background(), c, "nonexistent")
 	if err == nil {
 		t.Fatal("expected error when site is not in list, got nil")
+	}
+	if got := requests.Load(); got != emptySiteListAttempts {
+		t.Errorf("site list requests = %d, want %d (an empty list is retried)", got, emptySiteListAttempts)
+	}
+}
+
+func TestGetSiteIDRetriesAnEmptySiteList(t *testing.T) {
+	noSiteRetryDelay(t)
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if requests.Add(1) == 1 {
+			_, _ = w.Write(makeV1Page())
+			return
+		}
+		_, _ = w.Write(makeV1Page(apiSiteV1{ID: testSiteUUID, InternalReference: "default", Name: "Default"}))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	got, err := getSiteID(context.Background(), c, "default")
+	if err != nil || got != testSiteUUID {
+		t.Fatalf("getSiteID after one empty answer = %q, %v; want %q", got, err, testSiteUUID)
+	}
+}
+
+func TestGetSiteIDDoesNotRetryAListWithoutTheSite(t *testing.T) {
+	noSiteRetryDelay(t)
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(makeV1Page(apiSiteV1{ID: testSiteUUID, InternalReference: "other", Name: "Other"}))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	if _, err := getSiteID(context.Background(), c, "default"); err == nil {
+		t.Fatal("getSiteID of a site the controller does not list: got nil error")
+	}
+	if got := requests.Load(); got != 1 {
+		t.Errorf("site list requests = %d, want 1", got)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // maxResponseBodyBytes caps the response body read to prevent runaway allocations.
@@ -559,19 +560,9 @@ func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, er
 	}
 	c.cacheMu.RUnlock()
 
-	endpointURL := c.networkURL("/integration/v1/sites")
-	data, err := listAllV1Pages(ctx, c, endpointURL, "list-sites")
+	sites, err := listSitesV1(ctx, c)
 	if err != nil {
-		return "", fmt.Errorf("fetch integration v1 sites: %w", err)
-	}
-
-	sites := make([]apiSiteV1, 0, len(data))
-	for _, raw := range data {
-		var s apiSiteV1
-		if err := json.Unmarshal(raw, &s); err != nil || s.ID == "" {
-			continue
-		}
-		sites = append(sites, s)
+		return "", err
 	}
 	id, err := matchSite(sites, siteName)
 	if err != nil {
@@ -581,6 +572,41 @@ func getSiteID(ctx context.Context, c *unifiClient, siteName string) (string, er
 	c.siteIDCache[siteName] = id
 	c.cacheMu.Unlock()
 	return id, nil
+}
+
+// Every controller holds at least one site, so an empty site list is a
+// controller that is starting or briefly failing to answer; Network 11 can
+// return one between good answers. The listing is retried a few times
+// before the empty answer is believed.
+const emptySiteListAttempts = 3
+
+var emptySiteListRetryDelay = time.Second
+
+func listSitesV1(ctx context.Context, c *unifiClient) ([]apiSiteV1, error) {
+	endpointURL := c.networkURL("/integration/v1/sites")
+	for attempt := 1; ; attempt++ {
+		data, err := listAllV1Pages(ctx, c, endpointURL, "list-sites")
+		if err != nil {
+			return nil, fmt.Errorf("fetch integration v1 sites: %w", err)
+		}
+		sites := make([]apiSiteV1, 0, len(data))
+		for _, raw := range data {
+			var s apiSiteV1
+			if err := json.Unmarshal(raw, &s); err != nil || s.ID == "" {
+				continue
+			}
+			sites = append(sites, s)
+		}
+		if len(sites) > 0 || attempt == emptySiteListAttempts {
+			return sites, nil
+		}
+		c.log.Warn().Int("attempt", attempt).Msg("controller listed no sites; retrying")
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(emptySiteListRetryDelay):
+		}
+	}
 }
 
 // matchSite picks the site that name refers to. The three identifiers share
