@@ -161,6 +161,50 @@ func TestOrphanCleanupKeepsUnownedReferences(t *testing.T) {
 	}
 }
 
+func TestOrphanCleanupForgetsDeletedObjects(t *testing.T) {
+	ctx := context.Background()
+	for _, mode := range []string{"legacy", "zone"} {
+		t.Run(mode, func(t *testing.T) {
+			mgr, ctrl, store := newTestManager(t, defaultManagerConfig())
+			impl := mgr.(*managerImpl)
+			impl.siteMode[testSite] = mode
+			groupID := "orphan-group"
+			name := "crowdsec-drop-v4-0"
+			if mode == "legacy" {
+				ctrl.SetRules(testSite, []controller.FirewallRule{
+					{ID: "managed", Name: name, Action: "drop", Description: "test", SrcFirewallGroupIDs: []string{groupID}},
+				})
+			} else {
+				name = "crowdsec-policy-wan-lan-v4-0"
+				ctrl.SetPolicies(testSite, []controller.ZonePolicy{
+					{ID: "managed", Name: name, Action: "BLOCK", Description: "test", TrafficMatchingListIDs: []string{groupID}},
+				})
+			}
+			// Another site's record under the same name must stay.
+			if err := setCachedPolicy(store, "other", name, storage.PolicyRecord{UnifiID: "other-id", Site: "other", Mode: mode}); err != nil {
+				t.Fatal(err)
+			}
+			if err := setCachedPolicy(store, testSite, name, storage.PolicyRecord{UnifiID: "managed", Site: testSite, Mode: mode}); err != nil {
+				t.Fatal(err)
+			}
+
+			impl.deleteOrphanedReferencingObjects(ctx, testSite, mode, groupID)
+
+			if rec, err := getCachedPolicy(store, testSite, name); err != nil || rec != nil {
+				t.Fatalf("record of the deleted object kept: %+v, %v", rec, err)
+			}
+			if rec, err := getCachedPolicy(store, "other", name); err != nil || rec == nil {
+				t.Fatalf("other site's record removed: %+v, %v", rec, err)
+			}
+			if mode == "legacy" {
+				if err := impl.legacyMgr.DeleteRules(ctx, testSite); err != nil {
+					t.Fatalf("drain after the cleanup: %v", err)
+				}
+			}
+		})
+	}
+}
+
 // managerTestNamer returns a Namer using the default templates.
 func managerTestNamer(t *testing.T) *Namer {
 	t.Helper()

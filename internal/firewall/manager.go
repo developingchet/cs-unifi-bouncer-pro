@@ -522,6 +522,7 @@ func (m *managerImpl) deleteOrphanedReferencingObjects(ctx context.Context, site
 					} else {
 						m.log.Info().Str("site", site).Str("rule_id", rule.ID).Str("group_id", groupID).
 							Msg("deleted firewall rule referencing orphaned group")
+						m.forgetDeletedObject(site, rule.Name, rule.ID)
 					}
 					break
 				}
@@ -549,12 +550,31 @@ func (m *managerImpl) deleteOrphanedReferencingObjects(ctx context.Context, site
 			} else {
 				m.log.Info().Str("site", site).Str("policy_id", policy.ID).Str("group_id", groupID).
 					Msg("deleted zone policy referencing orphaned group")
+				m.forgetDeletedObject(site, policy.Name, policy.ID)
 			}
 		}
 		if err := m.deleteConvertedRulesFor(ctx, site, map[string]bool{groupID: true}, policies); err != nil {
 			m.log.Warn().Err(err).Str("site", site).Str("group_id", groupID).
 				Msg("failed to delete converted legacy rules referencing orphaned group (will continue)")
 		}
+	}
+}
+
+// forgetDeletedObject drops the database record of a rule or policy that was
+// deleted outside the rule and policy managers. A record left behind keeps
+// the deleted ID, and a later prune or drain sends it to the controller,
+// which refuses it and stops the drain.
+func (m *managerImpl) forgetDeletedObject(site, name, id string) {
+	rec, err := getCachedPolicy(m.store, site, name)
+	if err != nil {
+		m.log.Warn().Err(err).Str("site", site).Str("name", name).Msg("failed to read the record of a deleted rule or policy")
+		return
+	}
+	if rec == nil || rec.UnifiID != id {
+		return
+	}
+	if err := deleteCachedPolicy(m.store, site, name); err != nil {
+		m.log.Warn().Err(err).Str("site", site).Str("name", name).Msg("failed to remove the record of a deleted rule or policy")
 	}
 }
 
