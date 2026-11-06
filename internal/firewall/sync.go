@@ -145,6 +145,7 @@ func (m *managerImpl) attachShardCallbacks(mgr *ShardManager) {
 		m.setRateLimitUntil(time.Now().Add(retryAfter))
 	})
 	mgr.SetWritesPausedCheck(func() bool { return m.writesPaused() != nil })
+	mgr.SetEvents(m.cfg.ShardEvents)
 	mgr.SetSyncCallbacks(
 		func() { // onSyncSuccess
 			m.recordControllerSuccess()

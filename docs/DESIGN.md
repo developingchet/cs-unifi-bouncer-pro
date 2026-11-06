@@ -418,7 +418,9 @@ Refreshes set claim expiry to `now + 2×interval`. A failed or partial fetch can
 
 `internal/webhook.Notifier` posts a small JSON payload to `WEBHOOK_URL` when a named event fires. The notifier is a no-op when the URL is empty, in dry-run mode, or when the event is not in `WEBHOOK_EVENTS`. Events are queued (up to 64) and delivered in the background; HTTP errors are logged at `warn` level and never propagate to the caller.
 
-Circuit breaker state changes (`OnCircuitBreakerOpen` / `OnCircuitBreakerClose` callbacks on `ManagerConfig`) and reconcile drift (a periodic reconcile with `added + removed >= 100`) are the three supported event types. The payload is `{"event", "timestamp", "detail"}`; `detail` is `{"added", "removed"}` for `reconcile_drift` and omitted otherwise. The callbacks are plain `func()` values — the `firewall` package has no import dependency on `webhook`.
+Events come from circuit breaker state changes (`OnCircuitBreakerOpen` / `OnCircuitBreakerClose` callbacks on `ManagerConfig`), shard create failures and refused ban entries (the `ShardEvents` callbacks on `ManagerConfig`), reconcile drift (a periodic reconcile with `added + removed >= 100`), the exit on a firewall mode change, and failed Cloudflare whitelist syncs. The payload is `{"event", "timestamp", "detail"}`; `detail` is omitted for the circuit breaker events. The callbacks are plain functions, so the `firewall` package has no import dependency on `webhook`.
+
+Shard create failures, refused entries and Cloudflare sync failures recur on every retry while the cause persists. `Notifier.FireLimited` sends each at most once an hour per subject (a shard, an entry, the sync) and counts the ones it held back in the next payload's `suppressed` field. It remembers at most 1024 subjects; past that, an event about a new subject is dropped until older subjects expire. When the daemon exits on its own, as on a firewall mode change, it stops the notifier and waits for it to deliver the queued events before exiting.
 
 ---
 

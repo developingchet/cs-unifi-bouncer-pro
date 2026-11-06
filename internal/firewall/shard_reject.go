@@ -129,5 +129,8 @@ func (sm *ShardManager) rejectMember(shard *Shard, member string) bool {
 	sm.log.Error().Str("shard", shard.Name).Str("member", member).Str("site", sm.site).
 		Dur("retry_in", refusalHold).
 		Msg("controller refused a ban entry; it is left out of the shard and not enforced until it is retried")
+	sm.events.entryRefused(RefusedEntry{
+		Site: sm.site, Family: shard.Family, Shard: shard.Name, Entry: member, RetryIn: refusalHold,
+	})
 	return true
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/webhook"
 	"github.com/rs/zerolog"
 )
 
@@ -83,11 +84,13 @@ func controllerConfig(cfg *config.Config) controller.ClientConfig {
 
 // buildFWManager constructs a firewall.Manager from config, controller, store, and logger.
 // It does NOT call EnsureInfrastructure — callers do that themselves when needed.
-// cbOpen and cbClose are optional callbacks fired when the circuit breaker opens/closes; pass nil for no-op.
+// notifier receives circuit breaker transitions and shard failures as webhook
+// events; pass nil to send none.
 func buildFWManager(cfg *config.Config,
 	ctrl controller.Controller, store storage.Store, log zerolog.Logger,
-	cbOpen, cbClose func(),
+	notifier *webhook.Notifier,
 ) (firewall.Manager, error) {
+	cbOpen, cbClose, shardEvents := firewallHooks(notifier)
 	namer, err := firewall.NewNamer(
 		cfg.GroupNameTemplate,
 		cfg.RuleNameTemplate,
@@ -124,6 +127,7 @@ func buildFWManager(cfg *config.Config,
 		ShardMergeThreshold:         cfg.ShardMergeThreshold,
 		OnCircuitBreakerOpen:        cbOpen,
 		OnCircuitBreakerClose:       cbClose,
+		ShardEvents:                 shardEvents,
 		LegacyCfg: firewall.LegacyConfig{
 			RuleIndexStartV4: cfg.LegacyRuleIndexStartV4,
 			RuleIndexStartV6: cfg.LegacyRuleIndexStartV6,

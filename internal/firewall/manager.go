@@ -91,6 +91,9 @@ type ManagerConfig struct {
 	// Nil = no-op. These are called from attachShardCallbacks.
 	OnCircuitBreakerOpen  func()
 	OnCircuitBreakerClose func()
+
+	// ShardEvents receives shard create failures and refused ban entries.
+	ShardEvents ShardEvents
 }
 
 type managerImpl struct {

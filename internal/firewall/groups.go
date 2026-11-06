@@ -185,6 +185,9 @@ type ShardManager struct {
 
 	// now is the clock refusal holds are measured against.
 	now func() time.Time
+
+	// events receives shard create failures and refused entries.
+	events ShardEvents
 }
 
 // NewShardManager creates a ShardManager. Call EnsureShards to initialize from the API.

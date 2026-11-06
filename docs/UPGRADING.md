@@ -77,6 +77,10 @@ Behaviour that changes without action:
   that belong to no site. Queries that select series by their exact label set
   need `site` added or summed away, for example
   `sum by (endpoint) (rate(crowdsec_unifi_api_calls_total[5m]))`.
+- **More webhook events**: `firewall_mode_changed`, `shard_create_failed`,
+  `ban_entry_refused` and `cloudflare_whitelist_sync_failed` are new. With
+  `WEBHOOK_URL` set and `WEBHOOK_EVENTS` empty they are sent as well; list
+  the events to keep receiving only the earlier three.
 - **Decision types**: `BLOCK_DECISION_TYPES` is new and defaults to `ban`,
   so captcha and other non-ban decisions are still ignored until it lists
   them (see [CONFIGURATION.md](CONFIGURATION.md#decision-filtering)).

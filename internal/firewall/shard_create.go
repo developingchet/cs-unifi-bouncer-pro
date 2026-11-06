@@ -132,6 +132,10 @@ func (sm *ShardManager) recordCreateFailure(shard *Shard, ipCount int, err error
 	sm.log.Error().Err(err).Str("shard", shard.Name).Int("unsynced_ips", ipCount).
 		Int("consecutive_failures", failures).Stringer("retry_in", delay).
 		Msg("failed to create shard on the controller; its bans are not enforced until it exists")
+	sm.events.createFailed(ShardCreateFailure{
+		Site: sm.site, Family: shard.Family, Shard: shard.Name,
+		UnsyncedIPs: ipCount, ConsecutiveFailures: failures, RetryIn: delay,
+	})
 }
 
 // createPendingShard creates a Pending shard's controller object and caches

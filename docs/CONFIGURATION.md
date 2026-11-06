@@ -555,7 +555,7 @@ The bouncer can POST a JSON notification to a webhook URL when significant event
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WEBHOOK_URL` | — | URL to POST notifications to. Leave empty to disable. |
-| `WEBHOOK_EVENTS` | — | Comma-separated list of event names to send. Empty sends all supported events when `WEBHOOK_URL` is set. Only `circuit_breaker_open`, `circuit_breaker_close` and `reconcile_drift` are accepted; an unknown name stops startup. |
+| `WEBHOOK_EVENTS` | — | Comma-separated list of event names to send. Empty sends all supported events when `WEBHOOK_URL` is set. Only the event names below are accepted; an unknown name stops startup. |
 
 ### Supported event names
 
@@ -564,6 +564,12 @@ The bouncer can POST a JSON notification to a webhook URL when significant event
 | `circuit_breaker_open` | The circuit breaker opens after consecutive sync failures | omitted |
 | `circuit_breaker_close` | The circuit breaker resets to closed after a successful probe | omitted |
 | `reconcile_drift` | A periodic reconcile adds and removes 100 or more IPs in total (`added + removed >= 100`). The startup reconcile does not fire it. | `{"added": N, "removed": N}` |
+| `firewall_mode_changed` | The bouncer exits because a site loaded in legacy mode now needs zone mode (see [Firewall mode details](#firewall-mode-details)); its restart policy starts it again | `{"site": "...", "reason": "..."}` |
+| `shard_create_failed` | A shard object could not be created on the controller, so the bans assigned to it are not enforced. Repeats at most once an hour per shard | `{"site", "family", "shard", "unsynced_ips", "consecutive_failures", "retry_in_seconds"}` |
+| `ban_entry_refused` | The controller refused a ban entry, which is left out of its shard for an hour and then offered again. Repeats at most once an hour per entry and site | `{"site", "family", "shard", "entry", "retry_in_seconds"}` |
+| `cloudflare_whitelist_sync_failed` | The initial or a periodic Cloudflare whitelist sync failed. Repeats at most once an hour | `{"phase": "initial"}` or `{"phase": "refresh"}` |
+
+The events that repeat at most once an hour add `"suppressed": N` to `detail` when N more of them were held back since the previous one, so a persistent failure does not flood the receiver. The controller's error text is in the bouncer's log, not in the payload.
 
 ### Notification payload
 
@@ -575,9 +581,9 @@ The bouncer can POST a JSON notification to a webhook URL when significant event
 }
 ```
 
-The payload always has `event` and `timestamp` (UTC, RFC 3339). `detail` is present only for `reconcile_drift`.
+The payload always has `event` and `timestamp` (UTC, RFC 3339). `detail` is omitted for the circuit breaker events.
 
-Notifications are delivered in the background, so a slow endpoint never delays syncing. Up to 64 events can be queued; further events are dropped with a `webhook: queue full` warning. On shutdown, queued events get up to 5 seconds to send. Webhook errors are logged at `warn` level and never cause the bouncer to exit or retry. The HTTP timeout for webhook POSTs is 5 seconds. Redirects are not followed, so the payload is only ever sent to `WEBHOOK_URL` itself, and an `http://` URL logs a startup warning because the payload then travels unencrypted. Logs show only the webhook host, because Slack- and Discord-style URLs carry a token in the path.
+Notifications are delivered in the background, so a slow endpoint never delays syncing. Up to 64 events can be queued; further events are dropped with a `webhook: queue full` warning. On shutdown, including the exit on a firewall mode change, queued events get up to 5 seconds to send. Webhook errors are logged at `warn` level and never cause the bouncer to exit or retry. The HTTP timeout for webhook POSTs is 5 seconds. Redirects are not followed, so the payload is only ever sent to `WEBHOOK_URL` itself, and an `http://` URL logs a startup warning because the payload then travels unencrypted. Logs show only the webhook host, because Slack- and Discord-style URLs carry a token in the path.
 
 ```bash
 # Fire a notification when the circuit breaker trips or resets

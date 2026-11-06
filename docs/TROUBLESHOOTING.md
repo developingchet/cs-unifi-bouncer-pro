@@ -99,7 +99,7 @@ All three must be set and non-empty, along with either `UNIFI_API_KEY` or `UNIFI
 Other settings checked at startup:
 
 - `GROUP_NAME_TEMPLATE`, `RULE_NAME_TEMPLATE` and `POLICY_NAME_TEMPLATE` must render a non-empty name that includes `{{.Index}}`, using only `.Family`, `.Index`, `.Site`, `.SrcZone` and `.DstZone`.
-- `WEBHOOK_EVENTS` accepts only `circuit_breaker_open`, `circuit_breaker_close` and `reconcile_drift`.
+- `WEBHOOK_EVENTS` accepts only the event names listed in [Webhook Notifications](CONFIGURATION.md#supported-event-names).
 - Removed settings such as `ZONE_PAIRS_SCENARIO_MAP` are refused; see [Removed and Renamed Settings](CONFIGURATION.md#removed-and-renamed-settings).
 
 `validate` runs the same checks without contacting anything:
@@ -900,7 +900,7 @@ Common causes:
 | `webhook: server returned error status` (warn) | The endpoint answered 4xx or 5xx | Check the endpoint's own logs |
 | `webhook: redirect not followed` (warn) | The endpoint answered with a 3xx; the bouncer never re-sends the payload to a redirect target | Set `WEBHOOK_URL` to the final URL, for example the `https://` form of an `http://` URL |
 | `webhook: queue full, event dropped` (warn) | The endpoint is too slow; more than 64 events are waiting | Check the endpoint's response time |
-| No log entries | `WEBHOOK_URL` is empty, the event is not listed in `WEBHOOK_EVENTS`, the event has not happened, or `DRY_RUN=true` | Set `WEBHOOK_URL`; add the event to `WEBHOOK_EVENTS` (or leave it empty for all events). `reconcile_drift` fires only when a periodic reconcile adds and removes 100 or more IPs in total |
+| No log entries | `WEBHOOK_URL` is empty, the event is not listed in `WEBHOOK_EVENTS`, the event has not happened, or `DRY_RUN=true` | Set `WEBHOOK_URL`; add the event to `WEBHOOK_EVENTS` (or leave it empty for all events). `reconcile_drift` fires only when a periodic reconcile adds and removes 100 or more IPs in total; `shard_create_failed`, `ban_entry_refused` and `cloudflare_whitelist_sync_failed` repeat at most once an hour for the same shard, entry or sync |
 
 Webhook POSTs use a 5 second timeout and are never retried. The bouncer continues normally if a webhook call fails.
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/blocklist"
@@ -110,10 +111,7 @@ func runDaemon() error {
 		notifier.Run(ctx)
 	}()
 
-	fwMgr, err := buildFWManager(cfg, ctrl, store, log,
-		func() { notifier.Fire(webhook.EventCircuitBreakerOpen, nil) },
-		func() { notifier.Fire(webhook.EventCircuitBreakerClose, nil) },
-	)
+	fwMgr, err := buildFWManager(cfg, ctrl, store, log, notifier)
 	if err != nil {
 		return err
 	}
@@ -183,9 +181,24 @@ func runDaemon() error {
 	// take minutes on a large ban list. They run alongside the decision stream
 	// and the health server, so new bans are applied and the health check
 	// answers meanwhile.
-	go repairAndSyncWhitelist(ctx, cfg, ctrl, fwMgr, cfPairs, done, log)
+	go repairAndSyncWhitelist(ctx, cfg, ctrl, fwMgr, cfPairs, notifier, done, log)
 	go func() { done <- bnc.Run(ctx) }()
-	return awaitShutdown(ctx, cfg, done, log, webhookDone, recorderDone)
+	err = awaitShutdown(ctx, cfg, done, log, webhookDone, recorderDone)
+	// A component that ends the daemon on its own (a firewall mode change)
+	// may just have queued a webhook; stop the notifier and let it deliver.
+	cancel()
+	waitDrained(webhookDone, cfg.ShutdownGracePeriod)
+	return err
+}
+
+// waitDrained waits for drained to close, or for timeout.
+func waitDrained(drained <-chan struct{}, timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-drained:
+	case <-timer.C:
+	}
 }
 
 // awaitShutdown returns when the bouncer stops. After a signal it allows

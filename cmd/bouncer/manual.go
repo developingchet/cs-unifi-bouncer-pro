@@ -53,7 +53,7 @@ func reconcileCmd() *cobra.Command {
 			}
 			defer ctrl.Close()
 
-			fwMgr, err := buildFWManager(cfg, ctrl, store, log, nil, nil)
+			fwMgr, err := buildFWManager(cfg, ctrl, store, log, nil)
 			if err != nil {
 				return err
 			}
@@ -125,7 +125,7 @@ Requires either --force or --dry-run for safety.`,
 		}
 		defer ctrl.Close()
 
-		fwMgr, err := buildFWManager(cfg, ctrl, store, log, nil, nil)
+		fwMgr, err := buildFWManager(cfg, ctrl, store, log, nil)
 		if err != nil {
 			return err
 		}
@@ -332,7 +332,7 @@ func openManualSession(ctx context.Context, cfg *config.Config, log zerolog.Logg
 		_ = store.Close()
 		return nil, nil, nil, fmt.Errorf("init UniFi client: %w", err)
 	}
-	fwMgr, err := buildFWManager(cfg, ctrl, store, log, nil, nil)
+	fwMgr, err := buildFWManager(cfg, ctrl, store, log, nil)
 	if err == nil {
 		err = fwMgr.EnsureInfrastructure(ctx, cfg.UnifiSites)
 	}
