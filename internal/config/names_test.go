@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,15 +14,16 @@ func TestLoadRejectsLegacyGroupNamesOver64Characters(t *testing.T) {
 		env     map[string]string
 		wantErr string
 	}{
-		{name: "63 characters", env: map[string]string{"GROUP_NAME_TEMPLATE": long}},
+		{name: "63 characters", env: map[string]string{"FIREWALL_MODE": "legacy", "GROUP_NAME_TEMPLATE": long}},
 		{
 			name:    "65 characters",
-			env:     map[string]string{"GROUP_NAME_TEMPLATE": "xx" + long},
+			env:     map[string]string{"FIREWALL_MODE": "legacy", "GROUP_NAME_TEMPLATE": "xx" + long},
 			wantErr: `(65 characters) for site "default"; legacy firewall groups are limited to 64 characters`,
 		},
 		{
 			name: "too long with a configured site",
 			env: map[string]string{
+				"FIREWALL_MODE":       "legacy",
 				"UNIFI_SITES":         "default,branch-office-east",
 				"GROUP_NAME_TEMPLATE": "crowdsec-block-" + strings.Repeat("y", 30) + "-{{.Site}}-{{.Family}}-{{.Index}}",
 			},
@@ -45,6 +47,21 @@ func TestLoadRejectsLegacyGroupNamesOver64Characters(t *testing.T) {
 				t.Fatalf("Load = %v, want error containing %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// In auto mode the sites may all run the zone-based firewall, which names
+// traffic matching lists without that limit, so a long name is a warning.
+func TestLoadWarnsOfLongLegacyGroupNamesInAutoMode(t *testing.T) {
+	long := "xx" + strings.Repeat("x", 58) + "-{{.Family}}-{{.Index}}"
+	cfg, err := loadWith(t, map[string]string{"FIREWALL_MODE": "auto", "GROUP_NAME_TEMPLATE": long})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := `GROUP_NAME_TEMPLATE renders "` + strings.Repeat("x", 60) + `-v4-0" (65 characters) for site "default"; ` +
+		`legacy firewall groups are limited to 64 characters; sites on the legacy firewall will fail to create that group`
+	if !slices.Contains(cfg.DeprecationWarnings, want) {
+		t.Errorf("warnings = %q, want %q", cfg.DeprecationWarnings, want)
 	}
 }
 

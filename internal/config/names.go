@@ -20,28 +20,30 @@ type NameData struct {
 // accepts; a longer one is refused with api.err.InvalidPayload.
 const maxLegacyGroupName = 64
 
-// validateLegacyGroupName checks that GROUP_NAME_TEMPLATE renders a name the
-// classic API accepts for the first shard of each family on each site. A name
-// that only grows past the limit at a higher index is refused when that shard
-// is created, which shard_create_failed reports.
-func validateLegacyGroupName(tmpl string, sites []string) error {
+// legacyGroupNameTooLong checks that GROUP_NAME_TEMPLATE renders a name the
+// classic API accepts for the first shard of each family on each site. It
+// returns a message naming the first name that is too long, or "" when every
+// name fits, and an error when the template cannot be rendered. A name that
+// only grows past the limit at a higher index is refused when that shard is
+// created, which shard_create_failed reports.
+func legacyGroupNameTooLong(tmpl string, sites []string) (string, error) {
 	t, err := template.New("GROUP_NAME_TEMPLATE").Option("missingkey=error").Parse(tmpl)
 	if err != nil {
-		return fmt.Errorf("GROUP_NAME_TEMPLATE is invalid Go template: %w", err)
+		return "", fmt.Errorf("GROUP_NAME_TEMPLATE is invalid Go template: %w", err)
 	}
 	for _, site := range sites {
 		for _, family := range []string{"v4", "v6"} {
 			var buf bytes.Buffer
 			if err := t.Execute(&buf, NameData{Family: family, Index: 0, Site: site}); err != nil {
-				return fmt.Errorf("GROUP_NAME_TEMPLATE cannot be rendered: %w", err)
+				return "", fmt.Errorf("GROUP_NAME_TEMPLATE cannot be rendered: %w", err)
 			}
 			if n := utf8.RuneCount(buf.Bytes()); n > maxLegacyGroupName {
-				return fmt.Errorf("GROUP_NAME_TEMPLATE renders %q (%d characters) for site %q; legacy firewall groups are limited to %d characters",
-					buf.String(), n, site, maxLegacyGroupName)
+				return fmt.Sprintf("GROUP_NAME_TEMPLATE renders %q (%d characters) for site %q; legacy firewall groups are limited to %d characters",
+					buf.String(), n, site, maxLegacyGroupName), nil
 			}
 		}
 	}
-	return nil
+	return "", nil
 }
 
 // validateNameTemplate parses tmpl and renders it for two shards. Parsing

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -80,16 +81,8 @@ func (c *Config) validateFirewall() error {
 			return err
 		}
 	}
-	// The length limit of traffic matching list names is not known, so zone
-	// mode is not checked.
-	if c.FirewallMode != "zone" {
-		sites := c.UnifiSites
-		if c.UnifiSitesAuto || len(sites) == 0 {
-			sites = []string{"default"}
-		}
-		if err := validateLegacyGroupName(c.GroupNameTemplate, sites); err != nil {
-			return err
-		}
+	if err := c.checkLegacyGroupNames(); err != nil {
+		return err
 	}
 
 	// Validate zone pairs if mode is zone or auto
@@ -107,6 +100,31 @@ func (c *Config) validateFirewall() error {
 			return err
 		}
 	}
+	return nil
+}
+
+// checkLegacyGroupNames checks the length of the legacy group names
+// GROUP_NAME_TEMPLATE renders. Too long a name is an error with
+// FIREWALL_MODE=legacy and a warning with auto, where the sites that resolve
+// to the zone-based firewall name traffic matching lists instead, whose length
+// limit is not known. Zone mode is not checked.
+func (c *Config) checkLegacyGroupNames() error {
+	if c.FirewallMode == "zone" {
+		return nil
+	}
+	sites := c.UnifiSites
+	if c.UnifiSitesAuto || len(sites) == 0 {
+		sites = []string{"default"}
+	}
+	tooLong, err := legacyGroupNameTooLong(c.GroupNameTemplate, sites)
+	if err != nil || tooLong == "" {
+		return err
+	}
+	if c.FirewallMode == "legacy" {
+		return errors.New(tooLong)
+	}
+	c.DeprecationWarnings = append(c.DeprecationWarnings,
+		tooLong+"; sites on the legacy firewall will fail to create that group")
 	return nil
 }
 

@@ -198,12 +198,15 @@ refused; run `validate` before upgrading:
   `WAN_LOCAL`, `LAN_IN`, ...) and `LEGACY_RULESET_V6` one of the IPv6 ones
   (`WANv6_IN`, ...), and `LEGACY_RULE_INDEX_START_V4` and `_V6` must be
   between 1 and 99999.
-- **Long group names**: with `FIREWALL_MODE=legacy` or `auto`, a
+- **Long group names**: with `FIREWALL_MODE=legacy`, a
   `GROUP_NAME_TEMPLATE` whose first shard renders a name longer than 64
   characters fails validation (`GROUP_NAME_TEMPLATE renders "..." (65
   characters) for site "default"; legacy firewall groups are limited to 64
   characters`). The classic API refused every such group, so no shard could
-  be created.
+  be created. With `auto`, where the sites may all use the zone-based
+  firewall and its lists have no such limit, the same text is logged as a
+  warning at startup and printed by `validate`, ending `; sites on the
+  legacy firewall will fail to create that group`.
 - **CA certificate files**: `UNIFI_CA_CERT` and `CROWDSEC_LAPI_CA_CERT` must
   name a readable file holding a PEM certificate. Before, a wrong path passed
   `validate` and stopped the daemon when it built its HTTP client.
