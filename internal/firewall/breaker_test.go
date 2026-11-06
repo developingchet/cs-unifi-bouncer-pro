@@ -3,6 +3,7 @@ package firewall
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -226,5 +227,71 @@ func TestSetRateLimitUntilKeepsLaterDeadline(t *testing.T) {
 	m.setRateLimitUntil(evenLater)
 	if _, until := m.isRateLimited(); !until.Equal(evenLater) {
 		t.Errorf("deadline = %s, want the extended %s", until, evenLater)
+	}
+}
+
+// While the controller is unreachable, reconcile's reads hold syncMu and the
+// shard writes that would report the outage are deferred, so the reads have
+// to open the breaker themselves. A controller that answers and refuses does
+// not count.
+func TestReconcileReadFailuresOpenBreaker(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		wantOpen bool
+	}{
+		{"timeout", fmt.Errorf("list firewall groups: %w", context.DeadlineExceeded), true},
+		{"transport error", errors.New("net/http: TLS handshake timeout"), true},
+		{"not found", &controller.ErrNotFound{}, false},
+		{"refused", &controller.ErrBadRequest{Body: "invalid"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, ctrl, store := newGatedManager(t, func(c *ManagerConfig) { c.CircuitBreakerThreshold = 3 })
+			for _, ip := range []string{"198.51.100.1", "198.51.100.2"} {
+				if err := testutil.PutBan(store, ip, time.Time{}, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx := context.Background()
+			if err := m.SyncDirty(ctx, []string{testSite}); err != nil {
+				t.Fatalf("SyncDirty: %v", err)
+			}
+
+			for range 3 {
+				ctrl.SetError("ListFirewallGroups", tt.err)
+				if _, err := m.Reconcile(ctx, []string{testSite}); err == nil {
+					t.Fatal("Reconcile succeeded although the controller could not be read")
+				}
+			}
+			if got := m.cb.isOpen(); got != tt.wantOpen {
+				t.Errorf("breaker open = %v after three failed reconciles, want %v", got, tt.wantOpen)
+			}
+		})
+	}
+}
+
+func TestControllerUnhealthy(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"cancelled", fmt.Errorf("list: %w", context.Canceled), false},
+		{"deadline", context.DeadlineExceeded, true},
+		{"rate limit", &controller.ErrRateLimit{RetryAfter: time.Second}, false},
+		{"bad request", &controller.ErrBadRequest{Body: "x"}, false},
+		{"not found", &controller.ErrNotFound{}, false},
+		{"conflict", &controller.ErrConflict{}, false},
+		{"unauthorized", &controller.ErrUnauthorized{}, true},
+		{"server error", errors.New("unexpected status 502"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := controllerUnhealthy(tt.err); got != tt.want {
+				t.Errorf("controllerUnhealthy(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }

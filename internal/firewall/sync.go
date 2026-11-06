@@ -150,16 +150,20 @@ func (m *managerImpl) attachShardCallbacks(mgr *ShardManager) {
 		func() { // onSyncSuccess
 			m.recordControllerSuccess()
 		},
-		func() { // onSyncError
-			if tripped := m.cb.recordFailure(); tripped {
-				m.log.Error().Msg("circuit breaker opened: too many consecutive sync failures")
-				metrics.CircuitBreakerState.Set(1)
-				if m.cfg.OnCircuitBreakerOpen != nil {
-					m.cfg.OnCircuitBreakerOpen()
-				}
-			}
-		},
+		m.recordControllerFailure, // onSyncError
 	)
+}
+
+// recordControllerFailure counts one failed controller request toward the
+// circuit breaker and opens it at the threshold.
+func (m *managerImpl) recordControllerFailure() {
+	if tripped := m.cb.recordFailure(); tripped {
+		m.log.Error().Msg("circuit breaker opened: too many consecutive sync failures")
+		metrics.CircuitBreakerState.Set(1)
+		if m.cfg.OnCircuitBreakerOpen != nil {
+			m.cfg.OnCircuitBreakerOpen()
+		}
+	}
 }
 
 func (m *managerImpl) recordControllerSuccess() {

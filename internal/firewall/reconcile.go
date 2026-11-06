@@ -41,7 +41,7 @@ func (m *managerImpl) reconcileWrites(ctx context.Context, site string, v4Mgr, v
 		}
 		gone, surplus, err := mgr.MarkRemoteDrift(ctx)
 		if err != nil {
-			m.noteRateLimit(err)
+			m.noteReadFailure(err)
 			errs = append(errs, fmt.Errorf("check controller membership for site %s: %w", site, err))
 			continue
 		}
@@ -75,12 +75,14 @@ func (m *managerImpl) reconcileWrites(ctx context.Context, site string, v4Mgr, v
 	switch m.cachedMode(site) {
 	case "zone":
 		if err := m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr); err != nil {
+			m.noteReadFailure(err)
 			errs = append(errs, fmt.Errorf("ensure zone policies for site %s: %w", site, err))
 		} else if err := m.retryConvertedRules(ctx, site); err != nil {
 			errs = append(errs, fmt.Errorf("retire converted legacy rules for site %s: %w", site, err))
 		}
 	case "legacy":
 		if err := m.legacyMgr.EnsureRules(ctx, site, v4Mgr, v6Mgr); err != nil {
+			m.noteReadFailure(err)
 			errs = append(errs, fmt.Errorf("ensure legacy rules for site %s: %w", site, err))
 		}
 	}
