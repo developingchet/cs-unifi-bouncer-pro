@@ -189,24 +189,22 @@ zone_discovery[default]  PASS    3 zones found
 
 ## SIGHUP Hot-Reload
 
-Sending `SIGHUP` to the running daemon triggers a live reload of the zone-pair configuration without restarting:
+Sending `SIGHUP` to the running daemon reloads the zone pairs (`ZONE_PAIRS` and `EGRESS_ZONE_PAIRS`) without a restart. A running process cannot see a changed `.env`, `EnvironmentFile` or ConfigMap environment, so pairs that should change live go in files named by `ZONE_PAIRS_FILE` and `EGRESS_ZONE_PAIRS_FILE`, one pair per line, and the reload reads those files again:
 
 ```bash
-# Docker
+# Docker: mount the file, for example ./zone-pairs:/config/zone-pairs:ro,
+# with ZONE_PAIRS_FILE=/config/zone-pairs, edit it, then
 docker kill --signal=HUP cs-unifi-bouncer-pro
 
-# systemd — ExecReload=/bin/kill -HUP $MAINPID maps to the SIGHUP handler
+# systemd: ExecReload=/bin/kill -HUP $MAINPID maps to the SIGHUP handler
 systemctl reload cs-unifi-bouncer-pro
-
-# Kubernetes: restart to load changed environment variables
-kubectl -n crowdsec rollout restart deployment/cs-unifi-bouncer-pro
 ```
+
+Pairs set directly in the environment change only with a restart; a SIGHUP then re-resolves the same pairs and repairs their policies. On Kubernetes, mount a ConfigMap key as the pairs file, or roll the deployment.
 
 On receipt, the daemon performs a **validate-then-commit** reload:
 
-SIGHUP reloads the process's current environment. Changes to `.env` or a Kubernetes Secret require a container or pod restart.
-
-1. Re-reads the configuration from environment variables
+1. Re-reads the configuration from the environment and the `_FILE` files
 2. Invalidates the stale zone ID cache so the next resolution hits the API
 3. Resolves all new zone names → UUIDs into a **staging map** against the live controller
 4. Creates the required port and destination IP filters, then commits the new pairs and cache

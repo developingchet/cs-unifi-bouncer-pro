@@ -62,6 +62,9 @@ Behaviour that changes without action:
   write fails.
 - **SIGHUP before the first CrowdSec batch** only repairs the block policies
   for the new zone pairs; bans are reconciled once the startup reconcile runs.
+- **Zone pairs from a file**: `ZONE_PAIRS_FILE` and `EGRESS_ZONE_PAIRS_FILE`
+  are new. A SIGHUP reads them again, so pairs kept in a file change without
+  a restart; pairs in the environment still need one.
 - **Feed redirects through a proxy**: with `HTTPS_PROXY` or `HTTP_PROXY` set,
   a feed redirect to another host is followed only when that host name
   resolves, from the bouncer, to public addresses. A redirect to a name the

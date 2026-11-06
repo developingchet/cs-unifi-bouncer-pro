@@ -55,7 +55,12 @@ are enabled.
 
 ## Hot-Reload (SIGHUP)
 
-To reload the zone pairs (`ZONE_PAIRS`, `EGRESS_ZONE_PAIRS`) without restarting the daemon:
+A reload re-reads the zone pairs (`ZONE_PAIRS`, `EGRESS_ZONE_PAIRS`) without
+restarting the daemon. systemd reads `bouncer.env` only when the service
+starts, so keep pairs that should change live in a file and point
+`ZONE_PAIRS_FILE` (and `EGRESS_ZONE_PAIRS_FILE`) at it, for example
+`/etc/cs-unifi-bouncer-pro/zone-pairs` with one pair per line. Edit the file,
+then:
 ```bash
 sudo systemctl reload cs-unifi-bouncer-pro
 # or equivalently:

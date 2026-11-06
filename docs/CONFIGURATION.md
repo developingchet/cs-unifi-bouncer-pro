@@ -1,6 +1,6 @@
 # Configuration Reference
 
-All configuration is provided through environment variables (or `_FILE` variants for secrets). Copy `.env.example` from the repository to `.env` and edit as needed. Values wrapped in one pair of matching single or double quotes are unquoted, because Docker's `--env-file` passes quotes through.
+All configuration is provided through environment variables (or `_FILE` variants for secrets and zone pairs). Copy `.env.example` from the repository to `.env` and edit as needed. Values wrapped in one pair of matching single or double quotes are unquoted, because Docker's `--env-file` passes quotes through.
 
 `UNIFI_API_KEY`, `UNIFI_USERNAME`, `UNIFI_PASSWORD` and `CROWDSEC_LAPI_KEY` support Docker secrets and Kubernetes secrets via the `_FILE` suffix: set the variable to the path of a file containing the secret, and the application reads and trims its contents at startup.
 
@@ -10,6 +10,14 @@ UNIFI_PASSWORD=mypassword
 
 # Via file (Docker secrets / Kubernetes secrets)
 UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
+```
+
+`ZONE_PAIRS_FILE` and `EGRESS_ZONE_PAIRS_FILE` read the zone pairs from a file in the same way. Each line holds one pair (or a list in the variable's own syntax); blank lines and lines starting with `#` are skipped. A file setting takes precedence over the plain variable. The files are read again on SIGHUP, which is how pairs change without a restart (see [SIGHUP Hot-Reload](../README.md#sighup-hot-reload)).
+
+```text
+# /config/zone-pairs
+External->Dmz:80,443
+External->Internal@192.168.1.10
 ```
 
 ---
@@ -200,7 +208,7 @@ These settings apply only when `FIREWALL_MODE=zone` or when `auto` detects a zon
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ZONE_PAIRS` | `External->Dmz` | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. Use commas between simple pairs; use semicolons between pairs when ports or destination IPs contain commas. Ambiguous strings fail validation. A block policy is created for each pair, shard and address family, with the shard list as its source filter. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. Standard UUIDs and MongoDB ObjectIDs are also accepted. Optional port lists and `@ip1,ip2,...` scope each policy. An empty value is rejected when `FIREWALL_MODE=zone`, and a SIGHUP reload with an empty value is ignored, because an empty set would delete every block policy. |
+| `ZONE_PAIRS` | `External->Dmz` | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. Use commas between simple pairs; use semicolons between pairs when ports or destination IPs contain commas. Ambiguous strings fail validation. A block policy is created for each pair, shard and address family, with the shard list as its source filter. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. Standard UUIDs and MongoDB ObjectIDs are also accepted. Optional port lists and `@ip1,ip2,...` scope each policy. An empty value is rejected when `FIREWALL_MODE=zone`, and a SIGHUP reload with an empty value is ignored, because an empty set would delete every block policy. `ZONE_PAIRS_FILE` variant supported; pairs read from a file can change on SIGHUP. |
 
 ```bash
 # Named zones (auto-resolved at startup) — no port filter (any port)
@@ -285,7 +293,7 @@ Both kinds of pair reference the same shard lists; only the side of the policy t
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EGRESS_ZONE_PAIRS` | — | Zone pairs in `src[:sport,...]->dst[:dport,...]` format, for example `Dmz->External;IoT->External`. A block policy is created for each pair, shard and address family, with the shard list as its destination filter. Port lists work as in `ZONE_PAIRS`. A destination IP list (`@...`) is rejected, because the ban list is the destination filter. Requires the zone-based firewall and `UNIFI_API_KEY`; validation rejects it with `FIREWALL_MODE=legacy`, and with `FIREWALL_MODE=auto` a site that resolves to legacy mode logs a warning that it has no effect there. Each pair may appear only once. Reloaded on SIGHUP together with `ZONE_PAIRS`. |
+| `EGRESS_ZONE_PAIRS` | — | Zone pairs in `src[:sport,...]->dst[:dport,...]` format, for example `Dmz->External;IoT->External`. A block policy is created for each pair, shard and address family, with the shard list as its destination filter. Port lists work as in `ZONE_PAIRS`. A destination IP list (`@...`) is rejected, because the ban list is the destination filter. Requires the zone-based firewall and `UNIFI_API_KEY`; validation rejects it with `FIREWALL_MODE=legacy`, and with `FIREWALL_MODE=auto` a site that resolves to legacy mode logs a warning that it has no effect there. Each pair may appear only once. `EGRESS_ZONE_PAIRS_FILE` variant supported. Reloaded on SIGHUP together with `ZONE_PAIRS`. |
 | `EGRESS_CONNECTION_STATES` | `NEW` | Connection states matched by egress block policies. Same values as `FIREWALL_CONNECTION_STATES`. The default matches only new connections, so replies to inbound connections that `ZONE_PAIRS` allows are never cut. |
 
 ```bash
@@ -308,7 +316,7 @@ When enabled, the bouncer periodically fetches current Cloudflare IP ranges and 
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | No | Enable the Cloudflare IP whitelist sync. Requires zone mode and `UNIFI_API_KEY`; startup fails with `FIREWALL_MODE=legacy` or without an API key. |
+| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | No | Enable the Cloudflare IP whitelist sync. Requires zone mode and `UNIFI_API_KEY`; startup fails with `FIREWALL_MODE=legacy` or without an API key. Both address families get a list and ALLOW policies, whatever `FIREWALL_ENABLE_IPV6` is set to. |
 | `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | No | How often to re-fetch Cloudflare IP ranges and update the IP TMLs (default: weekly). |
 | `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | No | `https://` URL to fetch the current Cloudflare IPv4 CIDR list. |
 | `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | No | `https://` URL to fetch the current Cloudflare IPv6 CIDR list. |

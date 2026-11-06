@@ -507,9 +507,8 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("load env: %w", err)
 	}
 
-	// Inject _FILE secrets
-	if err := injectFileSecrets(k); err != nil {
-		return nil, fmt.Errorf("inject file secrets: %w", err)
+	if err := injectFileSettings(k); err != nil {
+		return nil, fmt.Errorf("read _FILE settings: %w", err)
 	}
 
 	cfg := &Config{}
@@ -1022,7 +1021,8 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
-// injectFileSecrets reads _FILE env vars and injects their file contents.
+// fileSecretKeys may be read from the file named by <NAME>_FILE, for Docker
+// and Kubernetes secrets. The file's contents are trimmed.
 var fileSecretKeys = []string{
 	"unifi_username",
 	"unifi_password",
@@ -1030,30 +1030,64 @@ var fileSecretKeys = []string{
 	"crowdsec_lapi_key",
 }
 
-func injectFileSecrets(k *koanf.Koanf) error {
+// fileZonePairKeys may also be read from a file. Load runs again on SIGHUP, so
+// pairs kept in a mounted file (a bind mount or a Kubernetes ConfigMap) can
+// change without a restart, which the process environment cannot.
+var fileZonePairKeys = []string{
+	"zone_pairs",
+	"egress_zone_pairs",
+}
+
+// injectFileSettings replaces each setting that has a <NAME>_FILE variable
+// with the contents of that file.
+func injectFileSettings(k *koanf.Koanf) error {
 	for _, key := range fileSecretKeys {
-		fileKey := key + "_file"
-		filePath := k.String(fileKey)
-		if filePath == "" {
-			// Also check uppercased env var with _FILE suffix
-			envKey := strings.ToUpper(key) + "_FILE"
-			filePath = os.Getenv(envKey)
+		if err := injectFileSetting(k, key, strings.TrimSpace); err != nil {
+			return err
 		}
-		if filePath == "" {
-			continue
-		}
-		// Strip quotes from file path in case it was quoted in Docker --env-file
-		filePath = stripEnvQuotes(filePath)
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			return fmt.Errorf("%s_FILE: cannot read %s: %w", strings.ToUpper(key), filePath, err)
-		}
-		val := strings.TrimSpace(string(content))
-		if err := k.Set(key, val); err != nil {
-			return fmt.Errorf("setting %s from file: %w", key, err)
+	}
+	for _, key := range fileZonePairKeys {
+		if err := injectFileSetting(k, key, joinZonePairLines); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func injectFileSetting(k *koanf.Koanf, key string, parse func(string) string) error {
+	filePath := k.String(key + "_file")
+	if filePath == "" {
+		filePath = os.Getenv(strings.ToUpper(key) + "_FILE")
+	}
+	if filePath == "" {
+		return nil
+	}
+	// Docker's --env-file keeps quotes around the path.
+	filePath = stripEnvQuotes(filePath)
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("%s_FILE: cannot read %s: %w", strings.ToUpper(key), filePath, err)
+	}
+	if err := k.Set(key, parse(string(content))); err != nil {
+		return fmt.Errorf("setting %s from file: %w", key, err)
+	}
+	return nil
+}
+
+// joinZonePairLines turns a zone pair file into the ZONE_PAIRS syntax. Each
+// line holds one pair, or a list in the variable's own syntax; blank lines and
+// lines starting with # are skipped. Several lines are joined with semicolons,
+// so a line may carry port and destination IP lists with commas.
+func joinZonePairLines(content string) string {
+	var lines []string
+	for line := range strings.Lines(content) {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, ";")
 }
 
 func splitCSV(s string) []string {

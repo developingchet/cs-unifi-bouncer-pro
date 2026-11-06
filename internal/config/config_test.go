@@ -228,6 +228,62 @@ func TestFileSecretInjection(t *testing.T) {
 	}
 }
 
+func TestZonePairsFromFile(t *testing.T) {
+	dir := t.TempDir()
+	pairsFile := filepath.Join(dir, "zone_pairs")
+	pairs := "# inbound\nExternal->Dmz:80,443\n\n  External->Internal@192.168.1.10,192.168.1.11  \r\n"
+	if err := os.WriteFile(pairsFile, []byte(pairs), 0600); err != nil {
+		t.Fatal(err)
+	}
+	egressFile := filepath.Join(dir, "egress_zone_pairs")
+	if err := os.WriteFile(egressFile, []byte("Dmz->External\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
+	setEnv(t, "UNIFI_API_KEY", "key")
+	setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
+	setEnv(t, "ZONE_PAIRS", "External->Hotspot")
+	setEnv(t, "ZONE_PAIRS_FILE", `"`+pairsFile+`"`)
+	setEnv(t, "EGRESS_ZONE_PAIRS_FILE", egressFile)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	inbound, err := cfg.ParseZonePairs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inbound) != 2 {
+		t.Fatalf("expected 2 pairs from the file, got %d: %+v", len(inbound), inbound)
+	}
+	if inbound[0].Dst != "Dmz" || len(inbound[0].DstPorts) != 2 {
+		t.Errorf("first pair = %+v, want External->Dmz with ports 80,443", inbound[0])
+	}
+	if inbound[1].Dst != "Internal" || len(inbound[1].DstIPs) != 2 {
+		t.Errorf("second pair = %+v, want External->Internal with two destination IPs", inbound[1])
+	}
+	egress, err := cfg.ParseEgressZonePairs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(egress) != 1 || egress[0].Src != "Dmz" {
+		t.Errorf("egress pairs = %+v, want Dmz->External", egress)
+	}
+}
+
+func TestZonePairsFileMustBeReadable(t *testing.T) {
+	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
+	setEnv(t, "UNIFI_API_KEY", "key")
+	setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
+	setEnv(t, "ZONE_PAIRS_FILE", filepath.Join(t.TempDir(), "missing"))
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ZONE_PAIRS_FILE") {
+		t.Fatalf("Load with a missing pairs file: err = %v, want a ZONE_PAIRS_FILE error", err)
+	}
+}
+
 func TestZonePairsParsing(t *testing.T) {
 	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
 	setEnv(t, "UNIFI_API_KEY", "key")
