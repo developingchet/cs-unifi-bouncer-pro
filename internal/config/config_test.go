@@ -273,6 +273,34 @@ func TestZonePairsFromFile(t *testing.T) {
 	}
 }
 
+func TestJoinZonePairLines(t *testing.T) {
+	tests := []struct {
+		name, content string
+		want          []string
+	}{
+		{"comma list beside a port pair", "External->Dmz,External->Internal\nExternal->Hotspot:80,443\n",
+			[]string{"External->Dmz", "External->Internal", "External->Hotspot:80,443"}},
+		{"semicolon list beside a pair", "External->Dmz;External->Internal@10.0.0.1,10.0.0.2\n# note\n\nDmz->Internal\n",
+			[]string{"External->Dmz", "External->Internal@10.0.0.1,10.0.0.2", "Dmz->Internal"}},
+		{"one pair", "External->Dmz", []string{"External->Dmz"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := splitZonePairList(joinZonePairLines(tt.content))
+			if _, err := parseZonePairList(got); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("pairs = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	// A stray separator on a line is still reported, not dropped.
+	if _, err := parseZonePairList(splitZonePairList(joinZonePairLines("External->Dmz;\n"))); err == nil {
+		t.Error("a trailing semicolon in the file parsed without error")
+	}
+}
+
 func TestZonePairsFileMustBeReadable(t *testing.T) {
 	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
 	setEnv(t, "UNIFI_API_KEY", "key")

@@ -1079,15 +1079,17 @@ func injectFileSetting(k *koanf.Koanf, key string, parse func(string) string) er
 // lines starting with # are skipped. Several lines are joined with semicolons,
 // so a line may carry port and destination IP lists with commas.
 func joinZonePairLines(content string) string {
-	var lines []string
+	var pairs []string
 	for line := range strings.Lines(content) {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		lines = append(lines, line)
+		// A comma list on one line splits here, before the semicolon join
+		// would make its commas read as port lists.
+		pairs = append(pairs, splitZonePairList(line)...)
 	}
-	return strings.Join(lines, ";")
+	return strings.Join(pairs, ";")
 }
 
 func splitCSV(s string) []string {
