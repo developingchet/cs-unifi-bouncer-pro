@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -26,10 +25,8 @@ func New(store storage.Store, fw firewall.Manager, sites []string, dryRun bool) 
 	return &Manager{store: store, fw: fw, sites: sites, dryRun: dryRun}
 }
 
+// claimsFor returns a copy of entry's claims that the caller may change.
 func claimsFor(entry storage.BanEntry) map[string]time.Time {
-	if entry.Claims == nil {
-		return map[string]time.Time{"legacy": entry.ExpiresAt}
-	}
 	claims := make(map[string]time.Time, len(entry.Claims))
 	for source, expiry := range entry.Claims {
 		claims[source] = expiry
@@ -74,16 +71,10 @@ func (m *Manager) Release(ctx context.Context, ip, source string) (bool, error) 
 		return false, err
 	}
 	claims := claimsFor(*entry)
-	_, found := claims[source]
-	_, legacy := claims["legacy"]
-	legacyDecision := legacy && strings.HasPrefix(source, "crowdsec:")
-	if !found && !legacyDecision {
+	if _, found := claims[source]; !found {
 		return false, nil
 	}
 	delete(claims, source)
-	if legacyDecision {
-		delete(claims, "legacy")
-	}
 	if active(claims, time.Now().UTC()) {
 		entry.Claims = claims
 		entry.ExpiresAt = latestExpiry(claims)

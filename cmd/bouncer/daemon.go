@@ -35,15 +35,6 @@ func runDaemon() error {
 		return fmt.Errorf("open storage: %w", err)
 	}
 	defer store.Close()
-	if !cfg.DryRun {
-		feeds := blocklist.PlainFeeds(cfg.BlocklistURLs)
-		if feed := abuseIPDBFeed(cfg); feed.URL != "" {
-			feeds = append(feeds, feed)
-		}
-		if err := blocklist.MigrateLegacySources(store, feeds); err != nil {
-			return fmt.Errorf("migrate blocklist claim sources: %w", err)
-		}
-	}
 
 	client, err := controller.NewClient(context.Background(), controllerConfig(cfg), log)
 	if err != nil {
@@ -167,6 +158,9 @@ func runDaemon() error {
 	// or lost database holds nothing until the first LAPI batch arrives, so
 	// reconciling earlier would strip every enforced ban from the controller.
 	bnc.OnStartupSynced(health.MarkSynced)
+	if !cfg.DryRun {
+		bnc.OnStartupSynced(retireLegacyClaims(store, claims, log))
+	}
 	gateReconciles(ctx, bnc.OnStartupSynced, store.BanCount, startupReconcileFallback, func() {
 		reconcilesOpen.Store(true)
 		go func() {

@@ -93,7 +93,7 @@ The daemon brings components up in an order that keeps probes answering during a
 
 ```mermaid
 flowchart TD
-    cfg["Load and validate config"] --> store["Open bbolt<br/>rekey host prefixes, lift unbannable bans"]
+    cfg["Load and validate config"] --> store["Open bbolt<br/>run data migrations, rekey host prefixes,<br/>lift unbannable bans"]
     store --> client["Controller client<br/>detect layout, log in"]
     client --> health["Start health server<br/>/healthz live, /readyz 'starting'"]
     health --> sites["Check or discover UNIFI_SITES"]
@@ -112,7 +112,7 @@ A failed configuration, store, controller login, site check or infrastructure lo
 
 Details of the steps:
 
-- **Store**: bans stored as `/32` or `/128` host prefixes are rekeyed under the bare address (UniFi refuses host prefixes). Stored bans that the current `BLOCK_WHITELIST`, the private-range check or the range limit would refuse are deleted (`banstate.DropUnbannable`) with a warning, so a whitelist change takes effect on restart; reconcile then removes them from the controller.
+- **Store**: data written by older releases is converted by one-time migrations (`cmd/bouncer/migrations.go`), each recorded by name in the `migrations` bucket so it never runs again: bans stored by 1.x without claims get a `legacy` claim that ends with the ban, group and policy records keyed by bare name move to site-scoped keys, and blocklist claims keyed by URL are rekeyed by feed hash. Code that reads the database relies on these and has no fallback for the older forms. After the first LAPI batch, a last migration drops the `legacy` claim of every ban an active CrowdSec decision now claims, so deleting that decision lifts the ban; a 1.x ban no decision claims keeps its `legacy` claim until it expires. `DRY_RUN` reads the database as it is and runs no migration. Bans stored as `/32` or `/128` host prefixes are rekeyed under the bare address (UniFi refuses host prefixes). Stored bans that the current `BLOCK_WHITELIST`, the private-range check or the range limit would refuse are deleted (`banstate.DropUnbannable`) with a warning, so a whitelist change takes effect on restart; reconcile then removes them from the controller.
 - **Controller client**: `internal/controller/layout.go` detects the layout from `GET /`: UniFi OS consoles answer it directly, while the self-hosted Network Application redirects to `/manage`. The layout selects the login path (`/api/auth/login` or `/api/login`) and the prefix for classic and v2 API calls (`/proxy/network` or none). The integration API path is the same on both. A controller that answers `GET /` with an error status stops startup with `controller ... is not ready`.
 - **Health server**: it starts before the firewall infrastructure is loaded, so `/healthz` answers while a large ban list is loaded and pulled from the LAPI, which can take several minutes.
 - **LoadInfrastructure**: reads the Network version once, resolves each site's mode (below), loads the shards from bbolt and the controller, warns about objects named like this instance's own that bbolt has no record of, and in zone mode resolves the site UUID and zones. Bans can be applied as soon as it returns.
@@ -358,7 +358,7 @@ A ban is recorded in bbolt, marked pending, before it touches a shard, and the c
 
 ## State Management
 
-Persistent state is stored in a single [bbolt](https://github.com/etcd-io/bbolt) database (`bouncer.db` in `DATA_DIR`) with four buckets:
+Persistent state is stored in a single [bbolt](https://github.com/etcd-io/bbolt) database (`bouncer.db` in `DATA_DIR`) with five buckets:
 
 | Bucket | Key | Value |
 |--------|-----|-------|
@@ -366,6 +366,7 @@ Persistent state is stored in a single [bbolt](https://github.com/etcd-io/bbolt)
 | `groups` | site and group name | msgpack-encoded `GroupRecord` with UniFi ID, shard index, family, and members |
 | `policies` | site and policy name | msgpack-encoded `PolicyRecord` with UniFi ID and firewall mode |
 | `events` | uint64 big-endian sequence | JSON-encoded `EventEntry` {Action, Origin, Scenario, IP, RecordedAt} |
+| `migrations` | migration name | time the one-time data migration ran |
 
 A shard's `groups` record saves its members when the shard is created, then at most every 10 minutes during syncs, at the end of each reconcile and at shutdown, rather than after every flush. The members are read only at startup, to restore a shard whose controller list was emptied or deleted while the bouncer was down; they are checked against `bans` first, and the startup reconcile adds any ban the record missed.
 
@@ -413,7 +414,7 @@ The `status history` and `status ip` subcommands read them.
 
 ### External blocklists
 
-`internal/blocklist.Manager` fetches plain-text IP/CIDR URLs on startup and on a ticker. Generic `BLOCKLIST_URLS` and the optional AbuseIPDB importer have separate claim namespaces even when they use the same URL. Each source key is a stable hash of the URL, prefixed by importer kind; the URL path and query are absent from stored claims and logs. Startup migration rekeys legacy URL-based claims while retaining their expiry. Addresses are claimed in chunks of 500, so CrowdSec decisions interleave with a large import.
+`internal/blocklist.Manager` fetches plain-text IP/CIDR URLs on startup and on a ticker. Generic `BLOCKLIST_URLS` and the optional AbuseIPDB importer have separate claim namespaces even when they use the same URL. Each source key is a stable hash of the URL, prefixed by importer kind; the URL path and query are absent from stored claims and logs. Claims that older releases keyed by URL are rekeyed once, by a startup migration, keeping their expiry. Addresses are claimed in chunks of 500, so CrowdSec decisions interleave with a large import.
 
 The AbuseIPDB importer selects a report window and can include or exclude entries by the two-letter country tag in each line's comment. A complete refresh applies valid entries and immediately releases that importer's claims for entries no longer selected. A fetch that looks damaged never prunes: a response containing invalid lines, a feed that lists fewer than half the entries of its last full fetch, and a country filter that matches none of the entries all keep the existing claims.
 
@@ -556,10 +557,11 @@ Tests run without external services: the UniFi controller is replaced by `httpte
 
 - **`internal/config`**: required fields, defaults, `_FILE` injection, name templates, zone pair parsing (ports, destination IPs, egress pairs), connection states, feed and Cloudflare settings
 - **`internal/decision`**: every filter stage, IP parsing and sanitisation, private-range and whitelist checks, per-scenario duration overrides, and fuzz tests for the parser
-- **`internal/banstate`**: claims per source, release and expiry, host-prefix rekeying, dropping unbannable bans
+- **`internal/banstate`**: claims per source, release and expiry, host-prefix rekeying, dropping unbannable bans, claiming and retiring 1.x bans
 - **`internal/firewall`**: shard bin-packing, rebalance and pruning, sync and the circuit breaker, reconcile races, legacy rules, zone policies (port and destination filters, staged replacement, egress, converted legacy rules, Network 11 mode checks), drain and orphan sweeps
 - **`internal/controller`**: layout and version detection, login backoff and rate limits, 401 re-authentication, wire formats of lists and policies
 - **`internal/bouncer`**: stream consumption, resync limits, the job handler, janitor, health endpoints and database snapshots
+- **`cmd/bouncer`**: upgrading a 1.x database through the one-time migrations, and running each migration once
 - **`internal/blocklist`**, **`internal/whitelist`**, **`internal/webhook`**, **`internal/lapimetrics`**, **`internal/storage`**, **`internal/logger`**: feed parsing and outage handling, Cloudflare list validation and policy order, webhook delivery, usage-metrics payloads, the event ring buffer, and redaction patterns
 
 The race detector (`go test -race ./...`) runs in CI for all packages.

@@ -67,9 +67,6 @@ func (j *Janitor) tick(ctx context.Context) {
 }
 
 func hasExpiredClaim(entry storage.BanEntry, now time.Time) bool {
-	if entry.Claims == nil {
-		return !entry.ExpiresAt.IsZero() && !entry.ExpiresAt.After(now)
-	}
 	for _, expiry := range entry.Claims {
 		if !expiry.IsZero() && !expiry.After(now) {
 			return true

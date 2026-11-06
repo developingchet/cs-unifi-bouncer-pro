@@ -120,7 +120,7 @@ func TestLegacyManager_RepairsSparseShardRuleReference(t *testing.T) {
 		RuleIndex: 22003, Action: "drop", Ruleset: "WAN_IN", Description: "test",
 		Protocol: "all", SrcFirewallGroupIDs: []string{"group-0"},
 	}})
-	if err := store.SetPolicy("crowdsec-drop-v4-3", storage.PolicyRecord{UnifiID: "rule-3", Site: testSite, Mode: "legacy"}); err != nil {
+	if err := store.SetPolicy(cacheKey(testSite, "crowdsec-drop-v4-3"), storage.PolicyRecord{UnifiID: "rule-3", Site: testSite, Mode: "legacy"}); err != nil {
 		t.Fatal(err)
 	}
 	v4 := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "legacy")

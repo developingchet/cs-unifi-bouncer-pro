@@ -180,6 +180,9 @@ func TestEnsureShards_SameNameAcrossSites(t *testing.T) {
 	if err := store.SetGroup(name, storage.GroupRecord{Site: "site-a", UnifiID: "group-a", Members: []string{"8.8.8.8"}}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := MigrateCacheKeys(store); err != nil {
+		t.Fatal(err)
+	}
 	ctrl.SetGroups("site-a", []controller.FirewallGroup{{ID: "group-a", Name: name, GroupMembers: []string{"8.8.8.8"}}})
 	ctrl.SetGroups("site-b", []controller.FirewallGroup{{ID: "group-b", Name: name, GroupMembers: []string{"9.9.9.9"}}})
 	for _, tc := range []struct {

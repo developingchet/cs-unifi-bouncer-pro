@@ -437,7 +437,7 @@ When the UniFi controller returns a 401 Unauthorized, only one goroutine perform
 | `DATA_DIR` | `/data` | Directory for the bbolt database file (`bouncer.db`). Mount as a named Docker volume for persistence. |
 | `BAN_TTL` | `168h` | Maximum ban length (default 7 days). When a decision is received, its expiry is capped at `now + BAN_TTL`; this applies to decisions with no duration, an unparseable duration, or one longer than `BAN_TTL`. A `BLOCK_SCENARIO_DURATION_MAP` override is not capped. The janitor lifts expired bans every `JANITOR_INTERVAL` and the unban reaches UniFi at the next sync. If CrowdSec still holds the decision, a restart or the periodic `CROWDSEC_RESYNC_INTERVAL` re-read applies it again for another `BAN_TTL`. `BAN_TTL` also bounds how long a failing blocklist feed keeps its bans, and caps manual `ban --duration`. |
 
-The database contains four bbolt buckets:
+The database contains five bbolt buckets:
 
 | Bucket | Contents |
 |--------|---------|
@@ -445,6 +445,7 @@ The database contains four bbolt buckets:
 | `groups` | Shard cache (UniFi ID, shard index, family, members) |
 | `policies` | Zone policy / legacy rule cache |
 | `events` | Ban audit trail ring buffer (see [Ban History](#ban-history)) |
+| `migrations` | Name and time of each one-time data migration that has run |
 
 The daemon holds an exclusive lock on `bouncer.db`. `status` works while it runs (see below); `reconcile`, `drain`, `ban` and `unban` open the file themselves and need the daemon stopped first.
 
@@ -498,7 +499,7 @@ BLOCKLIST_URLS=https://example.com/badips.txt,https://example.net/threatlist.txt
 BLOCKLIST_REFRESH_INTERVAL=12h
 ```
 
-Each feed URL owns a separate ban claim. If CrowdSec or another feed still claims an IP, expiry of one feed's claim does not remove the firewall ban. Feed refreshes extend claim expiry to twice the refresh interval. A failed fetch keeps the feed's current bans (logged as "keeping bans from the last successful fetch"); once a feed has failed for longer than `BAN_TTL`, its bans are no longer extended and expire. Feed imports are logged with entry, new and skipped counts. Logs show only the feed scheme and host. Stored claim sources use an opaque SHA-256 key derived from the full URL and importer kind, so URL path tokens and query credentials are not stored in new claims. On startup, old URL-based claims migrate while preserving their expiry. If multiple configured importers matched the same old claim, its original expiry is retained under an opaque legacy key until a fresh fetch establishes ownership.
+Each feed URL owns a separate ban claim. If CrowdSec or another feed still claims an IP, expiry of one feed's claim does not remove the firewall ban. Feed refreshes extend claim expiry to twice the refresh interval. A failed fetch keeps the feed's current bans (logged as "keeping bans from the last successful fetch"); once a feed has failed for longer than `BAN_TTL`, its bans are no longer extended and expire. Feed imports are logged with entry, new and skipped counts. Logs show only the feed scheme and host. Stored claim sources use an opaque SHA-256 key derived from the full URL and importer kind, so URL path tokens and query credentials are not stored in new claims. On the first start of 2.4 or later, old URL-based claims migrate while preserving their expiry. If multiple configured importers matched the same old claim, its original expiry is retained under an opaque legacy key until a fresh fetch establishes ownership.
 
 A fetch that looks damaged never prunes. A feed with a country filter whose entries are all rejected by that filter (a mistyped code, or a feed that stopped tagging its lines) is treated as a failed fetch and keeps its previous bans. A feed that lists fewer than half the entries it listed on its last full fetch, when that was at least 50, has its entries applied but nothing pruned, and its previous bans are kept as for a failed fetch. After a feed has stayed in either state for `BAN_TTL`, its old bans expire and the smaller list is accepted. The comparison uses the feed's size before the country filter, so narrowing a filter still releases the entries it now excludes.
 

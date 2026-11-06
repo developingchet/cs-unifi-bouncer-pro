@@ -39,10 +39,7 @@ func (sm *ShardManager) EnsureShards(ctx context.Context) error {
 		return err
 	}
 
-	candidates, indices, known, err := sm.collectCachedCandidates(allGroups)
-	if err != nil {
-		return err
-	}
+	candidates, indices, known := sm.collectCachedCandidates(allGroups)
 	cached := maps.Clone(candidates)
 	sm.addAPICandidates(api, candidates)
 	sm.unknownObjects = sm.unrecordedNames(candidates, cached)
@@ -128,32 +125,17 @@ func (sm *ShardManager) listAPIShardObjects(ctx context.Context) (apiShardObject
 
 // collectCachedCandidates gathers this site and family's cached group names,
 // the indices already known from their records, and the names those indices
-// render to. Older databases keyed groups only by name; this site's records
-// are moved to site-scoped keys (in the store and in allGroups) before
-// reconciling names shared by multiple sites.
+// render to. Records are keyed by site (see MigrateCacheKeys).
 func (sm *ShardManager) collectCachedCandidates(allGroups map[string]storage.GroupRecord) (
-	candidates map[string]struct{}, indices map[int]struct{}, known map[string]struct{}, err error) {
+	candidates map[string]struct{}, indices map[int]struct{}, known map[string]struct{}) {
 	candidates = make(map[string]struct{})
 	indices = make(map[int]struct{})
 	known = make(map[string]struct{})
 	for key, rec := range allGroups {
-		if rec.Site != sm.site || rec.IPv6 != sm.ipv6 {
+		if rec.Site != sm.site || rec.IPv6 != sm.ipv6 || key != cacheKey(sm.site, cacheName(key)) {
 			continue
 		}
 		name := cacheName(key)
-		if key == name {
-			scoped := cacheKey(sm.site, name)
-			if _, exists := allGroups[scoped]; !exists {
-				if err := sm.store.SetGroup(scoped, rec); err != nil {
-					return nil, nil, nil, fmt.Errorf("migrate group %s: %w", name, err)
-				}
-				allGroups[scoped] = rec
-			}
-			if err := sm.store.DeleteGroup(key); err != nil {
-				return nil, nil, nil, fmt.Errorf("remove old group key %s: %w", name, err)
-			}
-			delete(allGroups, key)
-		}
 		candidates[name] = struct{}{}
 		if rec.Index > 0 {
 			rendered, err := sm.namer.GroupName(NameData{Family: sm.family, Index: rec.Index, Site: sm.site})
@@ -163,7 +145,7 @@ func (sm *ShardManager) collectCachedCandidates(allGroups map[string]storage.Gro
 			}
 		}
 	}
-	return candidates, indices, known, nil
+	return candidates, indices, known
 }
 
 // unrecordedNames returns, sorted, the names in candidates that are not in

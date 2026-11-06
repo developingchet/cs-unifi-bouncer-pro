@@ -53,10 +53,10 @@ func TestDrainRetainsFailedPolicyAndGroup(t *testing.T) {
 	ruleName := "crowdsec-drop-v4-0"
 	ctrl.SetGroups(testSite, []controller.FirewallGroup{{ID: "group-1", Name: groupName, GroupType: "address-group", GroupMembers: []string{"198.51.100.10"}}})
 	ctrl.SetRules(testSite, []controller.FirewallRule{{ID: "rule-1", Name: ruleName}})
-	if err := store.SetGroup(groupName, storage.GroupRecord{UnifiID: "group-1", Site: testSite, Members: []string{"198.51.100.10"}}); err != nil {
+	if err := store.SetGroup(cacheKey(testSite, groupName), storage.GroupRecord{UnifiID: "group-1", Site: testSite, Members: []string{"198.51.100.10"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetPolicy(ruleName, storage.PolicyRecord{UnifiID: "rule-1", Site: testSite, Mode: "legacy"}); err != nil {
+	if err := store.SetPolicy(cacheKey(testSite, ruleName), storage.PolicyRecord{UnifiID: "rule-1", Site: testSite, Mode: "legacy"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := mgr.PrepareDrain(ctx, []string{testSite}); err != nil {
@@ -69,7 +69,7 @@ func TestDrainRetainsFailedPolicyAndGroup(t *testing.T) {
 	if got := ctrl.Calls("DeleteFirewallGroup"); got != 0 {
 		t.Fatalf("deleted %d groups while a rule still references them", got)
 	}
-	if rec, _ := store.GetPolicy(ruleName); rec == nil {
+	if rec, _ := store.GetPolicy(cacheKey(testSite, ruleName)); rec == nil {
 		t.Fatal("failed policy lost from storage")
 	}
 	groups, err := store.ListGroups()
@@ -79,7 +79,7 @@ func TestDrainRetainsFailedPolicyAndGroup(t *testing.T) {
 	if err := mgr.Drain(ctx, []string{testSite}); err != nil {
 		t.Fatalf("retry drain: %v", err)
 	}
-	if rec, _ := store.GetPolicy(ruleName); rec != nil {
+	if rec, _ := store.GetPolicy(cacheKey(testSite, ruleName)); rec != nil {
 		t.Fatal("deleted policy remains in storage")
 	}
 	groups, err = store.ListGroups()

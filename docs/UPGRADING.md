@@ -96,6 +96,15 @@ Behaviour that changes without action:
   shard is created, then at most every 10 minutes, at each reconcile and on
   shutdown, instead of after every write to the controller. `status` reports
   `last_group_update` from those saves.
+- **Database migrations run once**: the conversions of data written by 1.x
+  (bans without claims, cache records keyed by name, blocklist claims keyed
+  by URL) run on the first start and are recorded in a new `migrations`
+  bucket, instead of being checked on every start or every request. A 1.x
+  database upgraded straight to 2.4 is converted the same way. A 1.x ban that
+  an active CrowdSec decision claims in the first LAPI batch is lifted when
+  that decision is deleted; one that no decision claims stays until it
+  expires. `DRY_RUN` runs no migration, so a dry run against a 1.x database
+  shows its bans without claims.
 
 Renamed settings. The old names keep working with the same effect, and each
 one in use logs a deprecation warning at startup:
