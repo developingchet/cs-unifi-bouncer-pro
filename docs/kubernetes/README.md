@@ -86,7 +86,7 @@ The pod runs with the runtime default seccomp profile, a read-only root filesyst
 | Path     | Port | Description                                     |
 |----------|------|-------------------------------------------------|
 | /healthz | 8081 | Liveness: process is running                    |
-| /readyz  | 8081 | Readiness: first LAPI batch processed, UniFi controller reachable (Ping) |
+| /readyz  | 8081 | Readiness: first LAPI batch processed, UniFi controller reachable, and LAPI reachable unless `HEALTH_CHECK_LAPI=false` |
 
 The pod stays unready until the first LAPI pull has been processed, which can take several minutes on a large ban list. The manifest raises `progressDeadlineSeconds` to 1200 so `kubectl rollout status` does not report a stalled rollout meanwhile; raise it, and any `helm --wait` or GitOps health timeout, further for larger lists.
 

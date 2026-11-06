@@ -1,8 +1,8 @@
 # Configuration Reference
 
-All configuration is provided through environment variables (or `_FILE` variants for secrets). Copy `.env.example` to `.env` and edit as needed.
+All configuration is provided through environment variables (or `_FILE` variants for secrets). Copy `.env.example` from the repository to `.env` and edit as needed. Values wrapped in one pair of matching single or double quotes are unquoted, because Docker's `--env-file` passes quotes through.
 
-Sensitive values support Docker secrets and Kubernetes secrets via the `_FILE` suffix: set the variable to the path of a file containing the secret, and the application reads and trims its contents at startup.
+`UNIFI_API_KEY`, `UNIFI_USERNAME`, `UNIFI_PASSWORD` and `CROWDSEC_LAPI_KEY` support Docker secrets and Kubernetes secrets via the `_FILE` suffix: set the variable to the path of a file containing the secret, and the application reads and trims its contents at startup.
 
 ```bash
 # Direct value
@@ -33,6 +33,7 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 - [AbuseIPDB Blocklist](#abuseipdb-blocklist)
 - [Webhook Notifications](#webhook-notifications)
 - [Operational](#operational)
+- [Removed and Renamed Settings](#removed-and-renamed-settings)
 
 ---
 
@@ -53,7 +54,7 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 
 ### Authentication priority
 
-API key authentication is preferred. If `UNIFI_API_KEY` is set, username/password fields are ignored. API key authentication is available in UniFi Network ≥ 8.1.
+API key authentication is preferred. If `UNIFI_API_KEY` is set, username/password fields are ignored. The key is sent with every request, so there is no login session to expire or rate-limit.
 
 Username/password authentication supports legacy firewall mode only. The zone-based firewall and the Cloudflare whitelist use the UniFi integration API, which rejects session logins, so they require `UNIFI_API_KEY`. UniFi Network 11 and later apply only the zone-based firewall, so a username and password cannot manage them.
 
@@ -90,20 +91,18 @@ UNIFI_SITES=default,homelab,iot
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `FIREWALL_MODE` | `auto` | No | `auto`, `legacy`, or `zone`. `auto` checks each site for firewall zones on startup: with an API key it asks the integration API; with username/password it reads the site's zone list. A site without zones uses legacy mode. A site with zones but no API key stops startup with an error asking for `UNIFI_API_KEY` (or, on UniFi Network 10.x and earlier, `FIREWALL_MODE=legacy`). On UniFi Network 11 and later, legacy mode stops startup, whether set or detected. |
-| `FIREWALL_BLOCK_ACTION` | `drop` | No | Block action for legacy rules: `drop` or `reject` |
-| `FIREWALL_ENABLE_IPV6` | `true` | No | Create separate IPv6 firewall groups and rules. Distinct from `ENABLE_IPV6` which controls HTTP client IPv6 dialing. Setting it to `false` stops IPv6 enforcement: startup removes the IPv6 rules or policies but leaves the IPv6 groups and their members, so setting it back to `true` restores them. Run `drain` to remove the groups too. |
-| `FIREWALL_GROUP_CAPACITY` | `10000` | No | Maximum IPs per firewall group shard (used if family-specific overrides are not set). Capped at `SHARD_LIMIT`. |
-| `FIREWALL_GROUP_CAPACITY_V4` | — | No | Override capacity for IPv4 groups (takes precedence over `FIREWALL_GROUP_CAPACITY`) |
-| `FIREWALL_GROUP_CAPACITY_V6` | — | No | Override capacity for IPv6 groups (takes precedence over `FIREWALL_GROUP_CAPACITY`) |
+| `FIREWALL_BLOCK_ACTION` | `drop` | No | Action of legacy rules: `drop` or `reject`. Zone block policies always use `BLOCK`. |
+| `FIREWALL_ENABLE_IPV6` | `true` | No | Create separate IPv6 firewall groups and rules. Distinct from `ENABLE_IPV6` which controls HTTP client IPv6 dialing. With `false`, IPv6 decisions are ignored. Setting it to `false` stops IPv6 enforcement: startup removes the IPv6 rules or policies but leaves the IPv6 groups and their members, so setting it back to `true` restores them. Run `drain` to remove the groups too. |
+| `FIREWALL_GROUP_CAPACITY` | `10000` | No | Maximum IPs per shard, 1 to 10000 (used if family-specific overrides are not set). Capped at `SHARD_LIMIT`. |
+| `FIREWALL_GROUP_CAPACITY_V4` | — | No | Override capacity for IPv4 shards, 1 to 10000 (takes precedence over `FIREWALL_GROUP_CAPACITY`). `0` or unset uses `FIREWALL_GROUP_CAPACITY`. |
+| `FIREWALL_GROUP_CAPACITY_V6` | — | No | Override capacity for IPv6 shards, 1 to 10000 (takes precedence over `FIREWALL_GROUP_CAPACITY`). `0` or unset uses `FIREWALL_GROUP_CAPACITY`. |
 | `FIREWALL_API_SHARD_DELAY` | `250ms` | No | Pause before structural writes: before each legacy rule create after the first, before creating the rule or policies for a newly created shard, and before deleting a pruned or drained group. Group membership updates (`PUT`) are not delayed. Gives the UDM time to finish regenerating its ruleset between structural changes. Set `0` to disable; negative values are rejected. |
 | `FIREWALL_LOG_DROPS` | `false` | No | Enable logging on managed firewall rules and zone policies. Existing zone policies are updated on reconcile. |
 | `FIREWALL_CONNECTION_STATES` | `NEW,INVALID` | No | Connection states matched by zone block policies. Allowed values: `NEW`, `INVALID`, `ESTABLISHED`, or `ALL` for unrestricted matching. `ALL` can block replies to outbound connections. |
 | `FIREWALL_RECONCILE_ON_START` | `true` | No | Run a full reconcile on startup, once the first CrowdSec stream batch has been applied |
 | `FIREWALL_RECONCILE_INTERVAL` | `10m` | No | Periodically repair shard membership (including groups edited by hand in UniFi) and missing policies/rules. Each reconcile first re-checks the sites loaded in legacy mode, and the bouncer exits for its restart policy to start it in zone mode once the controller runs UniFi Network 11 or `auto` finds zones (see [Firewall mode details](#firewall-mode-details)). Set `0s` to disable periodic reconcile and the re-check; negative values are rejected. |
 
-`FIREWALL_FLUSH_CONCURRENCY` is no longer used: shards are written one at a time. Setting it logs a warning at startup.
-
-### Traffic Matching List / Shard Management (Integration v1 / Zone Mode)
+### Shard management and sync
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
@@ -115,21 +114,21 @@ UNIFI_SITES=default,homelab,iot
 
 ### Firewall mode details
 
-**`auto`** (recommended): The bouncer queries the UniFi controller to detect whether zone-based firewall policies are supported. Controllers running UniFi Network ≥ 8.x use zone mode; older versions use legacy mode. The detected mode is logged at startup. If the probe fails for any reason other than the zone API being absent, startup stops instead of guessing a mode. UniFi Network 11 and later move every site to the zone-based firewall, so a site there without zones (no UniFi gateway adopted) stops startup rather than falling back to legacy rules that would not be applied.
+**`auto`** (recommended): The bouncer checks each site for firewall zones at startup. A site that has zones uses zone mode; a site without them, or a controller without the zone API, uses legacy mode. If the probe fails for any other reason, startup stops instead of guessing a mode. UniFi Network 11 and later move every site to the zone-based firewall, so a site there without zones (no UniFi gateway adopted) stops startup rather than falling back to legacy rules that would not be applied. The mode is not logged as such: a zone-mode site logs `zone discovery complete`, and `diagnose` shows each site's mode in its `firewall_mode[<site>]` row.
 
-**`legacy`**: Creates `WAN_IN` and `WANv6_IN` drop rules that reference managed address-group shards. Works with UniFi Network 10.x and earlier, on sites that have not moved to the zone-based firewall. Refused on UniFi Network 11 and later, which ignore these rules.
+**`legacy`**: Creates drop rules in `LEGACY_RULESET_V4`/`LEGACY_RULESET_V6` (`WAN_IN` and `WANv6_IN`) that reference managed address-group shards. Works with UniFi Network 10.x and earlier, on sites that have not moved to the zone-based firewall. Refused on UniFi Network 11 and later, which ignore these rules.
+
+**`zone`**: Creates zone-based firewall policies for each pair in `ZONE_PAIRS` and `EGRESS_ZONE_PAIRS`. Requires a site on the zone-based firewall and `UNIFI_API_KEY`: zone policies are managed through the integration API, which does not accept a username and password, so validation rejects `FIREWALL_MODE=zone` without a key. `ZONE_PAIRS` must name at least one pair.
 
 **Switching while running:** the mode is chosen when the bouncer starts. Each periodic reconcile re-checks the sites loaded in legacy mode, and when the controller now runs UniFi Network 11, or `auto` now finds zones on the site, the bouncer logs `firewall mode changed` and exits with an error so its restart policy starts it in zone mode. Without a restart policy (`restart: unless-stopped`, `Restart=on-failure`, a Kubernetes Deployment) it stays stopped and blocks nothing until started again. In zone mode it then removes the zone policies the controller converted from its legacy rules, once its own block policies cover the same lists. See [Upgrading the controller to UniFi Network 11](UPGRADING.md#upgrading-the-controller-to-unifi-network-11).
 
-**`zone`**: Creates zone-based firewall policies for each pair in `ZONE_PAIRS`. Requires UniFi Network ≥ 8.x and `UNIFI_API_KEY`: zone policies are managed through the integration API, which does not accept a username and password, so validation rejects `FIREWALL_MODE=zone` without a key. Specify at least one zone pair.
-
 ### Group capacity and sharding
 
-UniFi firewall groups (legacy mode) and Traffic Matching Lists (zone mode) have a maximum capacity of 10,000 items per shard. When the number of banned IPs exceeds the configured capacity, the bouncer automatically creates additional shards (e.g. `crowdsec-block-v4-0`, `crowdsec-block-v4-1`, ...) and creates matching rules or policies for each.
+UniFi firewall groups (legacy mode) and Traffic Matching Lists (zone mode) hold at most 10,000 entries. When the number of banned IPs exceeds a shard's capacity, the bouncer creates additional shards (e.g. `crowdsec-block-v4-0`, `crowdsec-block-v4-1`, ...) and matching rules or policies for each.
 
-IPs are distributed across shards using **bin-packing**: each shard is filled to capacity before a new shard is created. This minimizes the number of shards and keeps the firewall configuration compact.
+IPs are distributed across shards using **bin-packing**: each shard is filled to capacity before a new shard is created. As bans expire, a shard at or below `SHARD_MERGE_THRESHOLD` is merged into the others and deleted, which keeps the number of firewall objects small.
 
-After every CrowdSec decision batch, all dirty shards are flushed to the UniFi API immediately (`SyncDirty`). If a flush fails (e.g. transient network error), the shard remains dirty and is retried at the next `SYNC_INTERVAL` tick. This means multiple IP changes within a single decision batch are merged into one PUT request per shard.
+After every CrowdSec decision batch, all dirty shards are written to the controller with one `PUT` each, so the changes of a whole batch cost one request per shard. A shard whose write fails stays dirty and is retried at the next `SYNC_INTERVAL` tick. See [Shards and Syncing](DESIGN.md#shards-and-syncing) for the sync cycle and the circuit breaker.
 
 ---
 
@@ -172,7 +171,7 @@ RULE_NAME_TEMPLATE=crowdsec-staging-drop-{{.Family}}-{{.Index}}
 POLICY_NAME_TEMPLATE=crowdsec-staging-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}
 ```
 
-The per-pair port and destination-IP filter lists (`crowdsec-ports-*`, `crowdsec-dstips-*`) and the Cloudflare whitelist objects (`crowdsec-whitelist-cloudflare-*`) have fixed names that the templates do not change. Use `ZONE_PAIRS` port or destination-IP filters and `CLOUDFLARE_WHITELIST_ENABLED` on only one instance per site.
+The per-pair port and destination-IP filter lists (`crowdsec-ports-*`, `crowdsec-dstips-*`), the temporary copies made while a policy is replaced (`crowdsec-policy-stage-*`) and the Cloudflare whitelist objects (`crowdsec-whitelist-cloudflare-*`) have fixed names that the templates do not change. Use port or destination-IP filters in `ZONE_PAIRS` or `EGRESS_ZONE_PAIRS`, and `CLOUDFLARE_WHITELIST_ENABLED`, on only one instance per site.
 
 At startup the bouncer logs a warning when the controller holds groups or lists named like its own that its database has no record of; see [Troubleshooting](TROUBLESHOOTING.md#log-warns-that-objects-exist-that-the-database-has-no-record-of).
 
@@ -201,7 +200,7 @@ These settings apply only when `FIREWALL_MODE=zone` or when `auto` detects a zon
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ZONE_PAIRS` | `External->Dmz` | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. Use commas between simple pairs; use semicolons between pairs when ports or destination IPs contain commas. Ambiguous strings fail validation. A block policy is created for each pair and shard. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. Standard UUIDs and MongoDB ObjectIDs are also accepted. Optional port lists and `@ip1,ip2,...` scope each policy. An empty value is rejected when `FIREWALL_MODE=zone`, and a SIGHUP reload with an empty value is ignored, because an empty set would delete every block policy. |
+| `ZONE_PAIRS` | `External->Dmz` | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. Use commas between simple pairs; use semicolons between pairs when ports or destination IPs contain commas. Ambiguous strings fail validation. A block policy is created for each pair, shard and address family, with the shard list as its source filter. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. Standard UUIDs and MongoDB ObjectIDs are also accepted. Optional port lists and `@ip1,ip2,...` scope each policy. An empty value is rejected when `FIREWALL_MODE=zone`, and a SIGHUP reload with an empty value is ignored, because an empty set would delete every block policy. |
 
 ```bash
 # Named zones (auto-resolved at startup) — no port filter (any port)
@@ -231,17 +230,9 @@ ZONE_PAIRS=aaaaaaaa-0000-4000-8000-aaaaaaaaaaaa->bbbbbbbb-0000-4000-8000-bbbbbbb
 
 Zone names are case-sensitive and must match the names shown in Settings → Firewall → Zones. If a zone name cannot be found at startup the bouncer exits with an error listing the available zones. A configured zone with an explicitly empty network list also stops startup or reload; External and Gateway do not require network membership.
 
-### Per-scenario zone routing
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ZONE_PAIRS_SCENARIO_MAP` | — | Unsupported. The bouncer rejects this setting because it cannot provision separate policies for each scenario. |
-
-Per-scenario zone routing requires separate shards and policies for each scenario. Until that is implemented, remove `ZONE_PAIRS_SCENARIO_MAP` and configure the shared `ZONE_PAIRS` list instead.
-
 ### Port filtering for zone pairs
 
-Both `ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS` support an optional port list appended to either zone name using a colon separator:
+`ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS` support an optional port list appended to either zone name using a colon separator:
 
 ```
 src[:sport1,sport2,...]->dst[:dport1,dport2,...]
@@ -256,7 +247,7 @@ When a port list is provided, the bouncer creates a separate PORTS Traffic Match
 | `External:81,8443->Internal` | Match only source ports 81 and 8443 |
 | `External:81,8443->Internal:80,443` | Match source ports 81/8443 **and** destination ports 80/443 |
 
-Port TMLs are named `crowdsec-ports-src-{Src}-{Dst}` and `crowdsec-ports-dst-{Src}-{Dst}` (block policies) or `crowdsec-whitelist-cloudflare-srcports-{Src}-{Dst}` and `crowdsec-whitelist-cloudflare-dstports-{Src}-{Dst}` (Cloudflare ALLOW policies). They are created or updated at startup alongside the zone cache.
+Port TMLs are named `crowdsec-ports-src-{Src}-{Dst}` and `crowdsec-ports-dst-{Src}-{Dst}` (block policies; `crowdsec-ports-src-egress-{Src}-{Dst}` and so on for egress pairs) or `crowdsec-whitelist-cloudflare-srcports-{Src}-{Dst}` and `crowdsec-whitelist-cloudflare-dstports-{Src}-{Dst}` (Cloudflare ALLOW policies). Block policy port lists are created or updated at startup alongside the zone cache, Cloudflare ones at each whitelist sync.
 
 ### Destination IP filtering for zone pairs
 
@@ -281,9 +272,20 @@ IPv4 and IPv6 destination IPs are split into separate Traffic Matching Lists (`c
 
 `ZONE_PAIRS` policies match banned addresses as the **source**, so banned hosts cannot reach yours, but your hosts can still connect out to them. A compromised host in a DMZ or IoT zone can then still call back to an address CrowdSec has banned, for example to open a reverse shell, fetch a payload or check in. Egress pairs close that path. Their block policies match the same ban lists as the **destination**.
 
+```mermaid
+flowchart LR
+    list["Shard list<br/>crowdsec-block-v4-0"]
+    list -->|"source filter"| inbound["ZONE_PAIRS External->Dmz<br/>crowdsec-policy-External-Dmz-v4-0"]
+    list -->|"destination filter"| egress["EGRESS_ZONE_PAIRS Dmz->External<br/>crowdsec-policy-egress-Dmz-External-v4-0"]
+    inbound -->|"blocks"| in["Banned address -> host in Dmz"]
+    egress -->|"blocks"| out["Host in Dmz -> banned address"]
+```
+
+Both kinds of pair reference the same shard lists; only the side of the policy that carries the list differs.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EGRESS_ZONE_PAIRS` | — | Zone pairs in `src[:sport,...]->dst[:dport,...]` format, for example `Dmz->External;IoT->External`. A block policy is created for each pair, shard and address family, with the shard list as its destination filter. Port lists work as in `ZONE_PAIRS`. A destination IP list (`@...`) is rejected, because the ban list is the destination filter. Requires the zone-based firewall and `UNIFI_API_KEY`; validation rejects it with `FIREWALL_MODE=legacy`. Each pair may appear only once. Reloaded on SIGHUP together with `ZONE_PAIRS`. |
+| `EGRESS_ZONE_PAIRS` | — | Zone pairs in `src[:sport,...]->dst[:dport,...]` format, for example `Dmz->External;IoT->External`. A block policy is created for each pair, shard and address family, with the shard list as its destination filter. Port lists work as in `ZONE_PAIRS`. A destination IP list (`@...`) is rejected, because the ban list is the destination filter. Requires the zone-based firewall and `UNIFI_API_KEY`; validation rejects it with `FIREWALL_MODE=legacy`, and with `FIREWALL_MODE=auto` a site that resolves to legacy mode logs a warning that it has no effect there. Each pair may appear only once. Reloaded on SIGHUP together with `ZONE_PAIRS`. |
 | `EGRESS_CONNECTION_STATES` | `NEW` | Connection states matched by egress block policies. Same values as `FIREWALL_CONNECTION_STATES`. The default matches only new connections, so replies to inbound connections that `ZONE_PAIRS` allows are never cut. |
 
 ```bash
@@ -332,7 +334,7 @@ CLOUDFLARE_ZONE_PAIRS=External->Dmz:80,443@10.0.5.251
 CLOUDFLARE_ZONE_PAIRS=External->Internal,External->DMZ
 ```
 
-The shared IPv4 and IPv6 source IP TMLs are named `crowdsec-whitelist-cloudflare-v4` and `crowdsec-whitelist-cloudflare-v6`. ALLOW policies are named `crowdsec-whitelist-cloudflare-External-{DstName}-v4` and `crowdsec-whitelist-cloudflare-External-{DstName}-v6`. When destination IP filtering is configured via `@IP`, per-pair destination IP TMLs are also created: `crowdsec-whitelist-cloudflare-dstips-{Src}-{Dst}-v4` and `crowdsec-whitelist-cloudflare-dstips-{Src}-{Dst}-v6`.
+The shared IPv4 and IPv6 source IP TMLs are named `crowdsec-whitelist-cloudflare-v4` and `crowdsec-whitelist-cloudflare-v6`. ALLOW policies are named `crowdsec-whitelist-cloudflare-{Src}-{Dst}-v4` and `crowdsec-whitelist-cloudflare-{Src}-{Dst}-v6`. When destination IP filtering is configured via `@IP`, per-pair destination IP TMLs are also created: `crowdsec-whitelist-cloudflare-dstips-{Src}-{Dst}-v4` and `crowdsec-whitelist-cloudflare-dstips-{Src}-{Dst}-v6`.
 
 Zone names in `CLOUDFLARE_ZONE_PAIRS` are resolved independently of `ZONE_PAIRS` — they do not need to be the same pairs.
 
@@ -376,9 +378,11 @@ The stage names below are the `stage` label values of `crowdsec_unifi_decisions_
 | `3_origin` | Origins not in `CROWDSEC_ORIGINS` (when set) |
 | `4_scope` | Non-IP/CIDR scopes (ASN, country, etc.) |
 | `5_parse` | Decisions missing required fields (reason `missing_field`), invalid or malformed IP addresses (`parse_error`), and ranges broader than `/8` (IPv4) or `/32` (IPv6), which are never banned (`range_too_broad`). The same range limit applies to blocklist entries. |
-| `6_private` | RFC 1918, loopback, link-local, and ULA addresses |
+| `6_private` | RFC 1918, CGNAT (100.64.0.0/10), loopback, link-local, and ULA addresses |
 | `7_whitelist` | IPs matching `BLOCK_WHITELIST` |
-| `8_min_duration` | Decisions shorter than `BLOCK_MIN_DURATION` |
+| `8_min_duration` | Bans with a zero or negative duration, and bans shorter than `BLOCK_MIN_DURATION` |
+
+See [Filter Pipeline](DESIGN.md#filter-pipeline) for a diagram of the stages.
 
 Deletions skip stages 2, 3, 6, 7 and 8. A deletion only releases the claim its own decision made, so narrowing `BLOCK_SCENARIO_EXCLUDE`, `CROWDSEC_ORIGINS` or `BLOCK_WHITELIST` does not strand bans applied before the change.
 
@@ -427,10 +431,12 @@ The database contains four bbolt buckets:
 
 | Bucket | Contents |
 |--------|---------|
-| `bans` | IP → BanEntry (recorded at, expires at, IPv6 flag) |
-| `groups` | Firewall group shard cache (UniFi ID, members, dirty flag) |
+| `bans` | IP → BanEntry (recorded at, expires at, IPv6 flag, claims per source, pending flag) |
+| `groups` | Shard cache (UniFi ID, shard index, family, members) |
 | `policies` | Zone policy / legacy rule cache |
 | `events` | Ban audit trail ring buffer (see [Ban History](#ban-history)) |
+
+The daemon holds an exclusive lock on `bouncer.db`. `status` works while it runs (see below); `reconcile`, `drain`, `ban` and `unban` open the file themselves and need the daemon stopped first.
 
 ---
 
@@ -440,13 +446,13 @@ The bouncer keeps an audit trail of every ban, unban, and expiry event in the `e
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HISTORY_MAX_EVENTS` | `10000` | Maximum number of audit trail events retained in the ring buffer. Once the limit is reached, the oldest entry is dropped for each new entry written. Set to `0` to use the default. |
+| `HISTORY_MAX_EVENTS` | `10000` | Maximum number of audit trail events retained in the ring buffer. Once the limit is reached, the oldest entry is dropped for each new entry written. `0` or a negative value uses the default. |
 
 Events are written after each successful ban (`action=ban`), unban (`action=unban`), and janitor expiry (`action=expire`). Each event records: action, origin, scenario, IP address, and timestamp.
 
 ### Querying the audit trail
 
-Stop the daemon to release the bbolt database lock, then use the `status` subcommands to inspect stored state:
+The `status` subcommands read the database without changing it. While the daemon runs, run them inside its container (`docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status ...`): they then read a snapshot the daemon serves on `HEALTH_ADDR`. With the daemon stopped they open the database directly.
 
 ```bash
 # Show currently active bans (paginated, sortable)
@@ -473,7 +479,6 @@ The bouncer can periodically fetch plain-text IP/CIDR blocklists from external U
 |----------|---------|-------------|
 | `BLOCKLIST_URLS` | — | Comma-separated list of URLs to fetch. Each URL must return a plain-text list with one IP address or CIDR per line. Anything after `#` or `;` is a comment, so annotated feeds such as Spamhaus DROP (`192.0.2.0/24 ; SBL123`) work; only the first field of a line is read. A `/32` or `/128` entry is stored as the bare address. Blank and comment-only lines are ignored. |
 | `BLOCKLIST_REFRESH_INTERVAL` | `24h` | How often to re-fetch and re-apply each URL. Each successful fetch sets its bans to expire at `now + 2×BLOCKLIST_REFRESH_INTERVAL`, so an entry the feed drops lapses within two intervals. A failed fetch (error, non-200, or a 200 with no valid entries) extends the bans from the last good fetch instead, for up to `BAN_TTL` since that fetch. |
-
 | `BLOCKLIST_MIN_PREFIX_V4` | `8` | Shortest IPv4 prefix length accepted for a feed entry, from `8` to `32`. A broader range is skipped and counted as skipped in the fetch log. Applies to `BLOCKLIST_URLS` and the AbuseIPDB list, not to CrowdSec decisions. |
 | `BLOCKLIST_MIN_PREFIX_V6` | `32` | Shortest IPv6 prefix length accepted for a feed entry, from `32` to `128`. Same scope as the IPv4 setting. |
 
@@ -486,6 +491,8 @@ BLOCKLIST_REFRESH_INTERVAL=12h
 Each feed URL owns a separate ban claim. If CrowdSec or another feed still claims an IP, expiry of one feed's claim does not remove the firewall ban. Feed refreshes extend claim expiry to twice the refresh interval. A failed fetch keeps the feed's current bans (logged as "keeping bans from the last successful fetch"); once a feed has failed for longer than `BAN_TTL`, its bans are no longer extended and expire. Feed imports are logged with entry, new and skipped counts. Logs show only the feed scheme and host. Stored claim sources use an opaque SHA-256 key derived from the full URL and importer kind, so URL path tokens and query credentials are not stored in new claims. On startup, old URL-based claims migrate while preserving their expiry. If multiple configured importers matched the same old claim, its original expiry is retained under an opaque legacy key until a fresh fetch establishes ownership.
 
 A fetch that looks damaged never prunes. A feed with a country filter whose entries are all rejected by that filter (a mistyped code, or a feed that stopped tagging its lines) is treated as a failed fetch and keeps its previous bans. A feed that lists fewer than half the entries it listed on its last full fetch, when that was at least 50, has its entries applied but nothing pruned, and its previous bans are kept as for a failed fetch. After a feed has stayed in either state for `BAN_TTL`, its old bans expire and the smaller list is accepted. The comparison uses the feed's size before the country filter, so narrowing a filter still releases the entries it now excludes.
+
+A feed may hold at most 250,000 entries and 16 MiB; a larger response fails the fetch and keeps the previous bans. Feed entries pass the same private-range, range-size and `BLOCK_WHITELIST` checks as CrowdSec decisions.
 
 Addresses are recorded and applied in batches of 500, so a large feed does not hold up CrowdSec decisions while it imports. Addresses the controller rejects stay recorded as pending and are retried by the next reconcile.
 
@@ -517,7 +524,7 @@ ABUSEIPDB_COUNTRY_EXCLUDE=US
 
 **How filtering saves space.** Upstream only publishes whole-world files, so the full list is downloaded each time. The body is filtered line by line as it arrives: entries outside the filter are never held in memory, written to the ban database, or sent to UniFi. Every 10,000 addresses is one firewall group shard, so a tight filter directly cuts the number of shards and API writes.
 
-**Changing the filter.** After each successful fetch, bans this feed placed on addresses it no longer lists (because upstream dropped them, or because you narrowed the filter) are released straight away, so the first fetch after a restart shrinks UniFi to match. An address CrowdSec or another feed also blocks stays banned. A filter that matches nothing is not treated as a feed outage: it logs a warning and releases the feed's bans.
+**Changing the filter.** After each successful fetch, bans this feed placed on addresses it no longer lists (because upstream dropped them, or because you narrowed the filter) are released straight away, so the first fetch after a restart shrinks UniFi to match. An address CrowdSec or another feed also blocks stays banned. A filter that matches none of the entries is treated as a failed fetch, because a mistyped code or a change in the feed's format looks the same: it logs `blocklist: fetch failed` with `country filter matched none of the ... entries; previous bans kept`, and the feed's bans stay until the outage outlasts `BAN_TTL`.
 
 If a response contains an invalid entry, valid matching entries are still imported, but no existing feed claims are pruned that round. The response does not reset the `BAN_TTL` outage timer; if incomplete responses continue, claims absent from the valid entries eventually expire. The startup log pairs each opaque claim source key with the feed's scheme and host for database troubleshooting, without logging URL paths or queries.
 
@@ -570,8 +577,8 @@ WEBHOOK_EVENTS=circuit_breaker_open,circuit_breaker_close,reconcile_drift
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DRY_RUN` | `false` | Safe testing mode. The bouncer connects to both the UniFi controller and CrowdSec LAPI, reads existing state, and logs actions it *would* take. It does not change UniFi configuration or mutate bbolt state. Username/password authentication still sends a login `POST` to create a session; API key authentication does not. Turning off dry run after a dry run session starts cleanly with no phantom bbolt entries. |
-| `LOG_LEVEL` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error`. Messages from the CrowdSec stream client carry `"component":"crowdsec-client"`; its per-poll debug messages appear only at `trace`. |
+| `DRY_RUN` | `false` | Safe testing mode. The bouncer connects to both the UniFi controller and CrowdSec LAPI, reads existing state, and logs actions it *would* take. It does not change UniFi configuration or mutate bbolt state: the controller client refuses every request other than `GET` and `HEAD`, and the existing database is opened read-only. Username/password authentication still sends a login `POST` to create a session; API key authentication does not. The LAPI resync, the usage-metrics push, webhooks and the Cloudflare whitelist sync are skipped, and blocklist feeds are fetched but only logged. Turning off dry run after a dry run session starts cleanly with no phantom bbolt entries. |
+| `LOG_LEVEL` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `panic`. Logs are written to stderr. Messages from the CrowdSec stream client carry `"component":"crowdsec-client"`; its per-poll debug messages appear only at `trace`. |
 | `LOG_FORMAT` | `json` | Log format: `json` (structured, for Loki/Splunk) or `text` (human-readable) |
 | `METRICS_ENABLED` | `true` | Enable the Prometheus metrics HTTP server |
 | `METRICS_ADDR` | `:9090` | Address for the Prometheus metrics endpoint. Must differ from `HEALTH_ADDR` while metrics are enabled. The default listens on every interface, which a container needs for published ports and scraping; when running on a host (for example under systemd) set `127.0.0.1:9090` unless a remote Prometheus must reach it. The shipped systemd unit does this. |
@@ -579,3 +586,15 @@ WEBHOOK_EVENTS=circuit_breaker_open,circuit_breaker_close,reconcile_drift
 | `JANITOR_INTERVAL` | `1h` | How often the background janitor lifts expired ban claims, records `expire` history events, and updates the `crowdsec_unifi_db_size_bytes` metric |
 | `SHUTDOWN_GRACE_PERIOD` | `30s` | Time given to in-flight goroutines to finish cleanly after a shutdown signal before the process exits forcefully. |
 | `HEALTH_CHECK_LAPI` | `true` | When `true`, `/readyz` checks both the UniFi controller and CrowdSec LAPI. Set to `false` to check only the controller. Either way `/readyz` returns 503 `starting` until the first LAPI decision batch has been processed, so it stays unready while the LAPI is unreachable at startup. |
+
+---
+
+## Removed and Renamed Settings
+
+| Variable | Effect |
+|----------|--------|
+| `FIREWALL_BATCH_WINDOW` | Renamed to `SYNC_INTERVAL`. When `SYNC_INTERVAL` is not set, its value is used, with a deprecation warning at startup. |
+| `FIREWALL_FLUSH_CONCURRENCY` | No effect: shards are written one at a time. Setting it logs a warning at startup. |
+| `BLOCKLIST_NAME_PREFIX` | Ignored. |
+| `ZONE_PAIRS_SCENARIO_MAP` | Startup error. Per-scenario policies were never provisioned; use `ZONE_PAIRS`. |
+| `CLOUDFLARE_ZWHITELIST_ENABLED` | Startup error naming `CLOUDFLARE_WHITELIST_ENABLED`, the correct spelling. |

@@ -42,7 +42,8 @@ Job `docker-push`, step **"Sign image with Cosign (keyless OIDC)"**:
 
 The multi-arch image is signed with Cosign using GitHub Actions OIDC — no
 long-lived signing key exists. The signature is bound to the exact release
-workflow identity.
+workflow identity. Docker Hub and `ghcr.io/developingchet/cs-unifi-bouncer-pro`
+each store their own copy of the signature and attestations.
 
 ```bash
 cosign verify developingchet/cs-unifi-bouncer-pro:2.3.0 \
@@ -52,11 +53,12 @@ cosign verify developingchet/cs-unifi-bouncer-pro:2.3.0 \
 
 ### Build Provenance
 
-Job `docker-push`, step **"Attest image build provenance"**, and job
-`release`, step **"Attest binary build provenance"**
-(`actions/attest-build-provenance` v4.2.2, pinned by commit SHA), record SLSA
-provenance for the image digest and for the release binaries, signed through
-GitHub Actions OIDC. The image attestation is also pushed to the registry.
+Job `docker-push`, steps **"Attest image build provenance (Docker Hub)"** and
+**"Attest image build provenance (GHCR)"**, and job `release`, step **"Attest
+binary build provenance"** (`actions/attest-build-provenance` v4.2.2, pinned
+by commit SHA), record SLSA provenance for the image digest and for the release
+binaries, signed through GitHub Actions OIDC. Each image attestation is also
+pushed to its registry.
 
 ```bash
 gh attestation verify oci://developingchet/cs-unifi-bouncer-pro:2.3.0 \
@@ -72,7 +74,7 @@ Job `docker-push`, steps **"Generate SBOM (CycloneDX)"**
 attestation"** (`cosign attest --type cyclonedx`):
 
 - The SBOM is attached as a Cosign OCI attestation on the published image
-  digest.
+  digest in both registries.
 - The SBOM is also uploaded as a release artifact:
   `cs-unifi-bouncer-pro.sbom.cyclonedx.json`.
 
@@ -95,7 +97,8 @@ sha256sum * > checksums.txt
 
 Job `docker-push`, step **"Build and push multi-arch image"**
 (`docker/build-push-action` v7.4.0, pinned by commit SHA),
-`platforms: linux/amd64,linux/arm64,linux/arm/v7`.
+`platforms: linux/amd64,linux/arm64,linux/arm/v7`, pushed to Docker Hub and
+GHCR.
 
 ---
 
@@ -121,8 +124,11 @@ CI validation runs on every push and pull request in two stages
 
 2. Job **"Seccomp Integration Test"** (`test-seccomp`) — builds the production
    image and runs it under the profile with `--cap-drop ALL` and
-   `no-new-privileges:true`. Exit code 159 (SIGSYS) means a required syscall
-   was blocked by the profile; the job asserts the exit code is not 159.
+   `no-new-privileges:true`: first `version`, then `reconcile` against an
+   empty data volume and an unreachable controller, which must open the
+   database and fail on the connection (exit 1). Exit code 159 (SIGSYS) or
+   `operation not permitted` in the output means a required syscall was
+   blocked by the profile and fails the job.
 
 ### Container Capabilities
 
@@ -162,8 +168,10 @@ go list -m -json all | jq '{module: .Path, version: .Version}'
 govulncheck ./...
 ```
 
-Dependabot is configured to keep Go modules and GitHub Actions up to date.
-CVE patches in indirect dependencies are addressed as they appear in Trivy scans.
+Dependabot is configured to keep Go modules (including the CI tools in
+`.github/tools`), GitHub Actions, the Python requirements of the Socket
+workflow and the Dockerfile base images up to date. CVE patches in indirect
+dependencies are addressed as they appear in govulncheck and Trivy scans.
 
 ---
 
@@ -176,29 +184,30 @@ private reporting channel, and response timelines.
 
 ## Workflow Integrity
 
-Actions in the CI, release, image-scan, Scorecard, and Socket workflows are
-pinned to full commit SHAs. The YAML comments identify these upstream versions;
-the SHA references in the workflow files are the source of truth.
+Actions in the CI, release, image-scan, Scorecard, Socket and Docker Hub
+description workflows are pinned to full commit SHAs. The YAML comments
+identify these upstream versions; the SHA references in the workflow files are
+the source of truth.
 
 | Action | Upstream version | Workflows |
 |--------|------------------|-----------|
 | `actions/attest-build-provenance` | v4.2.2 | release |
-| `actions/checkout` | v7.0.1 | CI, release, Socket, Scorecard |
+| `actions/checkout` | v7.0.1 | CI, release, Socket, Scorecard, update-dockerhub |
 | `actions/download-artifact` | v8 | release |
 | `actions/setup-go` | v7 | CI, release |
-| `actions/setup-python` | v7.0.0 | Socket |
-| `actions/upload-artifact` | v7.0.1 | release, Scorecard |
+| `actions/setup-python` | v7.1.0 | Socket |
+| `actions/upload-artifact` | v7.0.2 | release, Scorecard |
 | `anchore/sbom-action` | v0 | release |
 | `aquasecurity/trivy-action` | v0.36.0 | CI, release, image-scan |
-| `github/codeql-action/upload-sarif` | v4.38.2 | release, image-scan, Scorecard |
+| `github/codeql-action/upload-sarif` | v4.39.1 | release, image-scan, Scorecard |
 | `docker/build-push-action` | v7.4.0 | CI, release |
-| `docker/login-action` | v4.6.0 | release |
+| `docker/login-action` | v4.7.0 | release |
 | `docker/metadata-action` | v6.2.0 | release |
 | `docker/setup-buildx-action` | v4.4.1 | CI, release |
 | `docker/setup-qemu-action` | v4.4.0 | release |
 | `golangci/golangci-lint-action` | v9 | CI |
-| `ossf/scorecard-action` | v2.4.4 | Scorecard |
-| `peter-evans/dockerhub-description` | v5.0.0 | release |
+| `ossf/scorecard-action` | v2.5.0 | Scorecard |
+| `peter-evans/dockerhub-description` | v5.0.0 | release, update-dockerhub |
 | `sigstore/cosign-installer` | v4.1.2 | release |
 | `softprops/action-gh-release` | v2 | release |
 

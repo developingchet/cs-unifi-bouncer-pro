@@ -171,7 +171,7 @@ Use temporary directories for tests that write to disk. Clean them up with `t.Te
 - [ ] Firewall group or zone policy is created/updated in the UniFi controller
 - [ ] `GET /healthz` returns 200
 - [ ] `GET /readyz` returns 200 once the first LAPI batch is processed (controller reachable)
-- [ ] `dry_run=true` produces log output but no UniFi API calls
+- [ ] `DRY_RUN=true` produces log output but no UniFi write requests
 
 ---
 
