@@ -442,7 +442,7 @@ On startup, stored bans that `BLOCK_WHITELIST` now covers, private addresses, an
 
 ## Decision Rate Limiting
 
-A token-bucket rate limiter can throttle how fast decisions are dequeued and applied to UniFi during large ban waves. When the limiter is active, excess decisions are queued and processed as tokens refill.
+A token-bucket rate limiter can throttle how fast decisions are dequeued and applied to UniFi during large ban waves. When the limiter is active, excess decisions are queued and processed as tokens refill. Only bans are limited; deleted and expired decisions are applied at once, so a restart against a LAPI holding many expired decisions does not stay unready while they are worked through.
 
 | Variable | Default | Description |
 |----------|---------|-------------|

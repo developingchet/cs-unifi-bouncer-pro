@@ -166,7 +166,7 @@ Re-delivered decisions update the same claim after a reconnect, while distinct d
 
 The bans of a batch are claimed 500 at a time: one bbolt transaction records their claims, the new ones marked pending, and a second clears the pending flag of those added to their shards. Their history events are written together in a third, so a burst of decisions costs three disk syncs per 500 instead of three per decision. Deletions follow the bans of the batch one at a time, in the order the LAPI sent them.
 
-`DECISION_RATE_LIMIT` puts a token bucket in front of the job handler, so a large ban wave is applied at a bounded rate instead of all at once. Decisions admitted within the burst are claimed together; once the bucket is empty, each decision is applied as soon as it is admitted.
+`DECISION_RATE_LIMIT` puts a token bucket in front of the job handler, so a large ban wave is applied at a bounded rate instead of all at once. Decisions admitted within the burst are claimed together; once the bucket is empty, each decision is applied as soon as it is admitted. Only bans take a token: the first stream block lists every expired decision the LAPI still holds as deleted, and pacing those would hold readiness back for no gain, since a deletion reaches the controller only at the next flush.
 
 ---
 

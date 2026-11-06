@@ -60,6 +60,10 @@ Behaviour that changes without action:
   left out of its shard for an hour and then offered again, instead of until
   the next restart. A shard leaves out at most 10 entries; past that the
   write fails.
+- **`DECISION_RATE_LIMIT` paces bans only**: deleted and expired decisions
+  are applied at once. Before, each took a token, and the first stream block
+  after a restart lists every expired decision the LAPI still holds, so a low
+  limit kept `/readyz` at 503 for minutes while they were worked through.
 - **SIGHUP before the first CrowdSec batch** only repairs the block policies
   for the new zone pairs; bans are reconciled once the startup reconcile runs.
 - **Zone pairs from a file**: `ZONE_PAIRS_FILE`, `EGRESS_ZONE_PAIRS_FILE`

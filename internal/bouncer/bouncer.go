@@ -208,6 +208,9 @@ func (b *Bouncer) consumeStream(ctx context.Context, stream <-chan *models.Decis
 				// Only shutdown cuts a block short. The startup callbacks
 				// assume every active decision has been applied, so after a
 				// cut-short first block they wait for the next start.
+				if err := ctx.Err(); err == nil {
+					return fmt.Errorf("decision block cut short while the stream was still running")
+				}
 				return nil
 			}
 			if !startupSynced {
@@ -259,7 +262,12 @@ func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.Dec
 			if !ok {
 				continue
 			}
-			if !b.admit(ctx, &batch) {
+			// Only bans are paced. A deletion changes nothing on the
+			// controller until the next flush, and the first block of a
+			// stream carries every expired decision the LAPI still holds,
+			// which would otherwise hold readiness back for half a second
+			// each at two decisions a second.
+			if list.action == "ban" && !b.admit(ctx, &batch) {
 				return false
 			}
 			if job.Action == "ban" {
@@ -275,10 +283,10 @@ func (b *Bouncer) handleDecisionBlock(ctx context.Context, decisions *models.Dec
 	return true
 }
 
-// admit waits for the rate limiter, when one is configured. When it is out
-// of tokens, the batch collected so far is applied before waiting, so a
-// limited stream still applies each decision as it is admitted. It returns
-// false when ctx ends while waiting.
+// admit waits for the rate limiter, when one is configured, before a ban.
+// When it is out of tokens, the batch collected so far is applied before
+// waiting, so a limited stream still applies each decision as it is
+// admitted. It returns false when ctx ends while waiting.
 func (b *Bouncer) admit(ctx context.Context, batch *[]SyncJob) bool {
 	if b.limiter == nil {
 		return true
