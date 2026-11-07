@@ -68,7 +68,7 @@ docker logs -f cs-unifi-bouncer-pro
 ```
 
 The compose file runs `latest`. To run a specific release instead, set
-`BOUNCER_IMAGE` in `.env`, for example to `developingchet/cs-unifi-bouncer-pro:2.3.0`
+`BOUNCER_IMAGE` in `.env`, for example to `developingchet/cs-unifi-bouncer-pro:2.4.0`
 or to an `@sha256:` digest that `cosign verify` reported.
 
 For the full setup guide including advanced configuration, multi-site deployments,
