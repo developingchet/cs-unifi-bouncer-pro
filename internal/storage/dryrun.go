@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 type dryRunStore struct {
@@ -45,10 +44,21 @@ func (s *dryRunStore) BanList() (map[string]BanEntry, error) {
 	}
 	return s.base.BanList()
 }
-func (s *dryRunStore) BanRecord(string, time.Time, bool) error { return nil }
-func (s *dryRunStore) BanPut(string, BanEntry) error           { return nil }
-func (s *dryRunStore) BanPutMany(map[string]BanEntry) error    { return nil }
-func (s *dryRunStore) BanDelete(string) error                  { return nil }
+func (s *dryRunStore) BanCount() (int, error) {
+	if s.base == nil {
+		return 0, nil
+	}
+	return s.base.BanCount()
+}
+func (s *dryRunStore) BanKeys() (map[string]struct{}, error) {
+	if s.base == nil {
+		return map[string]struct{}{}, nil
+	}
+	return s.base.BanKeys()
+}
+func (s *dryRunStore) BanPut(string, BanEntry) error        { return nil }
+func (s *dryRunStore) BanPutMany(map[string]BanEntry) error { return nil }
+func (s *dryRunStore) BanDelete(string) error               { return nil }
 
 func (s *dryRunStore) GetGroup(name string) (*GroupRecord, error) {
 	if s.base == nil {
@@ -80,7 +90,8 @@ func (s *dryRunStore) ListPolicies() (map[string]PolicyRecord, error) {
 func (s *dryRunStore) SetPolicy(string, PolicyRecord) error { return nil }
 func (s *dryRunStore) DeletePolicy(string) error            { return nil }
 
-func (s *dryRunStore) RecordEvent(EventEntry) error { return nil }
+func (s *dryRunStore) RecordEvent(EventEntry) error    { return nil }
+func (s *dryRunStore) RecordEvents([]EventEntry) error { return nil }
 func (s *dryRunStore) ListEvents(limit int) ([]EventEntry, error) {
 	if s.base == nil {
 		return nil, nil

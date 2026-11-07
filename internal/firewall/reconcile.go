@@ -2,143 +2,8 @@ package firewall
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"time"
-
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 )
-
-// Reconcile performs a full diff between bbolt state and UniFi API state.
-func (m *managerImpl) Reconcile(ctx context.Context, sites []string) (*ReconcileResult, error) {
-	start := time.Now()
-	result := &ReconcileResult{}
-
-	for _, site := range sites {
-		added, removed, errs := m.reconcileSite(ctx, site)
-		result.Added += added
-		result.Removed += removed
-		result.Errors = append(result.Errors, errs...)
-
-		metrics.ReconcileDelta.WithLabelValues("added", site).Set(float64(added))
-		metrics.ReconcileDelta.WithLabelValues("removed", site).Set(float64(removed))
-	}
-
-	result.Elapsed = time.Since(start)
-	return result, errors.Join(result.Errors...)
-}
-
-// diffFamily reconciles one family's shard membership against desired: it adds
-// IPs missing from sm and removes members no longer in desired. If ctx is
-// cancelled partway through, it returns the counts accumulated so far with
-// ctx.Err() appended to errs.
-//
-// desired was read some time ago, and decisions keep being applied while a
-// large diff runs. Each change is therefore confirmed against the ban database
-// just before it is made, so a ban recorded since the snapshot is not removed
-// and a ban lifted since is not added back.
-func (m *managerImpl) diffFamily(ctx context.Context, sm *ShardManager, desired map[string]struct{}) (added, removed int, errs []error) {
-	for ip := range desired {
-		if ctx.Err() != nil {
-			return added, removed, append(errs, ctx.Err())
-		}
-		if sm.Contains(ip) {
-			continue
-		}
-		recorded, err := m.store.BanExists(ip)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("re-read ban %s: %w", ip, err))
-			continue
-		}
-		if !recorded {
-			continue
-		}
-		if _, _, err := sm.Add(ctx, ip); err != nil {
-			errs = append(errs, err)
-		} else {
-			added++
-		}
-	}
-
-	for _, ip := range sm.AllMembers() {
-		if ctx.Err() != nil {
-			return added, removed, append(errs, ctx.Err())
-		}
-		if _, ok := desired[ip]; ok {
-			continue
-		}
-		recorded, err := m.store.BanExists(ip)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("re-read ban %s: %w", ip, err))
-			continue
-		}
-		if recorded {
-			continue
-		}
-		if _, err := sm.Remove(ctx, ip); err != nil {
-			errs = append(errs, err)
-		} else {
-			removed++
-		}
-	}
-	return added, removed, errs
-}
-
-// reconcileSite diffs the bbolt ban list against all UniFi groups for one site.
-func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, removed int, errs []error) {
-	bans, err := m.store.BanList()
-	if err != nil {
-		return 0, 0, []error{fmt.Errorf("load ban list: %w", err)}
-	}
-
-	m.mu.RLock()
-	v4Mgr := m.v4Mgrs[site]
-	v6Mgr := m.v6Mgrs[site]
-	m.mu.RUnlock()
-
-	if v4Mgr == nil {
-		return
-	}
-
-	// Build desired sets from bbolt
-	desiredV4 := make(map[string]struct{})
-	desiredV6 := make(map[string]struct{})
-	for ip, entry := range bans {
-		if entry.IPv6 {
-			desiredV6[ip] = struct{}{}
-		} else {
-			desiredV4[ip] = struct{}{}
-		}
-	}
-
-	// Add missing IPs, then remove extra ones, for v4.
-	added, removed, errs = m.diffFamily(ctx, v4Mgr, desiredV4)
-	if ctx.Err() != nil {
-		return added, removed, errs
-	}
-
-	// IPv6
-	if v6Mgr != nil {
-		v6Added, v6Removed, v6Errs := m.diffFamily(ctx, v6Mgr, desiredV6)
-		added += v6Added
-		removed += v6Removed
-		errs = append(errs, v6Errs...)
-		if ctx.Err() != nil {
-			return added, removed, errs
-		}
-	}
-
-	if m.cfg.DryRun {
-		if added > 0 || removed > 0 {
-			m.log.Info().Str("site", site).Int("would_add", added).Int("would_remove", removed).
-				Msg("[DRY-RUN] reconcile diff computed; no changes written to UniFi")
-		}
-		return added, removed, errs
-	}
-
-	missing, extra, writeErrs := m.reconcileWrites(ctx, site, v4Mgr, v6Mgr)
-	return added + missing, removed + extra, append(errs, writeErrs...)
-}
 
 // reconcileWrites brings the controller in line with the shards' in-memory
 // state: it detects out-of-band edits, flushes dirty shards, drains donors,
@@ -152,6 +17,7 @@ func (m *managerImpl) reconcileSite(ctx context.Context, site string) (added, re
 func (m *managerImpl) reconcileWrites(ctx context.Context, site string, v4Mgr, v6Mgr *ShardManager) (missing, extra int, errs []error) {
 	m.syncMu.Lock()
 	defer m.syncMu.Unlock()
+	defer m.saveSiteShardRecords(site, v4Mgr, v6Mgr)
 
 	if err := m.admitWrites(); err != nil {
 		m.log.Info().Err(err).Str("site", site).Msg("reconcile: controller writes deferred")
@@ -175,7 +41,7 @@ func (m *managerImpl) reconcileWrites(ctx context.Context, site string, v4Mgr, v
 		}
 		gone, surplus, err := mgr.MarkRemoteDrift(ctx)
 		if err != nil {
-			m.noteRateLimit(err)
+			m.noteReadFailure(err)
 			errs = append(errs, fmt.Errorf("check controller membership for site %s: %w", site, err))
 			continue
 		}
@@ -209,10 +75,14 @@ func (m *managerImpl) reconcileWrites(ctx context.Context, site string, v4Mgr, v
 	switch m.cachedMode(site) {
 	case "zone":
 		if err := m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr); err != nil {
+			m.noteReadFailure(err)
 			errs = append(errs, fmt.Errorf("ensure zone policies for site %s: %w", site, err))
+		} else if err := m.retryConvertedRules(ctx, site); err != nil {
+			errs = append(errs, fmt.Errorf("retire converted legacy rules for site %s: %w", site, err))
 		}
 	case "legacy":
 		if err := m.legacyMgr.EnsureRules(ctx, site, v4Mgr, v6Mgr); err != nil {
+			m.noteReadFailure(err)
 			errs = append(errs, fmt.Errorf("ensure legacy rules for site %s: %w", site, err))
 		}
 	}

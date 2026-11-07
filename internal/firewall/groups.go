@@ -75,9 +75,14 @@ type Shard struct {
 	createFailures int
 	createRetryAt  time.Time
 
-	// rejected holds members the controller refused for this shard (see
-	// putAcceptedMembers). They are left out of every write until released.
-	rejected map[string]struct{}
+	// rejected holds members the controller refused for this shard and when
+	// the refusal lapses (see putAcceptedMembers). They are left out of every
+	// write until they are released or the refusal lapses.
+	rejected map[string]time.Time
+
+	// recordStale is set when members were written to the controller since
+	// the shard's group record last saved them (see saveShardRecords).
+	recordStale bool
 }
 
 // GroupRef keeps a UniFi group ID paired with its actual shard number.
@@ -134,7 +139,7 @@ type ShardManager struct {
 	log        zerolog.Logger
 	flushDelay time.Duration
 	dryRun     bool
-	mode       string // "legacy" or "zone" (used for log messaging only)
+	mode       string // "legacy" (firewall groups) or "zone" (traffic matching lists): the shard object type and API
 
 	// fam holds the shard state for this manager's address family
 	// ("v4" for ipv6=false, "v6" for ipv6=true). Guarded by mu.
@@ -181,6 +186,19 @@ type ShardManager struct {
 	// instance's templates render but its database has no record of, found by
 	// the last EnsureShards. Guarded by mu.
 	unknownObjects []string
+
+	// now is the clock refusal holds are measured against.
+	now func() time.Time
+
+	// events receives shard create failures and refused entries.
+	events ShardEvents
+
+	// metricsStale is set when membership changed since the shard gauges
+	// were last set (see refreshMetrics). Guarded by mu.
+	metricsStale bool
+
+	// recordsSavedAt is when saveShardRecords last ran. Guarded by mu.
+	recordsSavedAt time.Time
 }
 
 // NewShardManager creates a ShardManager. Call EnsureShards to initialize from the API.
@@ -209,6 +227,7 @@ func NewShardManager(site string, ipv6 bool, capacity int, namer *Namer,
 		flushDelay: flushDelay,
 		dryRun:     dryRun,
 		mode:       mode,
+		now:        time.Now,
 		fam: &ShardFamily{
 			Shards:  []*Shard{},
 			ipOwner: make(map[string]int),
@@ -306,6 +325,7 @@ func (sm *ShardManager) addIPLocked(ip string) (owner int, allocated bool) {
 		return idx, false
 	}
 
+	sm.metricsStale = true
 	for _, shard := range family.Shards {
 		if shard.State == ShardStateDraining {
 			continue // draining shards cannot accept new IPs
@@ -313,7 +333,6 @@ func (sm *ShardManager) addIPLocked(ip string) (owner int, allocated bool) {
 		if shard.IPs.Capacity(sm.shardLimit) > 0 {
 			shard.IPs.Add(ip)
 			family.ipOwner[ip] = shard.Index
-			sm.updateMetricsLocked()
 			return shard.Index, false
 		}
 	}
@@ -329,7 +348,6 @@ func (sm *ShardManager) addIPLocked(ip string) (owner int, allocated bool) {
 	family.Shards = append(family.Shards, shard)
 	shard.IPs.Add(ip)
 	family.ipOwner[ip] = shard.Index
-	sm.updateMetricsLocked()
 	return shard.Index, true
 }
 
@@ -337,13 +355,11 @@ func (sm *ShardManager) addIPLocked(ip string) (owner int, allocated bool) {
 func (sm *ShardManager) RemoveIP(ip string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if sm.removeIPLocked(ip) {
-		sm.updateMetricsLocked()
-	}
+	sm.removeIPLocked(ip)
 }
 
 // removeIPLocked drops ip from its shard and the owner map, and reports
-// whether it was tracked. Callers hold sm.mu and refresh metrics.
+// whether it was tracked. Callers hold sm.mu.
 func (sm *ShardManager) removeIPLocked(ip string) bool {
 	family := sm.fam
 	shardIdx, owned := family.ipOwner[ip]
@@ -354,46 +370,28 @@ func (sm *ShardManager) removeIPLocked(ip string) bool {
 		shard.IPs.Remove(ip)
 	}
 	delete(family.ipOwner, ip)
+	sm.metricsStale = true
 	return true
 }
 
-// Add adds an IP to the manager family and returns shard details for callers
-// that need to provision rule/policy infrastructure when a new shard appears.
-// newShardIdx is the index of a shard this call allocated, or -1. It is
-// decided under the lock, so concurrent adds never both report one shard.
-func (sm *ShardManager) Add(_ context.Context, ip string) (shardName string, newShardIdx int, err error) {
+// Add adds an IP to the manager family. newShardIdx is the index of a shard
+// this call allocated, or -1, for callers that provision rule or policy
+// infrastructure when a new shard appears. It is decided under the lock, so
+// concurrent adds never both report one shard.
+func (sm *ShardManager) Add(_ context.Context, ip string) (newShardIdx int, err error) {
 	sm.mu.Lock()
 	ownerIdx, allocated := sm.addIPLocked(ip)
 	sm.mu.Unlock()
-
-	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: ownerIdx, Site: sm.site})
-	if err != nil {
-		return "", -1, err
-	}
-	newShardIdx = -1
 	if allocated {
-		newShardIdx = ownerIdx
+		return ownerIdx, nil
 	}
-	return name, newShardIdx, nil
+	return -1, nil
 }
 
 // Remove removes an IP from whichever shard contains it.
-func (sm *ShardManager) Remove(ctx context.Context, ip string) (string, error) {
-	sm.mu.RLock()
-	family := sm.fam
-	shardIdx, owned := family.ipOwner[ip]
-	sm.mu.RUnlock()
-	if !owned {
-		return "", nil
-	}
-
+func (sm *ShardManager) Remove(_ context.Context, ip string) error {
 	sm.RemoveIP(ip)
-
-	name, err := sm.namer.GroupName(NameData{Family: Family(sm.ipv6), Index: shardIdx, Site: sm.site})
-	if err != nil {
-		return "", err
-	}
-	return name, nil
+	return nil
 }
 
 // Contains returns true if any shard contains the given IP.
@@ -403,6 +401,13 @@ func (sm *ShardManager) Contains(ip string) bool {
 	family := sm.fam
 	_, ok := family.ipOwner[ip]
 	return ok
+}
+
+// Len returns the number of IPs across all shards.
+func (sm *ShardManager) Len() int {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return len(sm.fam.ipOwner)
 }
 
 // AllMembers returns all IPs across all shards.
@@ -473,7 +478,21 @@ func (sm *ShardManager) GroupIDs() []string {
 	return ids
 }
 
+// refreshMetrics brings the shard gauges up to date after membership
+// changes. Adds and removes only mark them stale, so a batch of bans costs one
+// pass over the shards instead of one per address.
+func (sm *ShardManager) refreshMetrics() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.metricsStale {
+		sm.updateMetricsLocked()
+	}
+}
+
+// updateMetricsLocked sets the shard gauges from the current shards. Callers
+// hold sm.mu.
 func (sm *ShardManager) updateMetricsLocked() {
+	sm.metricsStale = false
 	family := sm.fam
 	familyName := Family(sm.ipv6)
 	unsynced := 0
@@ -482,7 +501,7 @@ func (sm *ShardManager) updateMetricsLocked() {
 		if s.ID == "" || s.activationPending {
 			unsynced += s.IPs.Len()
 		} else {
-			unsynced += len(s.rejected)
+			unsynced += s.refusedCount(sm.now())
 		}
 		name := s.Name // rendered once at allocation; this runs on every add
 		count := float64(s.IPs.Len())

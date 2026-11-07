@@ -145,20 +145,25 @@ func (m *managerImpl) attachShardCallbacks(mgr *ShardManager) {
 		m.setRateLimitUntil(time.Now().Add(retryAfter))
 	})
 	mgr.SetWritesPausedCheck(func() bool { return m.writesPaused() != nil })
+	mgr.SetEvents(m.cfg.ShardEvents)
 	mgr.SetSyncCallbacks(
 		func() { // onSyncSuccess
 			m.recordControllerSuccess()
 		},
-		func() { // onSyncError
-			if tripped := m.cb.recordFailure(); tripped {
-				m.log.Error().Msg("circuit breaker opened: too many consecutive sync failures")
-				metrics.CircuitBreakerState.Set(1)
-				if m.cfg.OnCircuitBreakerOpen != nil {
-					m.cfg.OnCircuitBreakerOpen()
-				}
-			}
-		},
+		m.recordControllerFailure, // onSyncError
 	)
+}
+
+// recordControllerFailure counts one failed controller request toward the
+// circuit breaker and opens it at the threshold.
+func (m *managerImpl) recordControllerFailure() {
+	if tripped := m.cb.recordFailure(); tripped {
+		m.log.Error().Msg("circuit breaker opened: too many consecutive sync failures")
+		metrics.CircuitBreakerState.Set(1)
+		if m.cfg.OnCircuitBreakerOpen != nil {
+			m.cfg.OnCircuitBreakerOpen()
+		}
+	}
 }
 
 func (m *managerImpl) recordControllerSuccess() {
@@ -187,6 +192,9 @@ type dirtyFamily struct {
 // breaker that appears mid-pass ends the pass; the remaining shards wait for
 // the next tick.
 func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
+	// The shard gauges follow membership even while writes are held back,
+	// when unsynced_ips matters most.
+	m.refreshShardMetrics(sites)
 	if m.cfg.DryRun {
 		m.log.Debug().Msg("[DRY-RUN] skipping shard sync")
 		return nil
@@ -242,10 +250,10 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 			v4Total := 0
 			v6Total := 0
 			if v4 != nil {
-				v4Total = len(v4.AllMembers())
+				v4Total = v4.Len()
 			}
 			if v6 != nil {
-				v6Total = len(v6.AllMembers())
+				v6Total = v6.Len()
 			}
 			m.log.Info().
 				Str("site", site).
@@ -256,13 +264,25 @@ func (m *managerImpl) SyncDirty(ctx context.Context, sites []string) error {
 		}
 	}
 
-	// Update active_bans gauge from bbolt after every sync tick.
-	m.UpdateActiveBansMetric()
 	syncErrors = m.settleProbe(ctx, syncErrors)
 	if len(syncErrors) == 0 && !deferred {
 		metrics.LastSyncTimestamp.Set(float64(time.Now().Unix()))
 	}
 	return errors.Join(syncErrors...)
+}
+
+// refreshShardMetrics brings the shard gauges and active_bans of sites up
+// to date.
+func (m *managerImpl) refreshShardMetrics(sites []string) {
+	for _, site := range sites {
+		v4, v6 := m.siteShardMgrs(site)
+		for _, sm := range []*ShardManager{v4, v6} {
+			if sm != nil {
+				sm.refreshMetrics()
+			}
+		}
+	}
+	m.updateActiveBansMetric(sites)
 }
 
 // siteShardMgrs returns the IPv4 and IPv6 shard managers of site; either may be nil.
@@ -344,13 +364,15 @@ func (m *managerImpl) pruneEmptyTailShards(ctx context.Context, site string, v4,
 			// UniFi will reject group deletion if policies/rules still reference it.
 			switch mode {
 			case "legacy":
-				if err := m.legacyMgr.DeleteRuleForShard(ctx, site, e.ipv6, shardIdx); err != nil {
+				if err := m.legacyMgr.DeleteRuleForShard(ctx, site, unifiID, e.ipv6, shardIdx); err != nil {
 					m.log.Error().Err(err).Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
 						Msg("failed to delete rule for pruned shard; aborting group delete to avoid orphans")
 					break pruneLoop // stop pruning on error to avoid orphaning the group
 				}
 			case "zone":
-				if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, e.ipv6, shardIdx); err != nil {
+				err := errors.Join(m.zoneMgr.DeletePoliciesForShard(ctx, site, e.ipv6, shardIdx),
+					m.deleteConvertedRulesForList(ctx, site, unifiID))
+				if err != nil {
 					m.log.Error().Err(err).Str("site", site).Bool("ipv6", e.ipv6).Int("shard", shardIdx).
 						Msg("failed to delete policies for pruned shard; aborting group delete to avoid orphans")
 					break pruneLoop // stop pruning on error to avoid orphaning the group

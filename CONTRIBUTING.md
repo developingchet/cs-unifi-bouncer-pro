@@ -61,7 +61,7 @@ Documentation PRs are always welcome — from typo fixes to new deployment examp
 
 | Tool | Minimum version |
 |------|----------------|
-| Go | 1.27.2 |
+| Go | 1.27.3 |
 | Docker | 20.10 |
 | Docker Compose | v2 |
 
@@ -171,7 +171,7 @@ Use temporary directories for tests that write to disk. Clean them up with `t.Te
 - [ ] Firewall group or zone policy is created/updated in the UniFi controller
 - [ ] `GET /healthz` returns 200
 - [ ] `GET /readyz` returns 200 once the first LAPI batch is processed (controller reachable)
-- [ ] `dry_run=true` produces log output but no UniFi API calls
+- [ ] `DRY_RUN=true` produces log output but no UniFi write requests
 
 ---
 

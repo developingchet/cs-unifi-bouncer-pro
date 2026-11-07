@@ -88,6 +88,36 @@ func (m *managerImpl) noteRateLimit(err error) {
 	}
 }
 
+// noteReadFailure handles a failed controller read made while syncMu is
+// held. A rate limit opens its window, and a failure that suggests the
+// controller is unreachable counts toward the circuit breaker as a failed
+// shard write does. Shard writes wait for syncMu, so while a reconcile's
+// reads keep timing out they are the only failures that can open the breaker.
+func (m *managerImpl) noteReadFailure(err error) {
+	m.noteRateLimit(err)
+	if controllerUnhealthy(err) {
+		m.recordControllerFailure()
+	}
+}
+
+// controllerUnhealthy reports whether err suggests the controller is
+// unreachable or failing, rather than answering and refusing one request.
+// Transport errors, timeouts, 5xx responses and authentication failures
+// qualify; a cancelled pass, a rate limit, 400, 404 and 409 do not.
+func controllerUnhealthy(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var (
+		rl       *controller.ErrRateLimit
+		bad      *controller.ErrBadRequest
+		notFound *controller.ErrNotFound
+		conflict *controller.ErrConflict
+	)
+	return !errors.As(err, &rl) && !errors.As(err, &bad) &&
+		!errors.As(err, &notFound) && !errors.As(err, &conflict)
+}
+
 // onlyRefusedRequests reports whether every error is an HTTP 400 refusal.
 func onlyRefusedRequests(errs []error) bool {
 	for _, err := range errs {

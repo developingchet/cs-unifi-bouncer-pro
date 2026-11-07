@@ -54,7 +54,7 @@ func newPruneFixture(t *testing.T) *pruneFixture {
 		t.Fatal(err)
 	}
 	for _, ip := range []string{"198.51.100.1", "198.51.100.2"} {
-		if err := store.BanRecord(ip, time.Time{}, false); err != nil {
+		if err := testutil.PutBan(store, ip, time.Time{}, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -77,7 +77,7 @@ func newPruneFixture(t *testing.T) *pruneFixture {
 func (f *pruneFixture) banDuringPrune(t *testing.T, ip string) {
 	t.Helper()
 	store := f.mgr.store
-	if err := store.BanRecord(ip, time.Time{}, false); err != nil {
+	if err := testutil.PutBan(store, ip, time.Time{}, false); err != nil {
 		t.Error(err)
 	}
 	if err := f.mgr.ApplyBan(context.Background(), testSite, ip, false); err != nil {

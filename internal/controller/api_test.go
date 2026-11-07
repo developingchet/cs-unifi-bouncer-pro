@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -481,10 +482,20 @@ func TestGetSiteID_Found(t *testing.T) {
 	}
 }
 
+func noSiteRetryDelay(t *testing.T) {
+	t.Helper()
+	saved := emptySiteListRetryDelay
+	emptySiteListRetryDelay = 0
+	t.Cleanup(func() { emptySiteListRetryDelay = saved })
+}
+
 func TestGetSiteID_NotFound(t *testing.T) {
+	noSiteRetryDelay(t)
 	respBody := makeV1Page() // empty list — site not found
+	var requests atomic.Int32
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(respBody)
@@ -495,6 +506,48 @@ func TestGetSiteID_NotFound(t *testing.T) {
 	_, err := getSiteID(context.Background(), c, "nonexistent")
 	if err == nil {
 		t.Fatal("expected error when site is not in list, got nil")
+	}
+	if got := requests.Load(); got != emptySiteListAttempts {
+		t.Errorf("site list requests = %d, want %d (an empty list is retried)", got, emptySiteListAttempts)
+	}
+}
+
+func TestGetSiteIDRetriesAnEmptySiteList(t *testing.T) {
+	noSiteRetryDelay(t)
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if requests.Add(1) == 1 {
+			_, _ = w.Write(makeV1Page())
+			return
+		}
+		_, _ = w.Write(makeV1Page(apiSiteV1{ID: testSiteUUID, InternalReference: "default", Name: "Default"}))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	got, err := getSiteID(context.Background(), c, "default")
+	if err != nil || got != testSiteUUID {
+		t.Fatalf("getSiteID after one empty answer = %q, %v; want %q", got, err, testSiteUUID)
+	}
+}
+
+func TestGetSiteIDDoesNotRetryAListWithoutTheSite(t *testing.T) {
+	noSiteRetryDelay(t)
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(makeV1Page(apiSiteV1{ID: testSiteUUID, InternalReference: "other", Name: "Other"}))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "api-key")
+	if _, err := getSiteID(context.Background(), c, "default"); err == nil {
+		t.Fatal("getSiteID of a site the controller does not list: got nil error")
+	}
+	if got := requests.Load(); got != 1 {
+		t.Errorf("site list requests = %d, want 1", got)
 	}
 }
 
@@ -851,6 +904,41 @@ func TestConfirmDeletedTreatsWrappedNotFoundAsUnconfirmed(t *testing.T) {
 	}
 }
 
+func TestConfirmDeletedTreatsClassicIDInvalidLikeNotFound(t *testing.T) {
+	idInvalid := &ErrBadRequest{Body: `{"meta":{"rc":"error","msg":"api.err.IdInvalid"},"data":[]}`}
+	if err := confirmDeleted(idInvalid, "rule", func() (bool, error) { return false, nil }); err != nil {
+		t.Errorf("rule absent from the listing: got %v, want nil", err)
+	}
+	if err := confirmDeleted(idInvalid, "rule", func() (bool, error) { return true, nil }); err == nil {
+		t.Error("rule still listed: got nil, want error")
+	}
+	other := &ErrBadRequest{Body: `{"meta":{"rc":"error","msg":"api.err.InvalidPayload"},"data":[]}`}
+	if err := confirmDeleted(other, "rule", func() (bool, error) {
+		t.Error("collection listed for another bad request")
+		return false, nil
+	}); err != other {
+		t.Errorf("other bad request: got %v, want it back", err)
+	}
+}
+
+func TestDeleteFirewallRuleAlreadyGone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"meta":{"rc":"error","msg":"api.err.IdInvalid"},"data":[]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"meta":{"rc":"ok"},"data":[]}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "test-key")
+	if err := c.DeleteFirewallRule(context.Background(), "default", "65a1b2c3d4e5f60718293a4b"); err != nil {
+		t.Fatalf("delete of a rule the controller no longer holds: %v", err)
+	}
+}
+
 // ---- Additional endpoint coverage ------------------------------------------
 
 func TestUpdateFirewallRule(t *testing.T) {
@@ -926,6 +1014,40 @@ func TestUpdateZonePolicy(t *testing.T) {
 	p := ZonePolicy{ID: policyID, Name: "updated", Action: "BLOCK", SrcZone: testZoneExternal, DstZone: testZoneInternal}
 	if err := updateZonePolicyV1(context.Background(), c, siteID, p); err != nil {
 		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+// reportFlowEnabled (UniFi Network 11) is read back and written as read; a
+// policy whose controller does not report it sends nothing, so controllers
+// before 11 never see the field.
+func TestZonePolicyReportFlowEnabledRoundTrip(t *testing.T) {
+	var wire apiV1Policy
+	if err := json.Unmarshal([]byte(`{"id":"p1","name":"n","action":{"type":"BLOCK"},"source":{"zoneId":"a"},"destination":{"zoneId":"b"},"ipProtocolScope":{"ipVersion":"IPV4"},"reportFlowEnabled":false}`), &wire); err != nil {
+		t.Fatal(err)
+	}
+	model := v1PolicyToModel(wire)
+	if model.ReportFlowEnabled == nil || *model.ReportFlowEnabled {
+		t.Fatalf("ReportFlowEnabled = %v, want false read back", model.ReportFlowEnabled)
+	}
+	for name, body := range map[string]any{"create": modelToV1Policy(model), "update": modelToV1PolicyUpdate(model)} {
+		out, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(out), `"reportFlowEnabled":false`) {
+			t.Errorf("%s body %s does not carry reportFlowEnabled=false", name, out)
+		}
+	}
+
+	model.ReportFlowEnabled = nil
+	for name, body := range map[string]any{"create": modelToV1Policy(model), "update": modelToV1PolicyUpdate(model)} {
+		out, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(out), "reportFlowEnabled") {
+			t.Errorf("%s body %s sends reportFlowEnabled although the controller never reported it", name, out)
+		}
 	}
 }
 

@@ -53,10 +53,10 @@ func TestDrainRetainsFailedPolicyAndGroup(t *testing.T) {
 	ruleName := "crowdsec-drop-v4-0"
 	ctrl.SetGroups(testSite, []controller.FirewallGroup{{ID: "group-1", Name: groupName, GroupType: "address-group", GroupMembers: []string{"198.51.100.10"}}})
 	ctrl.SetRules(testSite, []controller.FirewallRule{{ID: "rule-1", Name: ruleName}})
-	if err := store.SetGroup(groupName, storage.GroupRecord{UnifiID: "group-1", Site: testSite, Members: []string{"198.51.100.10"}}); err != nil {
+	if err := store.SetGroup(cacheKey(testSite, groupName), storage.GroupRecord{UnifiID: "group-1", Site: testSite, Members: []string{"198.51.100.10"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetPolicy(ruleName, storage.PolicyRecord{UnifiID: "rule-1", Site: testSite, Mode: "legacy"}); err != nil {
+	if err := store.SetPolicy(cacheKey(testSite, ruleName), storage.PolicyRecord{UnifiID: "rule-1", Site: testSite, Mode: "legacy"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := mgr.PrepareDrain(ctx, []string{testSite}); err != nil {
@@ -69,7 +69,7 @@ func TestDrainRetainsFailedPolicyAndGroup(t *testing.T) {
 	if got := ctrl.Calls("DeleteFirewallGroup"); got != 0 {
 		t.Fatalf("deleted %d groups while a rule still references them", got)
 	}
-	if rec, _ := store.GetPolicy(ruleName); rec == nil {
+	if rec, _ := store.GetPolicy(cacheKey(testSite, ruleName)); rec == nil {
 		t.Fatal("failed policy lost from storage")
 	}
 	groups, err := store.ListGroups()
@@ -79,7 +79,7 @@ func TestDrainRetainsFailedPolicyAndGroup(t *testing.T) {
 	if err := mgr.Drain(ctx, []string{testSite}); err != nil {
 		t.Fatalf("retry drain: %v", err)
 	}
-	if rec, _ := store.GetPolicy(ruleName); rec != nil {
+	if rec, _ := store.GetPolicy(cacheKey(testSite, ruleName)); rec != nil {
 		t.Fatal("deleted policy remains in storage")
 	}
 	groups, err = store.ListGroups()
@@ -155,6 +155,50 @@ func TestOrphanCleanupKeepsUnownedReferences(t *testing.T) {
 				policies, err := ctrl.ListZonePolicies(ctx, testSite)
 				if err != nil || len(policies) != 1 || policies[0].ID != "user" {
 					t.Fatalf("orphan cleanup removed user policy: %+v, %v", policies, err)
+				}
+			}
+		})
+	}
+}
+
+func TestOrphanCleanupForgetsDeletedObjects(t *testing.T) {
+	ctx := context.Background()
+	for _, mode := range []string{"legacy", "zone"} {
+		t.Run(mode, func(t *testing.T) {
+			mgr, ctrl, store := newTestManager(t, defaultManagerConfig())
+			impl := mgr.(*managerImpl)
+			impl.siteMode[testSite] = mode
+			groupID := "orphan-group"
+			name := "crowdsec-drop-v4-0"
+			if mode == "legacy" {
+				ctrl.SetRules(testSite, []controller.FirewallRule{
+					{ID: "managed", Name: name, Action: "drop", Description: "test", SrcFirewallGroupIDs: []string{groupID}},
+				})
+			} else {
+				name = "crowdsec-policy-wan-lan-v4-0"
+				ctrl.SetPolicies(testSite, []controller.ZonePolicy{
+					{ID: "managed", Name: name, Action: "BLOCK", Description: "test", TrafficMatchingListIDs: []string{groupID}},
+				})
+			}
+			// Another site's record under the same name must stay.
+			if err := setCachedPolicy(store, "other", name, storage.PolicyRecord{UnifiID: "other-id", Site: "other", Mode: mode}); err != nil {
+				t.Fatal(err)
+			}
+			if err := setCachedPolicy(store, testSite, name, storage.PolicyRecord{UnifiID: "managed", Site: testSite, Mode: mode}); err != nil {
+				t.Fatal(err)
+			}
+
+			impl.deleteOrphanedReferencingObjects(ctx, testSite, mode, groupID)
+
+			if rec, err := getCachedPolicy(store, testSite, name); err != nil || rec != nil {
+				t.Fatalf("record of the deleted object kept: %+v, %v", rec, err)
+			}
+			if rec, err := getCachedPolicy(store, "other", name); err != nil || rec == nil {
+				t.Fatalf("other site's record removed: %+v, %v", rec, err)
+			}
+			if mode == "legacy" {
+				if err := impl.legacyMgr.DeleteRules(ctx, testSite); err != nil {
+					t.Fatalf("drain after the cleanup: %v", err)
 				}
 			}
 		})
@@ -375,8 +419,8 @@ func TestReconcile_AddsMissing(t *testing.T) {
 	}
 
 	// Put an IP in the ban list.
-	if err := store.BanRecord("10.0.0.99", time.Time{}, false); err != nil {
-		t.Fatalf("BanRecord: %v", err)
+	if err := testutil.PutBan(store, "10.0.0.99", time.Time{}, false); err != nil {
+		t.Fatalf("PutBan: %v", err)
 	}
 
 	result, err := mgr.Reconcile(context.Background(), []string{testSite})
@@ -411,7 +455,7 @@ func TestReconcile_RemovesExtra(t *testing.T) {
 	v4 := mi.v4Mgrs[testSite]
 	mi.mu.RUnlock()
 
-	if _, _, err := v4.Add(context.Background(), "10.0.0.99"); err != nil {
+	if _, err := v4.Add(context.Background(), "10.0.0.99"); err != nil {
 		t.Fatalf("direct shard Add: %v", err)
 	}
 	// Flush to create the shard Active in UniFi so Reconcile's sync can update it.
@@ -534,7 +578,7 @@ func TestSyncDirty_DoesNotDrainDonorBeforeTargetFlush(t *testing.T) {
 		{ID: "group-1", Name: "crowdsec-block-v4-1", GroupMembers: []string{"2.2.2.2"}},
 	})
 	for _, ip := range []string{"1.1.1.1", "2.2.2.2"} {
-		if err := store.BanRecord(ip, time.Time{}, false); err != nil {
+		if err := testutil.PutBan(store, ip, time.Time{}, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -571,7 +615,7 @@ func TestSyncDirty_RetriesFailedDonorPolicyDeletion(t *testing.T) {
 		{ID: "group-1", Name: "crowdsec-block-v4-1", GroupMembers: []string{"2.2.2.2"}},
 	})
 	for _, ip := range []string{"1.1.1.1", "2.2.2.2"} {
-		if err := store.BanRecord(ip, time.Time{}, false); err != nil {
+		if err := testutil.PutBan(store, ip, time.Time{}, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -624,11 +668,11 @@ func TestReconcile_ActivationCallbackFires(t *testing.T) {
 	}
 
 	// Two IPs: first fills shard 0, second triggers shard 1 (Pending).
-	if err := store.BanRecord("10.0.0.1", time.Time{}, false); err != nil {
-		t.Fatalf("BanRecord: %v", err)
+	if err := testutil.PutBan(store, "10.0.0.1", time.Time{}, false); err != nil {
+		t.Fatalf("PutBan: %v", err)
 	}
-	if err := store.BanRecord("10.0.0.2", time.Time{}, false); err != nil {
-		t.Fatalf("BanRecord: %v", err)
+	if err := testutil.PutBan(store, "10.0.0.2", time.Time{}, false); err != nil {
+		t.Fatalf("PutBan: %v", err)
 	}
 
 	result, err := mgr.Reconcile(context.Background(), []string{testSite})
@@ -666,8 +710,8 @@ func TestReconcile_ContextCancellation(t *testing.T) {
 	// Populate the store with many IPs.
 	for i := 0; i < 50; i++ {
 		ip := fmt.Sprintf("10.0.%d.%d", i/256, i%256)
-		if err := store.BanRecord(ip, time.Time{}, false); err != nil {
-			t.Fatalf("BanRecord: %v", err)
+		if err := testutil.PutBan(store, ip, time.Time{}, false); err != nil {
+			t.Fatalf("PutBan: %v", err)
 		}
 	}
 
@@ -702,8 +746,8 @@ func TestReconcile_FlushErrorSurfaced(t *testing.T) {
 	}
 
 	// Put an IP in the ban list so the shard becomes dirty.
-	if err := store.BanRecord("10.0.0.99", time.Time{}, false); err != nil {
-		t.Fatalf("BanRecord: %v", err)
+	if err := testutil.PutBan(store, "10.0.0.99", time.Time{}, false); err != nil {
+		t.Fatalf("PutBan: %v", err)
 	}
 
 	// Make the UpdateFirewallGroup call fail (called during the flush after adding).
@@ -727,7 +771,7 @@ func TestReconcile_RestoresMissingZonePolicy(t *testing.T) {
 		ID: "tml-3", Name: "crowdsec-block-v4-3", Type: "IPV4_ADDRESSES",
 		Items: []controller.TrafficMatchingListItem{{Type: "IP_ADDRESS", Value: "1.2.3.4"}},
 	}})
-	if err := store.BanRecord("1.2.3.4", time.Time{}, false); err != nil {
+	if err := testutil.PutBan(store, "1.2.3.4", time.Time{}, false); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
@@ -756,7 +800,7 @@ func TestReconcile_RestoresPoliciesDespiteFlushFailure(t *testing.T) {
 		ID: "tml-3", Name: "crowdsec-block-v4-3", Type: "IPV4_ADDRESSES",
 		Items: []controller.TrafficMatchingListItem{{Type: "IP_ADDRESS", Value: "1.2.3.4"}},
 	}})
-	if err := store.BanRecord("1.2.3.4", time.Time{}, false); err != nil {
+	if err := testutil.PutBan(store, "1.2.3.4", time.Time{}, false); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
@@ -764,7 +808,7 @@ func TestReconcile_RestoresPoliciesDespiteFlushFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctrl.SetPolicies(testSite, nil)
-	if err := store.BanRecord("1.2.3.5", time.Time{}, false); err != nil {
+	if err := testutil.PutBan(store, "1.2.3.5", time.Time{}, false); err != nil {
 		t.Fatal(err)
 	}
 	ctrl.SetError("UpdateTrafficMatchingList", errTest("simulated flush failure"))
@@ -829,8 +873,8 @@ func TestDryRunNoWrites(t *testing.T) {
 	}
 
 	// Populate bbolt with a fake ban entry so reconcile has something to do
-	if err := store.BanRecord("203.0.113.42", time.Now().Add(1*time.Hour), false); err != nil {
-		t.Fatalf("BanRecord: %v", err)
+	if err := testutil.PutBan(store, "203.0.113.42", time.Now().Add(1*time.Hour), false); err != nil {
+		t.Fatalf("PutBan: %v", err)
 	}
 
 	// Reconcile should NOT panic (dry run gates all writes)
@@ -949,6 +993,10 @@ func (pc *PanicController) DeleteTrafficMatchingList(ctx context.Context, site s
 
 func (pc *PanicController) HasFeature(ctx context.Context, site string, feature string) (bool, error) {
 	return false, nil
+}
+
+func (pc *PanicController) ApplicationVersion(ctx context.Context, site string) (string, error) {
+	return "10.6.106", nil
 }
 
 func (pc *PanicController) Ping(ctx context.Context) error {

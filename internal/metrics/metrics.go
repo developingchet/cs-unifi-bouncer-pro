@@ -22,20 +22,29 @@ var (
 		Help:      "Decisions rejected per filter stage.",
 	}, []string{"stage", "reason"})
 
-	// APICalls counts raw UniFi API calls.
+	// ZoneBlockPolicies counts the zone block policies the bouncer keeps on the
+	// controller, by direction: inbound (ZONE_PAIRS) or egress (EGRESS_ZONE_PAIRS).
+	ZoneBlockPolicies = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "zone_block_policies",
+		Help:      "Zone block policies the bouncer keeps on the controller, by direction (inbound or egress) and site.",
+	}, []string{"direction", "site"})
+
+	// APICalls counts raw UniFi API calls. site is empty for calls that
+	// belong to no site, such as a ping or the site list.
 	APICalls = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "api_calls_total",
-		Help:      "Raw UniFi API call counts.",
-	}, []string{"endpoint", "status"})
+		Help:      "Raw UniFi API call counts, by endpoint, status class and site.",
+	}, []string{"endpoint", "status", "site"})
 
-	// APIDuration records UniFi API latency.
+	// APIDuration records UniFi API latency, by endpoint and site.
 	APIDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace,
 		Name:      "api_duration_seconds",
-		Help:      "UniFi API call latency in seconds.",
+		Help:      "UniFi API call latency in seconds, by endpoint and site.",
 		Buckets:   []float64{0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0},
-	}, []string{"endpoint"})
+	}, []string{"endpoint", "site"})
 
 	// AuthErrors counts re-auth calls that failed.
 	AuthErrors = promauto.NewCounter(prometheus.CounterOpts{
@@ -151,7 +160,7 @@ var (
 	DecisionLatency = promauto.NewHistogram(prometheus.HistogramOpts{
 		Namespace: namespace,
 		Name:      "decision_latency_seconds",
-		Help:      "Time from decision received (post-filter) to successful UniFi API write.",
+		Help:      "Time from a ban decision being received to its ban being recorded in the database and its shard, before the controller write.",
 		Buckets:   []float64{0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0},
 	})
 

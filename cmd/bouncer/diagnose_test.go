@@ -90,12 +90,47 @@ func TestProbeLAPI(t *testing.T) {
 	}
 }
 
+func TestDiagnoseVersion(t *testing.T) {
+	tests := []struct {
+		name         string
+		mode         string
+		version      string
+		versionErr   error
+		wantStatus   string
+		wantZoneOnly bool
+	}{
+		{name: "10.x", mode: "auto", version: "10.6.106", wantStatus: "PASS"},
+		{name: "11.x in auto mode", mode: "auto", version: "11.0.83", wantStatus: "PASS", wantZoneOnly: true},
+		{name: "11.x in legacy mode", mode: "legacy", version: "11.0.83", wantStatus: "FAIL", wantZoneOnly: true},
+		{name: "unreadable", mode: "auto", versionErr: errors.New("HTTP 404"), wantStatus: "WARN"},
+		{name: "unparsable", mode: "auto", version: "unknown", wantStatus: "WARN"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := testutil.NewMockController()
+			ctrl.SetVersion(tt.version)
+			if tt.versionErr != nil {
+				ctrl.SetError("ApplicationVersion", tt.versionErr)
+			}
+			cfg := &config.Config{FirewallMode: tt.mode, UnifiSites: []string{"default"}}
+			check, zoneOnly := diagnoseVersion(context.Background(), ctrl, cfg)
+			if check.status != tt.wantStatus {
+				t.Errorf("status = %q, want %q (%+v)", check.status, tt.wantStatus, check)
+			}
+			if zoneOnly != tt.wantZoneOnly {
+				t.Errorf("zoneOnly = %v, want %v", zoneOnly, tt.wantZoneOnly)
+			}
+		})
+	}
+}
+
 func TestDiagnoseSiteZones(t *testing.T) {
 	zones := []controller.Zone{{ID: "z1", Name: "Internal"}}
 	tests := []struct {
 		name         string
 		mode         string
 		hasZones     bool
+		zoneOnly     bool
 		featureErr   error
 		discoverErr  error
 		wantOK       bool
@@ -107,6 +142,8 @@ func TestDiagnoseSiteZones(t *testing.T) {
 		{name: "auto detection error fails", mode: "auto", featureErr: errors.New("needs API key"), wantStatus: "FAIL"},
 		{name: "zone mode lists zones", mode: "zone", wantOK: true, wantStatus: "", wantDiscover: true},
 		{name: "zone listing error fails", mode: "zone", discoverErr: errors.New("403"), wantStatus: "FAIL", wantDiscover: true},
+		{name: "auto site without zones on a zone-only release fails", mode: "auto", zoneOnly: true, wantStatus: "FAIL"},
+		{name: "auto zone site on a zone-only release lists zones", mode: "auto", hasZones: true, zoneOnly: true, wantOK: true, wantStatus: "", wantDiscover: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -120,7 +157,7 @@ func TestDiagnoseSiteZones(t *testing.T) {
 				ctrl.SetError("DiscoverZones", tt.discoverErr)
 			}
 
-			checks, ok := diagnoseSiteZones(context.Background(), ctrl, tt.mode, "default")
+			checks, ok := diagnoseSiteZones(context.Background(), ctrl, tt.mode, "default", tt.zoneOnly)
 			if ok != tt.wantOK {
 				t.Errorf("ok = %v, want %v (%+v)", ok, tt.wantOK, checks)
 			}

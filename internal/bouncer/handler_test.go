@@ -82,8 +82,19 @@ func (m *mockFirewallManager) ZoneManager() *firewall.ZoneManager {
 	return nil
 }
 
-func newTestHandler(store storage.Store, fwMgr firewall.Manager, cfg *config.Config) JobHandler {
-	return makeJobHandler(store, banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun), cfg, nopRecorder{}, zerolog.Nop())
+func (m *mockFirewallManager) CheckModeChange(_ context.Context) error {
+	return nil
+}
+
+func (m *mockFirewallManager) SaveShardRecords() error { return nil }
+
+// newTestHandler returns a function that runs one job through the daemon's
+// job handler.
+func newTestHandler(store storage.Store, fwMgr firewall.Manager, cfg *config.Config) func(context.Context, SyncJob) error {
+	handler := makeJobHandler(store, banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun), cfg, nopRecorder{}, zerolog.Nop())
+	return func(ctx context.Context, job SyncJob) error {
+		return handler(ctx, []SyncJob{job})[0]
+	}
 }
 
 // testCfg returns a minimal config suitable for handler tests.
@@ -103,7 +114,7 @@ func TestJobHandler_BanAlreadyExists(t *testing.T) {
 	fwMgr := &mockFirewallManager{}
 
 	// Pre-record a ban
-	_ = store.BanRecord("1.2.3.4", time.Now().Add(time.Hour), false)
+	_ = testutil.PutBan(store, "1.2.3.4", time.Now().Add(time.Hour), false)
 
 	handler := newTestHandler(store, fwMgr, cfg)
 	err := handler(context.Background(), SyncJob{Action: "ban", Source: "crowdsec:id:1", IP: "1.2.3.4"})
@@ -163,10 +174,10 @@ func TestJobHandler_ApplyUnbanSuccess(t *testing.T) {
 	cfg := testCfg()
 	fwMgr := &mockFirewallManager{}
 
-	_ = store.BanRecord("10.20.30.40", time.Now().Add(time.Hour), false)
+	_ = testutil.PutBan(store, "10.20.30.40", time.Now().Add(time.Hour), false)
 
 	handler := newTestHandler(store, fwMgr, cfg)
-	if err := handler(context.Background(), SyncJob{Action: "delete", IP: "10.20.30.40", Source: "legacy"}); err != nil {
+	if err := handler(context.Background(), SyncJob{Action: "delete", IP: "10.20.30.40", Source: testutil.BanSource}); err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
 	if fwMgr.applyUnbanCalls != 1 {
@@ -199,9 +210,9 @@ func TestJobHandler_StorageError_Fatal(t *testing.T) {
 	cfg := testCfg()
 	fwMgr := &mockFirewallManager{}
 
-	// Inject BanRecord error â bbolt-first ordering means a write failure must
-	// abort the job so the UniFi write is never attempted without a bbolt record.
-	store.SetError("BanRecord", errors.New("storage failure"))
+	// A failed ban write must abort the job, so the firewall is never changed
+	// without a ban record.
+	store.SetError("BanPutMany", errors.New("storage failure"))
 
 	handler := newTestHandler(store, fwMgr, cfg)
 	job := SyncJob{
@@ -212,6 +223,9 @@ func TestJobHandler_StorageError_Fatal(t *testing.T) {
 	}
 	if err := handler(context.Background(), job); err == nil {
 		t.Error("expected error from bbolt write failure, got nil")
+	}
+	if fwMgr.applyBanCalls != 0 {
+		t.Errorf("ApplyBan called %d times after the ban write failed", fwMgr.applyBanCalls)
 	}
 }
 
@@ -416,7 +430,7 @@ func TestJobHandler_BanTTLCapNotAppliedWhenShort(t *testing.T) {
 }
 
 // TestJobHandler_DryRunNoBboltWrites verifies that in DRY_RUN mode, the handler
-// does not write bans to bbolt (store.BanRecord/BanDelete are skipped).
+// does not write bans to bbolt (ban writes and deletes are skipped).
 func TestJobHandler_DryRunNoBboltWrites(t *testing.T) {
 	store := testutil.NewMockStore()
 	cfg := &config.Config{
@@ -439,7 +453,7 @@ func TestJobHandler_DryRunNoBboltWrites(t *testing.T) {
 		t.Fatalf("handler in dry run: %v", err)
 	}
 
-	// Verify the IP is NOT in bbolt (DRY_RUN skips BanRecord)
+	// Verify the IP is NOT in bbolt (DRY_RUN skips the ban write)
 	exists, err := store.BanExists("203.0.113.100")
 	if err != nil {
 		t.Fatalf("BanExists: %v", err)
@@ -450,8 +464,8 @@ func TestJobHandler_DryRunNoBboltWrites(t *testing.T) {
 
 	// Also test a delete job (unban)
 	// First, manually put something in bbolt to simulate a pre-existing ban
-	if err := store.BanRecord("198.51.100.1", time.Now().Add(time.Hour), false); err != nil {
-		t.Fatalf("BanRecord setup: %v", err)
+	if err := testutil.PutBan(store, "198.51.100.1", time.Now().Add(time.Hour), false); err != nil {
+		t.Fatalf("PutBan setup: %v", err)
 	}
 
 	deleteJob := SyncJob{

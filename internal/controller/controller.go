@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -44,9 +45,14 @@ type ZonePolicy struct {
 	TrafficMatchingListIDs []string // proxy API: source.ip_group_id (single ID)
 	ConnectionStateFilter  []string // e.g. ["NEW", "INVALID"]
 	LoggingEnabled         bool
-	SrcPortTMLID           string // TML of type "PORTS" for source port filter (empty = any)
-	DstPortTMLID           string // TML of type "PORTS" for destination port filter (empty = any)
-	DstIPTMLID             string // TML of type IPV4_ADDRESSES or IPV6_ADDRESSES for dst IP filter (empty = any)
+	// ReportFlowEnabled is whether matches show in Insights Flows (UniFi
+	// Network 11 and later; nil when the controller does not report it). The
+	// bouncer does not manage it: writes carry the value the policy already
+	// has, so a setting made in the UniFi UI survives repairs.
+	ReportFlowEnabled *bool
+	SrcPortTMLID      string // TML of type "PORTS" for source port filter (empty = any)
+	DstPortTMLID      string // TML of type "PORTS" for destination port filter (empty = any)
+	DstIPTMLID        string // TML of type IPV4_ADDRESSES or IPV6_ADDRESSES for dst IP filter (empty = any)
 }
 
 // Zone represents a UniFi network zone (topology discovery).
@@ -59,11 +65,10 @@ type Zone struct {
 
 // TrafficMatchingList represents an integration v1 IP/port list (zone mode).
 type TrafficMatchingList struct {
-	ID        string
-	Type      string // "IPV4_ADDRESSES", "IPV6_ADDRESSES", "PORTS"
-	Name      string
-	GroupType string // legacy compat hint: "address-group", "ipv6-address-group"
-	Items     []TrafficMatchingListItem
+	ID    string
+	Type  string // "IPV4_ADDRESSES", "IPV6_ADDRESSES", "PORTS"
+	Name  string
+	Items []TrafficMatchingListItem
 }
 
 // TrafficMatchingListItem is one entry in a TrafficMatchingList.
@@ -110,6 +115,11 @@ type Controller interface {
 
 	// Feature Detection
 	HasFeature(ctx context.Context, site string, feature string) (bool, error)
+
+	// ApplicationVersion reports the UniFi Network application version, such
+	// as "10.6.106". site is used only by session logins, which read it from
+	// that site's sysinfo.
+	ApplicationVersion(ctx context.Context, site string) (string, error)
 
 	// Session
 	Ping(ctx context.Context) error
@@ -162,6 +172,21 @@ func (e *ErrBadRequest) Error() string {
 	return fmt.Sprintf("bad request: %s", e.Body)
 }
 
+// classicIDInvalid reports whether err is the classic API's 400 for an object
+// ID it does not hold.
+func classicIDInvalid(err error) bool {
+	var bad *ErrBadRequest
+	if !errors.As(err, &bad) {
+		return false
+	}
+	var body struct {
+		Meta struct {
+			Msg string `json:"msg"`
+		} `json:"meta"`
+	}
+	return json.Unmarshal([]byte(bad.Body), &body) == nil && body.Meta.Msg == "api.err.IdInvalid"
+}
+
 // ErrConflict is returned when a create operation would cause a duplicate.
 type ErrConflict struct {
 	Msg string
@@ -177,13 +202,15 @@ func (e *ErrConflict) Error() string {
 // the caller forget an object that still exists. So when delErr wraps
 // *ErrNotFound, the collection is listed through stillListed and the delete
 // counts as done only if the listing succeeds and the object is not in it.
+// The classic API answers a delete of an ID it no longer holds with a 400
+// api.err.IdInvalid instead of a 404, and is confirmed the same way.
 // Every other delErr, including nil, is returned as it is, so a delete that
 // succeeds costs no extra request. The errors returned for an unconfirmed
 // 404 deliberately do not wrap *ErrNotFound: callers read that type as
 // "already gone".
 func confirmDeleted(delErr error, what string, stillListed func() (bool, error)) error {
 	var nf *ErrNotFound
-	if !errors.As(delErr, &nf) {
+	if !errors.As(delErr, &nf) && !classicIDInvalid(delErr) {
 		return delErr
 	}
 	listed, err := stillListed()

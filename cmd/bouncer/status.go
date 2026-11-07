@@ -9,15 +9,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sort"
-	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/bouncer"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
@@ -48,7 +45,7 @@ snapshot from the bouncer's health server instead.`,
 	cmd.RunE = func(*cobra.Command, []string) error {
 		return withReadOnlyStore(dataDir, printStatusSummary)
 	}
-	cmd.AddCommand(statusBansCmd(&dataDir), statusIPCmd(&dataDir), statusHistoryCmd(&dataDir))
+	cmd.AddCommand(statusBansCmd(&dataDir), statusIPCmd(&dataDir), statusHistoryCmd(&dataDir), statusSyncCmd(&dataDir))
 	return cmd
 }
 
@@ -97,22 +94,17 @@ func withSnapshotStore(dataDir string, fn func(storage.Store) error) error {
 // fetchDBSnapshot saves the running bouncer's database snapshot next to the
 // database and returns its path.
 func fetchDBSnapshot(ctx context.Context, dataDir string) (string, error) {
-	healthURL, err := localHealthURL(config.HealthAddrFromEnv())
+	snapshotURL, token, err := statusEndpoint(dataDir, bouncer.DBSnapshotPath)
 	if err != nil {
 		return "", err
 	}
-	token, err := os.ReadFile(filepath.Join(dataDir, bouncer.SnapshotTokenFile))
-	if err != nil {
-		return "", fmt.Errorf("read status token: %w", err)
-	}
-	snapshotURL := strings.TrimSuffix(healthURL, "/healthz") + bouncer.DBSnapshotPath
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, snapshotURL, nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set(bouncer.SnapshotTokenHeader, strings.TrimSpace(string(token)))
+	req.Header.Set(bouncer.SnapshotTokenHeader, token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err

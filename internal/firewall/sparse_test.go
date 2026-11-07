@@ -43,7 +43,7 @@ func TestSparseShards_NewShardNeverReusesAnIndex(t *testing.T) {
 	}
 
 	for i := 1; i <= 4; i++ {
-		if _, _, err := sm.Add(ctx, fmt.Sprintf("203.0.113.%d", i)); err != nil {
+		if _, err := sm.Add(ctx, fmt.Sprintf("203.0.113.%d", i)); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
 	}
@@ -131,7 +131,7 @@ func TestAdd_ReportsEachNewShardOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, idx, err := sm.Add(context.Background(), fmt.Sprintf("203.0.113.%d", i+1))
+			idx, err := sm.Add(context.Background(), fmt.Sprintf("203.0.113.%d", i+1))
 			if err != nil {
 				t.Error(err)
 			}

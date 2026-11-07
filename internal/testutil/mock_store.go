@@ -2,7 +2,6 @@ package testutil
 
 import (
 	"sync"
-	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
 )
@@ -19,6 +18,9 @@ type MockStore struct {
 	// Error injection: method -> next error (consumed on first call)
 	errors map[string]error
 
+	// calls counts the calls of each method.
+	calls map[string]int
+
 	// SizeBytes value returned by SizeBytes()
 	Size int64
 }
@@ -30,6 +32,7 @@ func NewMockStore() *MockStore {
 		groups:   make(map[string]storage.GroupRecord),
 		policies: make(map[string]storage.PolicyRecord),
 		errors:   make(map[string]error),
+		calls:    make(map[string]int),
 		Size:     1024,
 	}
 }
@@ -41,9 +44,24 @@ func (m *MockStore) SetError(method string, err error) {
 	m.errors[method] = err
 }
 
-// check returns and clears any pending injected error for the named method.
-// Must be called with m.mu held.
+// Calls returns how many times the named method has been called.
+func (m *MockStore) Calls(method string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls[method]
+}
+
+// ResetCalls sets every call count back to zero.
+func (m *MockStore) ResetCalls() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clear(m.calls)
+}
+
+// check counts a call of the named method and returns and clears any pending
+// injected error for it. Must be called with m.mu held.
 func (m *MockStore) check(method string) error {
+	m.calls[method]++
 	err := m.errors[method]
 	delete(m.errors, method)
 	return err
@@ -70,21 +88,6 @@ func (m *MockStore) BanExists(ip string) (bool, error) {
 	return ok, nil
 }
 
-func (m *MockStore) BanRecord(ip string, expiresAt time.Time, ipv6 bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.check("BanRecord"); err != nil {
-		return err
-	}
-	m.bans[ip] = storage.BanEntry{
-		RecordedAt: time.Now().UTC(),
-		ExpiresAt:  expiresAt.UTC(),
-		IPv6:       ipv6,
-		Claims:     map[string]time.Time{"legacy": expiresAt.UTC()},
-	}
-	return nil
-}
-
 func (m *MockStore) BanGet(ip string) (*storage.BanEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -103,9 +106,6 @@ func (m *MockStore) BanPut(ip string, entry storage.BanEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.check("BanPut"); err != nil {
-		return err
-	}
-	if err := m.check("BanRecord"); err != nil {
 		return err
 	}
 	entry.Claims = copyMap(entry.Claims)
@@ -143,6 +143,28 @@ func (m *MockStore) BanList() (map[string]storage.BanEntry, error) {
 		return nil, err
 	}
 	return copyMap(m.bans), nil
+}
+
+func (m *MockStore) BanCount() (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.check("BanCount"); err != nil {
+		return 0, err
+	}
+	return len(m.bans), nil
+}
+
+func (m *MockStore) BanKeys() (map[string]struct{}, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.check("BanKeys"); err != nil {
+		return nil, err
+	}
+	keys := make(map[string]struct{}, len(m.bans))
+	for ip := range m.bans {
+		keys[ip] = struct{}{}
+	}
+	return keys, nil
 }
 
 // --- Group cache ------------------------------------------------------------
@@ -244,6 +266,16 @@ func (m *MockStore) RecordEvent(e storage.EventEntry) error {
 		return err
 	}
 	m.events = append(m.events, e)
+	return nil
+}
+
+func (m *MockStore) RecordEvents(events []storage.EventEntry) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.check("RecordEvents"); err != nil {
+		return err
+	}
+	m.events = append(m.events, events...)
 	return nil
 }
 

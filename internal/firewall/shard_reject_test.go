@@ -2,8 +2,10 @@ package firewall
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/testutil"
@@ -132,6 +134,82 @@ func TestSyncShard_RefusedMemberDoesNotRewriteTheShardEveryTick(t *testing.T) {
 	}
 	if shard.IPs.IsDirty() {
 		t.Error("shard dirty again after the follow-up write")
+	}
+}
+
+// TestRefusedMemberIsRetriedWhenTheHoldLapses: a refusal is not permanent.
+// Once refusalHold passes, drift detection reports the member missing and the
+// next write offers it again; a controller that accepts it then enforces it.
+func TestRefusedMemberIsRetriedWhenTheHoldLapses(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	ctrl.RefuseGroupMember("198.51.100.66")
+	sm := NewShardManager(testSite, false, 10, testNamer(t), ctrl, testutil.NewMockStore(), zerolog.Nop(), 0, false, "legacy")
+	clock := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	sm.now = func() time.Time { return clock }
+	ctx := context.Background()
+	for _, ip := range []string{"198.51.100.1", "198.51.100.66"} {
+		if err := sm.AddIP(ctx, ip); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sm.FlushDirty(ctx); err != nil {
+		t.Fatalf("FlushDirty: %v", err)
+	}
+	groupMembers := func() []string {
+		groups, err := ctrl.ListFirewallGroups(ctx, testSite)
+		if err != nil || len(groups) != 1 {
+			t.Fatalf("groups = %+v, %v", groups, err)
+		}
+		return groups[0].GroupMembers
+	}
+	if got := groupMembers(); slices.Contains(got, "198.51.100.66") {
+		t.Fatalf("refused member written: %v", got)
+	}
+
+	clock = clock.Add(refusalHold - time.Minute)
+	if missing, _, err := sm.MarkRemoteDrift(ctx); err != nil || missing != 0 {
+		t.Fatalf("drift before the hold lapses = %d missing, %v; want 0", missing, err)
+	}
+
+	ctrl.AcceptGroupMember("198.51.100.66")
+	clock = clock.Add(2 * time.Minute)
+	if missing, _, err := sm.MarkRemoteDrift(ctx); err != nil || missing != 1 {
+		t.Fatalf("drift after the hold lapses = %d missing, %v; want 1", missing, err)
+	}
+	if err := sm.FlushDirty(ctx); err != nil {
+		t.Fatalf("FlushDirty after the hold: %v", err)
+	}
+	if got := groupMembers(); !slices.Contains(got, "198.51.100.66") {
+		t.Fatalf("member not offered again after the hold lapsed: %v", got)
+	}
+	if len(sm.refusedMembers(sm.fam.Shards[0])) != 0 {
+		t.Error("lapsed refusal still listed")
+	}
+}
+
+// TestRefusalsPerShardAreCapped: a controller that refuses member after
+// member does not get to empty the shard; past maxRefusedPerShard the write
+// fails and the remaining members stay in the desired set.
+func TestRefusalsPerShardAreCapped(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	sm := NewShardManager(testSite, false, 50, testNamer(t), ctrl, testutil.NewMockStore(), zerolog.Nop(), 0, false, "legacy")
+	ctx := context.Background()
+	for i := range maxRefusedPerShard + 5 {
+		ip := fmt.Sprintf("198.51.100.%d", i+1)
+		ctrl.RefuseGroupMember(ip)
+		if err := sm.AddIP(ctx, ip); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 3 {
+		_ = sm.FlushDirty(ctx)
+	}
+	shard := sm.fam.Shards[0]
+	if got := len(sm.refusedMembers(shard)); got != maxRefusedPerShard {
+		t.Fatalf("refused members = %d, want the cap %d", got, maxRefusedPerShard)
+	}
+	if !shard.IPs.IsDirty() {
+		t.Error("shard marked written although the controller refused the write")
 	}
 }
 

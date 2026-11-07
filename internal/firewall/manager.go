@@ -61,6 +61,15 @@ type Manager interface {
 
 	// ZoneManager returns the underlying ZoneManager, or nil in legacy mode.
 	ZoneManager() *ZoneManager
+
+	// CheckModeChange returns a *ModeChangeError when a site loaded in legacy
+	// mode now needs zone mode. Other failures are retried on the next call.
+	CheckModeChange(ctx context.Context) error
+
+	// SaveShardRecords writes the shard members that syncs flushed but left
+	// out of the group records, which are saved at most every 10 minutes and
+	// at each reconcile. Call it before closing the store.
+	SaveShardRecords() error
 }
 
 // ManagerConfig holds all firewall manager configuration.
@@ -87,6 +96,9 @@ type ManagerConfig struct {
 	// Nil = no-op. These are called from attachShardCallbacks.
 	OnCircuitBreakerOpen  func()
 	OnCircuitBreakerClose func()
+
+	// ShardEvents receives shard create failures and refused ban entries.
+	ShardEvents ShardEvents
 }
 
 type managerImpl struct {
@@ -109,6 +121,15 @@ type managerImpl struct {
 	// Cached resolved mode per site (avoids repeated HasFeature API calls)
 	siteMode map[string]string
 	siteMu   sync.RWMutex
+	// convertedLeft marks zone sites where policies converted from legacy
+	// rules were kept at startup (guarded by siteMu).
+	convertedLeft map[string]bool
+
+	// The controller's Network version, read once at load (networkVersion).
+	versionMu    sync.Mutex
+	versionRead  bool
+	versionKnown bool
+	version      controller.NetworkVersion
 
 	// rateLimitUntil stores a time.Time; when set, SyncDirty skips all flushes
 	// until the deadline passes. Set when a shard sync returns ErrRateLimit.
@@ -129,28 +150,34 @@ type managerImpl struct {
 	bgCtxMu sync.Once
 }
 
-// NewManager constructs a Manager.
+// NewManager constructs a Manager. Reconcile, EnsureInfrastructure,
+// LoadInfrastructure and RepairInfrastructure each run as one listing pass
+// (see controller.BeginPass).
 func NewManager(cfg ManagerConfig, ctrl controller.Controller, store storage.Store, namer *Namer, log zerolog.Logger) Manager {
+	ctrl = controller.WithListingPasses(ctrl)
 	legacyMgr := NewLegacyManager(cfg.LegacyCfg, namer, ctrl, store, log)
 	zoneMgr := NewZoneManager(cfg.ZoneCfg, namer, ctrl, store, log)
 
 	return &managerImpl{
-		cfg:       cfg,
-		ctrl:      ctrl,
-		store:     store,
-		namer:     namer,
-		log:       log,
-		v4Mgrs:    make(map[string]*ShardManager),
-		v6Mgrs:    make(map[string]*ShardManager),
-		legacyMgr: legacyMgr,
-		zoneMgr:   zoneMgr,
-		siteMode:  make(map[string]string),
-		cb:        newCircuitBreaker(cfg.CircuitBreakerThreshold, cfg.CircuitBreakerResetInterval),
+		cfg:           cfg,
+		ctrl:          ctrl,
+		store:         store,
+		namer:         namer,
+		log:           log,
+		v4Mgrs:        make(map[string]*ShardManager),
+		v6Mgrs:        make(map[string]*ShardManager),
+		legacyMgr:     legacyMgr,
+		zoneMgr:       zoneMgr,
+		siteMode:      make(map[string]string),
+		convertedLeft: make(map[string]bool),
+		cb:            newCircuitBreaker(cfg.CircuitBreakerThreshold, cfg.CircuitBreakerResetInterval),
 	}
 }
 
 // EnsureInfrastructure bootstraps all groups and rules/policies for every site.
 func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) error {
+	ctx, endPass := controller.BeginPass(ctx)
+	defer endPass()
 	if err := m.LoadInfrastructure(ctx, sites); err != nil {
 		return err
 	}
@@ -161,6 +188,8 @@ func (m *managerImpl) EnsureInfrastructure(ctx context.Context, sites []string) 
 // Shards that cannot be provisioned are retried on later syncs and do not
 // fail the call.
 func (m *managerImpl) RepairInfrastructure(ctx context.Context, sites []string) error {
+	ctx, endPass := controller.BeginPass(ctx)
+	defer endPass()
 	for _, site := range sites {
 		m.mu.RLock()
 		v4Mgr := m.v4Mgrs[site]
@@ -184,6 +213,15 @@ func (m *managerImpl) RepairInfrastructure(ctx context.Context, sites []string) 
 			if err := m.tolerateShardFailures(site, m.zoneMgr.EnsurePolicies(ctx, site, v4Mgr, v6Mgr)); err != nil {
 				return fmt.Errorf("ensure zone policies for site %s: %w", site, err)
 			}
+			// The block policies exist now, so policies converted from
+			// legacy rules can go without a gap in enforcement.
+			if err := m.retireConvertedRules(ctx, site); err != nil {
+				m.log.Warn().Err(err).Str("site", site).
+					Msg("could not retire zone policies converted from legacy rules; retrying on the next reconcile")
+				m.siteMu.Lock()
+				m.convertedLeft[site] = true
+				m.siteMu.Unlock()
+			}
 		}
 	}
 	return nil
@@ -195,6 +233,8 @@ func (m *managerImpl) RepairInfrastructure(ctx context.Context, sites []string) 
 func (m *managerImpl) LoadInfrastructure(ctx context.Context, sites []string) error {
 	m.bgCtxMu.Do(func() { m.bgCtx = ctx })
 	m.sites = sites
+	ctx, endPass := controller.BeginPass(ctx)
+	defer endPass()
 
 	for _, site := range sites {
 		// Callers (main.go runDaemon and reconcileCmd) pre-resolve capacities
@@ -202,14 +242,25 @@ func (m *managerImpl) LoadInfrastructure(ctx context.Context, sites []string) er
 		v4Cap := m.cfg.GroupCapacityV4
 		v6Cap := m.cfg.GroupCapacityV6
 
+		// Logged before the mode is resolved, so a failed detection still
+		// shows which release the controller runs.
+		m.networkVersion(ctx, site)
 		// Determine effective mode first so shard backend uses the right API object type.
 		mode, err := m.resolveMode(ctx, site)
 		if err != nil {
 			return fmt.Errorf("resolve mode for site %s: %w", site, err)
 		}
+		if err := m.checkModeSupported(ctx, site, mode); err != nil {
+			return err
+		}
 
-		if mode == "zone" && len(m.cfg.ZoneCfg.ZonePairs) == 0 {
+		pairs := m.zoneMgr.sitePairs(site)
+		if mode == "zone" && len(pairs) == 0 {
 			return fmt.Errorf("site %s: %w", site, errNoZonePairs)
+		}
+		if mode == "legacy" && hasEgressPairs(pairs) {
+			m.log.Warn().Str("site", site).
+				Msg("EGRESS_ZONE_PAIRS has no effect on this site: it uses legacy firewall rules, which block inbound traffic only")
 		}
 
 		// Cache resolved mode for use in ensureNewShardInfrastructure and pruneEmptyTailShards.
@@ -274,8 +325,9 @@ func (m *managerImpl) wireShardManager(site string, ipv6 bool, sm *ShardManager)
 	// Provision infrastructure when Pending shards become Active. Use m.bgCtx
 	// (the long-lived daemon context) rather than the callback's ctx so that
 	// a cancelled startup context does not abort mid-run shard provisioning.
-	sm.SetActivationCallback(func(_ context.Context, shardIdx int, groupID string) error {
-		if err := m.ensureNewShardInfrastructure(m.bgCtx, site, ipv6, shardIdx, sm); err != nil {
+	// The listing pass of the flush that activated the shard still applies.
+	sm.SetActivationCallback(func(ctx context.Context, shardIdx int, groupID string) error {
+		if err := m.ensureNewShardInfrastructure(controller.WithPassOf(m.bgCtx, ctx), site, ipv6, shardIdx, sm); err != nil {
 			m.log.Error().Err(err).Str("site", site).Int("shard_idx", shardIdx).Str("group_id", groupID).
 				Msg(activationFailedMsg)
 			return err
@@ -284,15 +336,18 @@ func (m *managerImpl) wireShardManager(site string, ipv6 bool, sm *ShardManager)
 	})
 	m.attachShardCallbacks(sm)
 	sm.SetMergeThreshold(m.cfg.ShardMergeThreshold)
-	sm.SetDrainCallback(func(ctx context.Context, shardIdx int, _ string) error {
+	sm.SetDrainCallback(func(ctx context.Context, shardIdx int, groupID string) error {
 		switch m.cachedMode(site) {
 		case "legacy":
-			if err := m.legacyMgr.DeleteRuleForShard(ctx, site, ipv6, shardIdx); err != nil {
+			if err := m.legacyMgr.DeleteRuleForShard(ctx, site, groupID, ipv6, shardIdx); err != nil {
 				return fmt.Errorf("delete rule for drained %s shard %d: %w", fam, shardIdx, err)
 			}
 		case "zone":
 			if err := m.zoneMgr.DeletePoliciesForShard(ctx, site, ipv6, shardIdx); err != nil {
 				return fmt.Errorf("delete policies for drained %s shard %d: %w", fam, shardIdx, err)
+			}
+			if err := m.deleteConvertedRulesForList(ctx, site, groupID); err != nil {
+				return fmt.Errorf("delete converted legacy rules for drained %s shard %d: %w", fam, shardIdx, err)
 			}
 		}
 		return nil
@@ -369,7 +424,7 @@ func (m *managerImpl) ApplyBan(ctx context.Context, site, ip string, ipv6 bool) 
 		return fmt.Errorf("no shard manager for site %s (ipv6=%v)", site, ipv6)
 	}
 
-	_, newShardIdx, err := sm.Add(ctx, ip)
+	newShardIdx, err := sm.Add(ctx, ip)
 	if err != nil {
 		return err
 	}
@@ -405,7 +460,7 @@ func (m *managerImpl) ApplyUnban(ctx context.Context, site, ip string, ipv6 bool
 		return nil // site not managed
 	}
 
-	if _, err := sm.Remove(ctx, ip); err != nil {
+	if err := sm.Remove(ctx, ip); err != nil {
 		return err
 	}
 	return nil
@@ -486,6 +541,7 @@ func (m *managerImpl) deleteOrphanedReferencingObjects(ctx context.Context, site
 					} else {
 						m.log.Info().Str("site", site).Str("rule_id", rule.ID).Str("group_id", groupID).
 							Msg("deleted firewall rule referencing orphaned group")
+						m.forgetDeletedObject(site, rule.Name, rule.ID)
 					}
 					break
 				}
@@ -502,20 +558,42 @@ func (m *managerImpl) deleteOrphanedReferencingObjects(ctx context.Context, site
 			if !m.ownsOrphanReference(site, "zone", policy.Name, policy.ID, policy.Description) || policy.Action != "BLOCK" {
 				continue
 			}
-			// Check if this policy references the orphaned group
-			for _, policyGroupID := range policy.TrafficMatchingListIDs {
-				if policyGroupID == groupID {
-					if err := m.ctrl.DeleteZonePolicy(ctx, site, policy.ID); err != nil {
-						m.log.Warn().Err(err).Str("site", site).Str("policy_id", policy.ID).Str("group_id", groupID).
-							Msg("failed to delete orphaned zone policy (will continue)")
-					} else {
-						m.log.Info().Str("site", site).Str("policy_id", policy.ID).Str("group_id", groupID).
-							Msg("deleted zone policy referencing orphaned group")
-					}
-					break
-				}
+			// An inbound policy references the group as its source, an egress
+			// policy as its destination.
+			if policyListID(policy) != groupID {
+				continue
+			}
+			if err := m.ctrl.DeleteZonePolicy(ctx, site, policy.ID); err != nil {
+				m.log.Warn().Err(err).Str("site", site).Str("policy_id", policy.ID).Str("group_id", groupID).
+					Msg("failed to delete orphaned zone policy (will continue)")
+			} else {
+				m.log.Info().Str("site", site).Str("policy_id", policy.ID).Str("group_id", groupID).
+					Msg("deleted zone policy referencing orphaned group")
+				m.forgetDeletedObject(site, policy.Name, policy.ID)
 			}
 		}
+		if err := m.deleteConvertedRulesFor(ctx, site, map[string]bool{groupID: true}, policies); err != nil {
+			m.log.Warn().Err(err).Str("site", site).Str("group_id", groupID).
+				Msg("failed to delete converted legacy rules referencing orphaned group (will continue)")
+		}
+	}
+}
+
+// forgetDeletedObject drops the database record of a rule or policy that was
+// deleted outside the rule and policy managers. A record left behind keeps
+// the deleted ID, and a later prune or drain sends it to the controller,
+// which refuses it and stops the drain.
+func (m *managerImpl) forgetDeletedObject(site, name, id string) {
+	rec, err := getCachedPolicy(m.store, site, name)
+	if err != nil {
+		m.log.Warn().Err(err).Str("site", site).Str("name", name).Msg("failed to read the record of a deleted rule or policy")
+		return
+	}
+	if rec == nil || rec.UnifiID != id {
+		return
+	}
+	if err := deleteCachedPolicy(m.store, site, name); err != nil {
+		m.log.Warn().Err(err).Str("site", site).Str("name", name).Msg("failed to remove the record of a deleted rule or policy")
 	}
 }
 
@@ -565,29 +643,16 @@ func (m *managerImpl) shardMgr(site string, ipv6 bool) *ShardManager {
 	return m.v4Mgrs[site]
 }
 
-// UpdateActiveBansMetric updates the active_bans gauge from bbolt.
-func (m *managerImpl) UpdateActiveBansMetric() {
-	bans, err := m.store.BanList()
-	if err != nil {
-		m.log.Warn().Err(err).Msg("failed to load ban list for metrics")
-		return
-	}
-
-	// Count per site (approximate — bans are site-independent in bbolt)
-	v4Count := 0
-	v6Count := 0
-	for _, entry := range bans {
-		if entry.IPv6 {
-			v6Count++
-		} else {
-			v4Count++
+// updateActiveBansMetric sets the active_bans gauge of each site from the
+// addresses in its shards, which include bans not yet on the controller.
+func (m *managerImpl) updateActiveBansMetric(sites []string) {
+	for _, site := range sites {
+		v4, v6 := m.siteShardMgrs(site)
+		if v4 != nil {
+			metrics.ActiveBans.WithLabelValues("v4", site).Set(float64(v4.Len()))
 		}
-	}
-
-	for _, site := range m.sites {
-		metrics.ActiveBans.WithLabelValues("v4", site).Set(float64(v4Count))
-		if m.cfg.EnableIPv6 {
-			metrics.ActiveBans.WithLabelValues("v6", site).Set(float64(v6Count))
+		if v6 != nil {
+			metrics.ActiveBans.WithLabelValues("v6", site).Set(float64(v6.Len()))
 		}
 	}
 }

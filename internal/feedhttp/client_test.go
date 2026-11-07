@@ -1,11 +1,14 @@
 package feedhttp
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -239,5 +242,85 @@ func TestCheckRedirect_RemovesReferer(t *testing.T) {
 	}
 	if got := to.Header.Get("Referer"); got != "" {
 		t.Fatalf("Referer = %q after redirect, want it removed", got)
+	}
+}
+
+// proxiedClient returns a feed client whose requests all go through a test
+// proxy. The proxy redirects http://feed.example/ to http://target.example/
+// and answers every other request itself, counting the ones for target.example.
+func proxiedClient(t *testing.T, lookup func(context.Context, string) ([]netip.Addr, error)) (*http.Client, *atomic.Int32) {
+	t.Helper()
+	var reached atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Host {
+		case "feed.example":
+			http.Redirect(w, r, "http://target.example/list", http.StatusFound)
+		case "target.example":
+			reached.Add(1)
+			_, _ = io.WriteString(w, "198.51.100.1\n")
+		default:
+			http.Error(w, "unexpected host "+r.URL.Host, http.StatusBadGateway)
+		}
+	}))
+	t.Cleanup(proxy.Close)
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(5 * time.Second)
+	transport := client.Transport.(*redirectGuardTransport)
+	transport.direct.Proxy = http.ProxyURL(proxyURL)
+	transport.guarded.Proxy = http.ProxyURL(proxyURL)
+	transport.lookup = lookup
+	return client, &reached
+}
+
+func resolvesTo(addr string) func(context.Context, string) ([]netip.Addr, error) {
+	return func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr(addr)}, nil
+	}
+}
+
+// Through a proxy the dial guard only ever sees the proxy's address, so a
+// redirect target is resolved and checked before the proxy is asked for it.
+func TestClient_ProxiedRedirectToInternalNameIsRefused(t *testing.T) {
+	tests := []struct {
+		name   string
+		lookup func(context.Context, string) ([]netip.Addr, error)
+		want   string
+	}{
+		{"resolves to a private address", resolvesTo("10.1.2.3"), "internal address 10.1.2.3"},
+		{"resolves to cloud metadata", resolvesTo("169.254.169.254"), "internal address 169.254.169.254"},
+		{"does not resolve", func(context.Context, string) ([]netip.Addr, error) {
+			return nil, errors.New("no such host")
+		}, "does not resolve here"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, reached := proxiedClient(t, tt.lookup)
+			resp, err := client.Get("http://feed.example/")
+			if err == nil {
+				resp.Body.Close()
+				t.Fatal("proxied redirect to an internal target was followed")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want it to mention %q", err, tt.want)
+			}
+			if reached.Load() != 0 {
+				t.Fatal("the proxy was asked for the refused target")
+			}
+		})
+	}
+}
+
+func TestClient_ProxiedRedirectToPublicNameIsFollowed(t *testing.T) {
+	client, reached := proxiedClient(t, resolvesTo("8.8.8.8"))
+	resp, err := client.Get("http://feed.example/")
+	if err != nil {
+		t.Fatalf("proxied redirect to a public target failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || reached.Load() != 1 {
+		t.Fatalf("status %d, target reached %d times; want 200 once", resp.StatusCode, reached.Load())
 	}
 }

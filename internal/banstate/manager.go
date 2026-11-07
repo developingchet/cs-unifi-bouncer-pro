@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -26,10 +25,8 @@ func New(store storage.Store, fw firewall.Manager, sites []string, dryRun bool) 
 	return &Manager{store: store, fw: fw, sites: sites, dryRun: dryRun}
 }
 
+// claimsFor returns a copy of entry's claims that the caller may change.
 func claimsFor(entry storage.BanEntry) map[string]time.Time {
-	if entry.Claims == nil {
-		return map[string]time.Time{"legacy": entry.ExpiresAt}
-	}
 	claims := make(map[string]time.Time, len(entry.Claims))
 	for source, expiry := range entry.Claims {
 		claims[source] = expiry
@@ -59,144 +56,9 @@ func latestExpiry(claims map[string]time.Time) time.Time {
 	return latest
 }
 
-func (m *Manager) Claim(ctx context.Context, ip string, ipv6 bool, source string, expiry time.Time) (bool, error) {
-	if source == "" {
-		return false, fmt.Errorf("ban source is required")
-	}
-	if m.dryRun {
-		return false, nil
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	existing, err := m.store.BanGet(ip)
-	if err != nil {
-		return false, fmt.Errorf("read ban: %w", err)
-	}
-	entry, wasActive := withClaim(existing, ipv6, source, expiry, time.Now().UTC())
-	if err := m.store.BanPut(ip, *entry); err != nil {
-		return false, fmt.Errorf("record ban: %w", err)
-	}
-	if !entry.Pending {
-		return false, nil
-	}
-	if err := m.apply(ctx, ip, ipv6, true); err != nil {
-		return false, err
-	}
-	entry.Pending = false
-	if err := m.store.BanPut(ip, *entry); err != nil {
-		return false, fmt.Errorf("confirm ban: %w", err)
-	}
-	return !wasActive, nil
-}
-
-// withClaim returns a copy of existing (or a new entry) with source's claim
-// set to expiry, and whether the ban was already active before the claim.
-func withClaim(existing *storage.BanEntry, ipv6 bool, source string, expiry, now time.Time) (*storage.BanEntry, bool) {
-	if existing == nil {
-		entry := &storage.BanEntry{RecordedAt: now, IPv6: ipv6, Pending: true,
-			Claims: map[string]time.Time{source: expiry.UTC()}}
-		entry.ExpiresAt = latestExpiry(entry.Claims)
-		return entry, false
-	}
-	entry := *existing
-	entry.Claims = claimsFor(*existing)
-	wasActive := active(entry.Claims, now)
-	entry.Claims[source] = expiry.UTC()
-	entry.ExpiresAt = latestExpiry(entry.Claims)
-	entry.Pending = entry.Pending || !wasActive
-	return &entry, wasActive
-}
-
-// ClaimRequest is one address for ClaimMany.
-type ClaimRequest struct {
-	IP   string
-	IPv6 bool
-}
-
-// claimChunkSize bounds how long ClaimMany holds the lock, so CrowdSec
-// decisions interleave with a large feed instead of waiting for all of it.
-const claimChunkSize = 500
-
-// ClaimMany claims every request for source. Each chunk costs two store
-// transactions (record, then confirm) instead of up to two per address.
-// It returns how many addresses became newly banned. Addresses whose firewall
-// update fails stay recorded as pending, so reconcile (which works from the
-// stored ban list) and the next claim both retry them; the returned error
-// counts them and wraps the first.
-func (m *Manager) ClaimMany(ctx context.Context, reqs []ClaimRequest, source string, expiry time.Time) (int, error) {
-	if source == "" {
-		return 0, fmt.Errorf("ban source is required")
-	}
-	if m.dryRun {
-		return 0, nil
-	}
-	added := 0
-	var failures []error
-	for start := 0; start < len(reqs); start += claimChunkSize {
-		if err := ctx.Err(); err != nil {
-			return added, err
-		}
-		chunk := reqs[start:min(start+claimChunkSize, len(reqs))]
-		n, errs, err := m.claimChunk(ctx, chunk, source, expiry)
-		added += n
-		failures = append(failures, errs...)
-		if err != nil {
-			return added, err
-		}
-	}
-	if len(failures) > 0 {
-		return added, fmt.Errorf("%d of %d addresses not applied, first: %w", len(failures), len(reqs), failures[0])
-	}
-	return added, nil
-}
-
-func (m *Manager) claimChunk(ctx context.Context, chunk []ClaimRequest, source string, expiry time.Time) (int, []error, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	now := time.Now().UTC()
-	updates := make(map[string]storage.BanEntry, len(chunk))
-	newlyActive := make(map[string]bool, len(chunk))
-	for _, req := range chunk {
-		existing, err := m.store.BanGet(req.IP)
-		if err != nil {
-			return 0, nil, fmt.Errorf("read ban %s: %w", req.IP, err)
-		}
-		entry, wasActive := withClaim(existing, req.IPv6, source, expiry, now)
-		updates[req.IP] = *entry
-		newlyActive[req.IP] = !wasActive
-	}
-	if err := m.store.BanPutMany(updates); err != nil {
-		return 0, nil, fmt.Errorf("record bans: %w", err)
-	}
-
-	confirmed := make(map[string]storage.BanEntry)
-	var failures []error
-	added := 0
-	for ip, entry := range updates {
-		if !entry.Pending {
-			continue
-		}
-		if err := m.apply(ctx, ip, entry.IPv6, true); err != nil {
-			failures = append(failures, fmt.Errorf("apply ban %s: %w", ip, err))
-			continue
-		}
-		entry.Pending = false
-		confirmed[ip] = entry
-		if newlyActive[ip] {
-			added++
-		}
-	}
-	if err := m.store.BanPutMany(confirmed); err != nil {
-		return added, failures, fmt.Errorf("confirm bans: %w", err)
-	}
-	return added, failures, nil
-}
-
 func (m *Manager) Release(ctx context.Context, ip, source string) (bool, error) {
 	if source == "" {
-		return false, fmt.Errorf("ban source is required")
+		return false, errSourceRequired
 	}
 	if m.dryRun {
 		return false, nil
@@ -209,16 +71,10 @@ func (m *Manager) Release(ctx context.Context, ip, source string) (bool, error) 
 		return false, err
 	}
 	claims := claimsFor(*entry)
-	_, found := claims[source]
-	_, legacy := claims["legacy"]
-	legacyDecision := legacy && strings.HasPrefix(source, "crowdsec:")
-	if !found && !legacyDecision {
+	if _, found := claims[source]; !found {
 		return false, nil
 	}
 	delete(claims, source)
-	if legacyDecision {
-		delete(claims, "legacy")
-	}
 	if active(claims, time.Now().UTC()) {
 		entry.Claims = claims
 		entry.ExpiresAt = latestExpiry(claims)
@@ -269,6 +125,12 @@ func (m *Manager) Expire(ctx context.Context, ip string) (bool, error) {
 	}
 	now := time.Now().UTC()
 	claims := claimsFor(*entry)
+	if len(claims) == 0 {
+		// A ban without claims was stored by 1.x and not yet converted. It
+		// holds a legacy claim that ends with the ban, as ClaimLegacyBans
+		// would record it.
+		claims[LegacyClaim] = entry.ExpiresAt
+	}
 	changed := false
 	for source, expiry := range claims {
 		if !expiry.IsZero() && !expiry.After(now) {

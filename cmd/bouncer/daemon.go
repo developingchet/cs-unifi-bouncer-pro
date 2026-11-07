@@ -7,7 +7,9 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/blocklist"
@@ -33,21 +35,15 @@ func runDaemon() error {
 		return fmt.Errorf("open storage: %w", err)
 	}
 	defer store.Close()
-	if !cfg.DryRun {
-		feeds := blocklist.PlainFeeds(cfg.BlocklistURLs)
-		if feed := abuseIPDBFeed(cfg); feed.URL != "" {
-			feeds = append(feeds, feed)
-		}
-		if err := blocklist.MigrateLegacySources(store, feeds); err != nil {
-			return fmt.Errorf("migrate blocklist claim sources: %w", err)
-		}
-	}
 
-	ctrl, err := controller.NewClient(context.Background(), controllerConfig(cfg), log)
+	client, err := controller.NewClient(context.Background(), controllerConfig(cfg), log)
 	if err != nil {
 		return fmt.Errorf("init UniFi client: %w", err)
 	}
-	defer ctrl.Close()
+	defer client.Close()
+	// Reconciles and whitelist syncs each list a site's objects once and share
+	// that listing between their steps (see controller.BeginPass).
+	ctrl := controller.WithListingPasses(client)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -63,11 +59,12 @@ func runDaemon() error {
 	if err != nil {
 		return err
 	}
-	// The health server, the infrastructure repair and the bouncer can each
-	// end the daemon, so done has room for all three. Only failures are sent:
-	// a nil from a component stopped by the signal would end the shutdown
-	// wait before the bouncer has stopped.
-	done := make(chan error, 3)
+	// The health server, the infrastructure repair, the periodic reconcile
+	// (on a firewall mode change) and the bouncer can each end the daemon, so
+	// done has room for all four. Only failures are sent: a nil from a
+	// component stopped by the signal would end the shutdown wait before the
+	// bouncer has stopped.
+	done := make(chan error, 4)
 	go func() {
 		if err := health.Serve(ctx, healthLn); err != nil {
 			done <- err
@@ -77,6 +74,10 @@ func runDaemon() error {
 	cfPairs, err := cloudflarePairs(cfg)
 	if err != nil {
 		return err
+	}
+	var cfSource *cloudflarePairSource
+	if cfg.CloudflareWhitelistEnabled {
+		cfSource = newCloudflarePairSource(cfPairs)
 	}
 	if cfg.UnifiSitesAuto {
 		discovered, err := ctrl.DiscoverSites(ctx)
@@ -92,6 +93,7 @@ func runDaemon() error {
 	} else if err := checkSitesExist(ctx, ctrl, cfg.UnifiSites, log); err != nil {
 		return err
 	}
+	logSitePairs(cfg, cfg.UnifiSites, log)
 
 	// The notifier is a no-op when WEBHOOK_URL is empty or in dry-run mode.
 	webhookURL := cfg.WebhookURL
@@ -105,10 +107,7 @@ func runDaemon() error {
 		notifier.Run(ctx)
 	}()
 
-	fwMgr, err := buildFWManager(cfg, ctrl, store, log,
-		func() { notifier.Fire(webhook.EventCircuitBreakerOpen, nil) },
-		func() { notifier.Fire(webhook.EventCircuitBreakerClose, nil) },
-	)
+	fwMgr, err := buildFWManager(cfg, ctrl, store, log, notifier)
 	if err != nil {
 		return err
 	}
@@ -118,7 +117,15 @@ func runDaemon() error {
 	if err := fwMgr.LoadInfrastructure(ctx, cfg.UnifiSites); err != nil {
 		return fmt.Errorf("load infrastructure: %w", err)
 	}
-	go watchSIGHUP(ctx, notifySIGHUP(), cfg, fwMgr, log)
+	// reconcilesOpen is set once gateReconciles lets reconciles run; a SIGHUP
+	// before then must not reconcile bans against a database still empty.
+	var reconcilesOpen atomic.Bool
+	go watchSIGHUP(ctx, notifySIGHUP(), cfg, fwMgr, cfSource, reconcilesOpen.Load, log)
+	actions, err := newManualActions(cfg, claims, fwMgr, store, log)
+	if err != nil {
+		return err
+	}
+	health.EnableControl(actions, reconcilesOpen.Load)
 
 	recorder, recorderDone, err := newMetricsRecorder(ctx, cfg, log)
 	if err != nil {
@@ -155,18 +162,18 @@ func runDaemon() error {
 	// Reconcile removes controller IPs the ban database does not hold. A fresh
 	// or lost database holds nothing until the first LAPI batch arrives, so
 	// reconciling earlier would strip every enforced ban from the controller.
-	banCount := func() (int, error) {
-		bans, err := store.BanList()
-		return len(bans), err
-	}
 	bnc.OnStartupSynced(health.MarkSynced)
-	gateReconciles(ctx, bnc.OnStartupSynced, banCount, startupReconcileFallback, func() {
+	if !cfg.DryRun {
+		bnc.OnStartupSynced(retireLegacyClaims(claims, log))
+	}
+	gateReconciles(ctx, bnc.OnStartupSynced, store.BanCount, startupReconcileFallback, func() {
+		reconcilesOpen.Store(true)
 		go func() {
 			if cfg.FirewallReconcileOnStart {
 				runStartupReconcile(ctx, fwMgr, cfg.UnifiSites, log)
 			}
 			if cfg.FirewallReconcileInterval > 0 {
-				runPeriodicReconcile(ctx, fwMgr, cfg.UnifiSites, cfg.FirewallReconcileInterval, notifier, log)
+				runPeriodicReconcile(ctx, fwMgr, cfg.UnifiSites, cfg.FirewallReconcileInterval, notifier, done, log)
 			}
 		}()
 	}, log)
@@ -174,9 +181,29 @@ func runDaemon() error {
 	// take minutes on a large ban list. They run alongside the decision stream
 	// and the health server, so new bans are applied and the health check
 	// answers meanwhile.
-	go repairAndSyncWhitelist(ctx, cfg, ctrl, fwMgr, cfPairs, done, log)
+	go repairAndSyncWhitelist(ctx, cfg, ctrl, fwMgr, cfSource, notifier, done, log)
 	go func() { done <- bnc.Run(ctx) }()
-	return awaitShutdown(ctx, cfg, done, log, webhookDone, recorderDone)
+	err = awaitShutdown(ctx, cfg, done, log, webhookDone, recorderDone)
+	// Syncs save shard members to their group records only every few
+	// minutes; save the rest while the store is still open.
+	if saveErr := fwMgr.SaveShardRecords(); saveErr != nil {
+		log.Warn().Err(saveErr).Msg("failed to save shard group records on shutdown")
+	}
+	// A component that ends the daemon on its own (a firewall mode change)
+	// may just have queued a webhook; stop the notifier and let it deliver.
+	cancel()
+	waitDrained(webhookDone, cfg.ShutdownGracePeriod)
+	return err
+}
+
+// waitDrained waits for drained to close, or for timeout.
+func waitDrained(drained <-chan struct{}, timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-drained:
+	case <-timer.C:
+	}
 }
 
 // awaitShutdown returns when the bouncer stops. After a signal it allows

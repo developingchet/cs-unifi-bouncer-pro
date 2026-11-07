@@ -3,6 +3,8 @@ package whitelist
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -575,6 +577,68 @@ func TestEnsureAllowPolicy_WithPorts_NoOpWhenCurrent(t *testing.T) {
 	}
 }
 
+func TestSyncWithIPv6OffRemovesIPv6Objects(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	ctrl.RefuseReferencedListDeletes()
+	mgr := NewManager(ctrl, []string{"test-site"}, NewCloudflareProvider("", ""), zerolog.Nop())
+	mgr.SetIPv6(false)
+	ctx := context.Background()
+
+	// An earlier run with IPv6 on left the IPv6 list and ALLOW policy.
+	ctrl.SetTMLs("test-site", []controller.TrafficMatchingList{
+		{ID: "tml-v4", Name: TMLNameV4, Type: "IPV4_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Type: "SUBNET", Value: "1.1.1.0/24"}}},
+		{ID: "tml-v6", Name: TMLNameV6, Type: "IPV6_ADDRESSES", Items: []controller.TrafficMatchingListItem{{Type: "SUBNET", Value: "2606:4700::/32"}}},
+	})
+	ctrl.SetPolicies("test-site", []controller.ZonePolicy{{
+		ID: "allow-v6", Name: "crowdsec-whitelist-cloudflare-External-Dmz-v6", Description: whitelistDescription,
+		Action: "ALLOW", Enabled: true, SrcZone: "zone-external", DstZone: "zone-dmz", IPVersion: "IPV6",
+		TrafficMatchingListIDs: []string{"tml-v6"},
+	}})
+	pairs := []ZonePairConfig{
+		{SrcName: "External", DstName: "Dmz", SrcZoneID: "zone-external", DstZoneID: "zone-dmz"},
+		// Only IPv6 destinations: nothing to allow with IPv6 off.
+		{SrcName: "External", DstName: "Internal", SrcZoneID: "zone-external", DstZoneID: "zone-internal", DstIPs: []string{"2001:db8::10"}},
+	}
+
+	if err := mgr.syncSite(ctx, "test-site", []string{"1.1.1.0/24"}, nil, pairs); err != nil {
+		t.Fatalf("syncSite: %v", err)
+	}
+
+	policies, err := ctrl.ListZonePolicies(ctx, "test-site")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policies) != 1 || policies[0].Name != "crowdsec-whitelist-cloudflare-External-Dmz-v4" {
+		t.Errorf("policies = %+v, want only the External->Dmz IPv4 ALLOW", policies)
+	}
+	tmls, err := ctrl.ListTrafficMatchingLists(ctx, "test-site")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tml := range tmls {
+		if strings.Contains(tml.Name, "v6") {
+			t.Errorf("IPv6 list %s kept with IPv6 off", tml.Name)
+		}
+	}
+}
+
+func TestSyncWithIPv6OffDoesNotFetchIPv6(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("1.1.1.0/24\n"))
+	}))
+	defer srv.Close()
+	// A plain-http IPv6 URL is refused, so the sync fails only if it is fetched.
+	provider := NewCloudflareProvider(srv.URL+"/ips-v4", "http://127.0.0.1:1/ips-v6")
+	provider.HTTPClient = srv.Client()
+	mgr := NewManager(ctrl, []string{"test-site"}, provider, zerolog.Nop())
+	mgr.SetIPv6(false)
+
+	if err := mgr.Sync(context.Background(), nil); err != nil {
+		t.Fatalf("Sync with IPv6 off: %v", err)
+	}
+}
+
 // TestSyncSite_OrphanPolicy_IsDeleted verifies that a bouncer-managed policy whose
 // zone pair has been removed from config is deleted during the orphan sweep.
 func TestSyncSite_OrphanPolicy_IsDeleted(t *testing.T) {
@@ -1014,6 +1078,32 @@ func TestEnsureAllowPolicy_DstIPTMLID_ChangeTriggerRecreate(t *testing.T) {
 // crowdsec-whitelist-cloudflare-* policies and TMLs while leaving unrelated
 // objects (ban policies, ban TMLs) intact. This covers the case where
 // CLOUDFLARE_WHITELIST_ENABLED is set to false after the feature was active.
+func TestDrainSkipsPoliciesOnLegacyFirewallSite(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	mgr := NewManager(ctrl, []string{"test-site"}, nil, zerolog.Nop())
+	ctrl.SetError("ListZonePolicies", &controller.ErrBadRequest{
+		Body: `{"statusCode":400,"code":"api.firewall.zone-based-firewall-not-configured","message":"Zone Based Firewall is not configured"}`,
+	})
+	ctrl.SetTMLs("test-site", []controller.TrafficMatchingList{{ID: "tml-v4", Name: TMLNameV4}})
+
+	if err := mgr.Drain(context.Background()); err != nil {
+		t.Fatalf("Drain on a legacy-firewall site: %v", err)
+	}
+	if got := ctrl.Calls("DeleteTrafficMatchingList"); got != 1 {
+		t.Errorf("DeleteTrafficMatchingList calls: got %d, want 1", got)
+	}
+}
+
+func TestDrainReportsOtherPolicyListErrors(t *testing.T) {
+	ctrl := testutil.NewMockController()
+	mgr := NewManager(ctrl, []string{"test-site"}, nil, zerolog.Nop())
+	ctrl.SetError("ListZonePolicies", &controller.ErrBadRequest{Body: `{"code":"api.err.Invalid"}`})
+
+	if err := mgr.Drain(context.Background()); err == nil {
+		t.Fatal("Drain hid a failed policy listing")
+	}
+}
+
 func TestDrain_DeletesAllWhitelistObjects(t *testing.T) {
 	ctrl := testutil.NewMockController()
 	log := zerolog.Nop()

@@ -81,7 +81,7 @@ func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool,
 		resp, err := c.apiDo(ctx, req, "feature/zone-detect")
 		if err != nil {
 			var notFound *ErrNotFound
-			if errors.As(err, &notFound) || zoneFirewallNotConfigured(err) {
+			if errors.As(err, &notFound) || ZoneFirewallNotConfigured(err) {
 				supported = false
 				return nil
 			}
@@ -109,10 +109,10 @@ func detectZoneFirewall(ctx context.Context, c *unifiClient, site string) (bool,
 	return supported, callErr
 }
 
-// zoneFirewallNotConfigured reports whether err is the integration API's 400
+// ZoneFirewallNotConfigured reports whether err is the integration API's 400
 // for a site that still runs the legacy firewall, which is what a controller
 // without a gateway, or one not yet migrated to zones, answers.
-func zoneFirewallNotConfigured(err error) bool {
+func ZoneFirewallNotConfigured(err error) bool {
 	var bad *ErrBadRequest
 	if !errors.As(err, &bad) {
 		return false
@@ -153,10 +153,21 @@ func detectZoneFirewallWithSession(ctx context.Context, c *unifiClient, site str
 		return false, callErr
 	}
 	if len(zones) > 0 {
-		return false, fmt.Errorf("site %s uses the zone-based firewall, which requires UNIFI_API_KEY "+
-			"(integration API); set UNIFI_API_KEY, or FIREWALL_MODE=legacy if legacy rules are still enforced", site)
+		return false, &ErrZoneFirewallNeedsAPIKey{Site: site}
 	}
 	return false, nil
+}
+
+// ErrZoneFirewallNeedsAPIKey is returned by zone detection with a session
+// login on a site that has firewall zones: zone policies are managed through
+// the integration API, which accepts only API keys.
+type ErrZoneFirewallNeedsAPIKey struct {
+	Site string
+}
+
+func (e *ErrZoneFirewallNeedsAPIKey) Error() string {
+	return fmt.Sprintf("site %s uses the zone-based firewall, which requires UNIFI_API_KEY (integration API); "+
+		"set UNIFI_API_KEY, or FIREWALL_MODE=legacy on UniFi Network 10.x and earlier if legacy rules are still enforced on the site", e.Site)
 }
 
 // --- API helpers for legacy envelope responses ------------------------------

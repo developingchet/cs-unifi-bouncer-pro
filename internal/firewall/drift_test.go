@@ -33,7 +33,7 @@ func TestReconcile_RepairsOutOfBandEdits(t *testing.T) {
 				t.Fatalf("EnsureInfrastructure: %v", err)
 			}
 			for _, ip := range []string{"198.51.100.1", "198.51.100.2"} {
-				if err := store.BanRecord(ip, time.Time{}, false); err != nil {
+				if err := testutil.PutBan(store, ip, time.Time{}, false); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -123,7 +123,7 @@ func TestSyncShard_PutNotFound_Unconfirmed(t *testing.T) {
 			if err := sm.EnsureShards(ctx); err != nil {
 				t.Fatalf("EnsureShards: %v", err)
 			}
-			if _, _, err := sm.Add(ctx, "198.51.100.2"); err != nil {
+			if _, err := sm.Add(ctx, "198.51.100.2"); err != nil {
 				t.Fatalf("Add: %v", err)
 			}
 

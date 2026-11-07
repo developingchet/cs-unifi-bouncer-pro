@@ -88,34 +88,6 @@ func TestFeedRenewalAndExpiry(t *testing.T) {
 	}
 }
 
-func TestLegacyClaimAndFailedUnban(t *testing.T) {
-	store := testutil.NewMockStore()
-	if err := store.BanRecord("203.0.113.30", time.Now().Add(time.Hour), false); err != nil {
-		t.Fatal(err)
-	}
-	fw := &recordingFirewall{}
-	manager := New(store, fw, []string{"default"}, false)
-	ctx := context.Background()
-	if _, err := manager.Claim(ctx, "203.0.113.30", false, "crowdsec:id:9", time.Now().Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	fw.unbanError = errors.New("controller unavailable")
-	if _, err := manager.Release(ctx, "203.0.113.30", "crowdsec:id:9"); err == nil {
-		t.Fatal("expected firewall error")
-	}
-	entry, err := store.BanGet("203.0.113.30")
-	if err != nil || entry == nil {
-		t.Fatalf("ban removed after failed unban: entry=%v err=%v", entry, err)
-	}
-	fw.unbanError = nil
-	if removed, err := manager.Release(ctx, "203.0.113.30", "crowdsec:id:9"); err != nil || !removed {
-		t.Fatalf("legacy ban survived decision deletion: removed=%v err=%v", removed, err)
-	}
-	if fw.unbans != 1 {
-		t.Fatalf("firewall unbans = %d, want 1", fw.unbans)
-	}
-}
-
 func TestFailedBanIsRetried(t *testing.T) {
 	store := testutil.NewMockStore()
 	fw := &recordingFirewall{banError: errors.New("controller unavailable")}

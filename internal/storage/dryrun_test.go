@@ -15,7 +15,7 @@ func TestDryRunStoreLeavesExistingDatabaseUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writable.BanRecord("203.0.113.5", time.Now().Add(time.Hour), false); err != nil {
+	if err := putBan(writable, "203.0.113.5", time.Now().Add(time.Hour), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := writable.Close(); err != nil {
@@ -33,7 +33,7 @@ func TestDryRunStoreLeavesExistingDatabaseUnchanged(t *testing.T) {
 	if err := store.BanDelete("203.0.113.5"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.BanRecord("203.0.113.6", time.Time{}, false); err != nil {
+	if err := putBan(store, "203.0.113.6", time.Time{}, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -54,7 +54,7 @@ func TestDryRunStoreDoesNotCreateDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.BanRecord("203.0.113.6", time.Time{}, false); err != nil {
+	if err := putBan(store, "203.0.113.6", time.Time{}, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {

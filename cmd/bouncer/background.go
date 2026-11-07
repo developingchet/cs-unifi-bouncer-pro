@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
@@ -16,7 +17,6 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/lapimetrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/webhook"
-	"github.com/developingchet/cs-unifi-bouncer-pro/internal/whitelist"
 	"github.com/rs/zerolog"
 )
 
@@ -38,8 +38,24 @@ func every(ctx context.Context, interval time.Duration, fn func()) {
 	}
 }
 
-func runPeriodicReconcile(ctx context.Context, fwMgr firewall.Manager, sites []string, interval time.Duration, notifier *webhook.Notifier, log zerolog.Logger) {
+// runPeriodicReconcile reconciles every interval. Each tick first re-checks the
+// sites loaded in legacy mode; when one now needs zone mode (the controller was
+// upgraded to a zone-only release, or auto mode finds zones), the error is sent
+// on modeChanged and the loop stops, so the daemon exits and its supervisor
+// restarts it in the new mode.
+func runPeriodicReconcile(ctx context.Context, fwMgr firewall.Manager, sites []string, interval time.Duration,
+	notifier *webhook.Notifier, modeChanged chan<- error, log zerolog.Logger,
+) {
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
 	every(ctx, interval, func() {
+		if err := fwMgr.CheckModeChange(ctx); err != nil {
+			log.Error().Err(err).Msg("firewall mode changed; exiting so the bouncer restarts in the new mode")
+			fireModeChanged(notifier, err)
+			modeChanged <- err
+			stop()
+			return
+		}
 		start := time.Now()
 		result, err := fwMgr.Reconcile(ctx, sites)
 		metrics.ReconcileDuration.WithLabelValues("periodic").Observe(time.Since(start).Seconds())
@@ -84,20 +100,36 @@ func notifySIGHUP() chan os.Signal {
 }
 
 // watchSIGHUP reloads the zone pairs and reconciles their policies on SIGHUP,
-// without a restart.
-func watchSIGHUP(ctx context.Context, sighup chan os.Signal, cfg *config.Config, fwMgr firewall.Manager, log zerolog.Logger) {
+// without a restart, and hands reloaded Cloudflare zone pairs to cf.
+// reconcilesOpen reports whether the startup reconcile gate has opened (see
+// gateReconciles).
+func watchSIGHUP(ctx context.Context, sighup chan os.Signal, cfg *config.Config, fwMgr firewall.Manager,
+	cf *cloudflarePairSource, reconcilesOpen func() bool, log zerolog.Logger,
+) {
 	defer signal.Stop(sighup)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-sighup:
-			reloadZones(ctx, cfg, fwMgr, log)
+			reloadZones(ctx, cfg, fwMgr, cf, reconcilesOpen, log)
 		}
 	}
 }
 
-func reloadZones(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager, log zerolog.Logger) {
+// reloadedOnSIGHUP are the settings a SIGHUP applies; the Cloudflare pairs
+// only while the whitelist runs.
+var reloadedOnSIGHUP = []string{"ZONE_PAIRS", "EGRESS_ZONE_PAIRS"}
+
+// reloadZones reads the configuration again and applies its zone pairs. The
+// whole configuration must load: one that fails validation would also fail
+// the next restart, so it is refused with its error and nothing changes.
+// The Cloudflare pairs are handed over only once the zone pairs are in
+// effect, so a refused zone reload leaves both as they were. Other changed
+// settings are listed, by name only, as needing a restart.
+func reloadZones(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager, cf *cloudflarePairSource,
+	reconcilesOpen func() bool, log zerolog.Logger,
+) {
 	if cfg.DryRun {
 		log.Info().Msg("[DRY-RUN] skipping zone reload")
 		return
@@ -107,23 +139,65 @@ func reloadZones(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager
 		log.Warn().Err(err).Msg("SIGHUP: reload config failed")
 		return
 	}
-	newPairs, err := newCfg.ParseZonePairs()
+	applied := reloadedOnSIGHUP
+	cfPairs, cfApplies := reloadedCloudflarePairs(cf, newCfg, log)
+	if cfApplies {
+		applied = append(slices.Clone(applied), "CLOUDFLARE_ZONE_PAIRS")
+	}
+	if changed := config.ChangedSettings(cfg, newCfg, applied...); len(changed) > 0 {
+		log.Info().Strs("settings", changed).Msg("SIGHUP: changed settings take effect only after a restart")
+	}
+	// Legacy sites have no zone pairs to apply, so an empty ZONE_PAIRS is
+	// expected there and checked only once a site uses zone mode.
+	zm := fwMgr.ZoneManager()
+	if zm == nil {
+		if cfApplies {
+			publishCloudflarePairs(cf, cfPairs, log)
+		}
+		log.Warn().Msg("SIGHUP: ZoneManager not available (legacy mode?), skipping reload")
+		return
+	}
+	newPairs, err := newCfg.ManagedZonePairs()
 	if err != nil {
 		log.Warn().Err(err).Msg("SIGHUP: parse zone pairs failed")
 		return
 	}
 	if len(newPairs) == 0 {
 		// Applying an empty set would delete every block policy as an orphan.
-		log.Error().Msg("SIGHUP: ZONE_PAIRS names no zone pair; keeping the current zone pairs")
+		log.Error().Msg("SIGHUP: ZONE_PAIRS and EGRESS_ZONE_PAIRS name no zone pair; keeping the current zone pairs")
 		return
 	}
-	zm := fwMgr.ZoneManager()
-	if zm == nil {
-		log.Warn().Msg("SIGHUP: ZoneManager not available (legacy mode?), skipping reload")
-		return
+	if cfApplies {
+		if err := checkCloudflareZones(ctx, zm, cfg.UnifiSites, cfPairs); err != nil {
+			log.Warn().Err(err).Msg("SIGHUP: Cloudflare zone pairs refused; keeping the current zone pairs")
+			return
+		}
 	}
 	if err := zm.Reload(ctx, cfg.UnifiSites, newPairs); err != nil {
 		log.Warn().Err(err).Msg("SIGHUP: zone reload failed")
+		return
+	}
+	if cfApplies {
+		publishCloudflarePairs(cf, cfPairs, log)
+	}
+	logSitePairs(newCfg, cfg.UnifiSites, log)
+	enforceReloadedPairs(ctx, cfg, fwMgr, reconcilesOpen, log)
+}
+
+// enforceReloadedPairs brings the controller in line with zone pairs a
+// SIGHUP has just applied.
+func enforceReloadedPairs(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager,
+	reconcilesOpen func() bool, log zerolog.Logger,
+) {
+	if !reconcilesOpen() {
+		// A full reconcile also removes controller members the ban database
+		// does not hold. Until the startup gate opens the database may be
+		// empty, so only the policies are brought in line with the new pairs.
+		if err := fwMgr.RepairInfrastructure(ctx, cfg.UnifiSites); err != nil {
+			log.Warn().Err(err).Msg("SIGHUP: zone policies could not be fully repaired")
+			return
+		}
+		log.Info().Msg("SIGHUP: zone pairs and policies reloaded; bans are reconciled once the startup reconcile runs")
 		return
 	}
 	if _, err := fwMgr.Reconcile(ctx, cfg.UnifiSites); err != nil {
@@ -133,69 +207,15 @@ func reloadZones(ctx context.Context, cfg *config.Config, fwMgr firewall.Manager
 	log.Info().Msg("SIGHUP: zone pairs and policies reloaded successfully")
 }
 
-// cloudflarePairs parses CLOUDFLARE_ZONE_PAIRS. Zone IDs are resolved for each
-// site later, by the whitelist manager.
-func cloudflarePairs(cfg *config.Config) ([]whitelist.ZonePairConfig, error) {
-	if !cfg.CloudflareWhitelistEnabled {
-		return nil, nil
-	}
-	parsed, err := cfg.ParseCloudflareZonePairs()
-	if err != nil {
-		return nil, fmt.Errorf("CLOUDFLARE_ZONE_PAIRS: %w", err)
-	}
-	pairs := make([]whitelist.ZonePairConfig, 0, len(parsed))
-	for _, pair := range parsed {
-		pairs = append(pairs, whitelist.ZonePairConfig{
-			SrcName:  pair.Src,
-			DstName:  pair.Dst,
-			SrcPorts: pair.SrcPorts,
-			DstPorts: pair.DstPorts,
-			DstIPs:   pair.DstIPs,
-		})
-	}
-	return pairs, nil
-}
-
-// startCloudflareWhitelist runs the first Cloudflare whitelist sync and returns
-// the manager for periodic refreshes, or nil when the feature is off. When it
-// is off, objects left by an earlier run are drained; they can only exist if
-// an API key created them.
-func startCloudflareWhitelist(ctx context.Context, cfg *config.Config, ctrl controller.Controller,
-	zm *firewall.ZoneManager, pairs []whitelist.ZonePairConfig, log zerolog.Logger,
-) *whitelist.Manager {
-	if cfg.DryRun {
-		return nil
-	}
-	if !cfg.CloudflareWhitelistEnabled {
-		if cfg.UnifiAPIKey != "" {
-			if err := whitelist.NewManager(ctrl, cfg.UnifiSites, nil, log).Drain(ctx); err != nil {
-				log.Warn().Err(err).Msg("Cloudflare whitelist drain failed — orphaned policies may remain")
-			}
-		}
-		return nil
-	}
-	provider := whitelist.NewCloudflareProvider(cfg.CloudflareIPv4URL, cfg.CloudflareIPv6URL)
-	mgr := whitelist.NewManager(ctrl, cfg.UnifiSites, provider, log)
-	if zm != nil {
-		mgr.SetBlockRecreator(zm)
-	}
-	if err := mgr.Sync(ctx, pairs); err != nil {
-		log.Error().Err(err).
-			Msg("initial Cloudflare whitelist sync FAILED — Cloudflare IPs will NOT be whitelisted until next tick; false positives possible")
-		metrics.CloudflareWhitelistSyncErrors.Inc()
-	} else {
-		log.Info().Msg("Cloudflare whitelist initial sync complete")
-	}
-	return mgr
-}
-
 // repairAndSyncWhitelist ensures the block policy or rule of every loaded
 // shard, then runs the Cloudflare whitelist: the first sync, then a refresh
-// every CLOUDFLARE_REFRESH_INTERVAL. Shards that could not be provisioned are
-// retried by the next sync; any other repair error is sent on failed and
-// stops the daemon, as it did when the repair ran before startup finished.
+// every CLOUDFLARE_REFRESH_INTERVAL and after a SIGHUP changes the pairs.
+// Shards that could not be provisioned are retried by the next sync; any other
+// repair error is sent on failed and stops the daemon, as it did when the
+// repair ran before startup finished.
 func repairAndSyncWhitelist(ctx context.Context, cfg *config.Config, ctrl controller.Controller,
-	fwMgr firewall.Manager, cfPairs []whitelist.ZonePairConfig, failed chan<- error, log zerolog.Logger,
+	fwMgr firewall.Manager, cfPairs *cloudflarePairSource, notifier *webhook.Notifier,
+	failed chan<- error, log zerolog.Logger,
 ) {
 	start := time.Now()
 	log.Info().Msg("repairing firewall policies and rules")
@@ -208,21 +228,10 @@ func repairAndSyncWhitelist(ctx context.Context, cfg *config.Config, ctrl contro
 		return
 	}
 	log.Info().Stringer("elapsed", time.Since(start)).Msg("firewall policies and rules repaired")
-	cfManager := startCloudflareWhitelist(ctx, cfg, ctrl, fwMgr.ZoneManager(), cfPairs, log)
+	cfManager := startCloudflareWhitelist(ctx, cfg, ctrl, fwMgr.ZoneManager(), cfPairs.Pairs(), notifier, log)
 	if cfManager != nil {
-		runCloudflareRefresh(ctx, cfManager, cfPairs, cfg.CloudflareRefreshInterval, log)
+		runCloudflareRefresh(ctx, cfManager, cfPairs, cfg.CloudflareRefreshInterval, notifier, log)
 	}
-}
-
-func runCloudflareRefresh(ctx context.Context, mgr *whitelist.Manager, pairs []whitelist.ZonePairConfig, interval time.Duration, log zerolog.Logger) {
-	every(ctx, interval, func() {
-		if err := mgr.Sync(ctx, pairs); err != nil {
-			log.Error().Err(err).Msg("Cloudflare whitelist refresh failed")
-			metrics.CloudflareWhitelistSyncErrors.Inc()
-			return
-		}
-		log.Info().Msg("Cloudflare whitelist refresh complete")
-	})
 }
 
 // newMetricsRecorder starts the LAPI usage-metrics reporter, or returns a

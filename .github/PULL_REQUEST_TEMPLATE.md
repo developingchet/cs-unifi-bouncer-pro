@@ -22,7 +22,7 @@
 
 - [ ] Commit messages are clear and scoped
 - [ ] No secrets, tokens, or credentials in code or commit messages
-- [ ] CHANGELOG or release notes updated if applicable
+- [ ] `docs/UPGRADING.md` and the affected docs updated if behaviour changes for users
 
 ## Related issues
 

@@ -3,16 +3,19 @@ package firewall
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 )
 
 // isStagedPolicy reports whether p is a staged replacement copy owned by this
-// bouncer.
+// bouncer: an inbound copy with one source list, or an egress copy with none
+// and the shard list as its destination.
 func (zm *ZoneManager) isStagedPolicy(p controller.ZonePolicy) bool {
+	listed := len(p.TrafficMatchingListIDs) == 1 || (len(p.TrafficMatchingListIDs) == 0 && p.DstIPTMLID != "")
 	return strings.HasPrefix(p.Name, stagedPolicyPrefix) && p.Action == "BLOCK" &&
-		p.Description == zm.cfg.Description && len(p.TrafficMatchingListIDs) == 1
+		p.Description == zm.cfg.Description && listed
 }
 
 // cleanupStagedPolicies settles the staged copies a replacement left behind.
@@ -34,7 +37,7 @@ func (zm *ZoneManager) cleanupStagedPolicies(ctx context.Context, site string, o
 			continue
 		}
 		covered := coveredByNamedPolicy(staged, existingByID)
-		if !covered && owned[staged.TrafficMatchingListIDs[0]] {
+		if !covered && owned[policyListID(staged)] {
 			continue
 		}
 		if err := zm.deleteStagedPolicy(ctx, site, staged, existingByID); err != nil {
@@ -55,7 +58,7 @@ func coveredByNamedPolicy(staged controller.ZonePolicy, existingByID map[string]
 		if p.ID == staged.ID || strings.HasPrefix(p.Name, stagedPolicyPrefix) || p.Action != "BLOCK" {
 			continue
 		}
-		if len(p.TrafficMatchingListIDs) == 1 && p.TrafficMatchingListIDs[0] == staged.TrafficMatchingListIDs[0] &&
+		if slices.Equal(p.TrafficMatchingListIDs, staged.TrafficMatchingListIDs) &&
 			p.SrcZone == staged.SrcZone && p.DstZone == staged.DstZone && p.IPVersion == staged.IPVersion &&
 			p.SrcPortTMLID == staged.SrcPortTMLID && p.DstPortTMLID == staged.DstPortTMLID && p.DstIPTMLID == staged.DstIPTMLID {
 			return true

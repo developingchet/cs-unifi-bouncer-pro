@@ -10,8 +10,9 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
 )
 
-// PrunableTail returns an empty Active tail shard for removal. The conventional
-// index-0 anchor is retained when it is the only shard.
+// PrunableTail returns an empty Active tail shard for removal, shard 0
+// included: the next ban of the family creates a shard again, so an emptied
+// family leaves no list holding only the placeholder address behind.
 func (sm *ShardManager) PrunableTail() (unifiID string, shardIdx int, ok bool) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -22,9 +23,6 @@ func (sm *ShardManager) PrunableTail() (unifiID string, shardIdx int, ok bool) {
 	}
 
 	last := family.Shards[len(family.Shards)-1]
-	if len(family.Shards) == 1 && last.Index == 0 {
-		return "", -1, false // retain the conventional anchor shard
-	}
 	// Only prune Active shards that are empty; skip Pending and Draining
 	if last.State != ShardStateActive || last.IPs.Len() > 0 {
 		return "", -1, false

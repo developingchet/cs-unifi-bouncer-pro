@@ -60,27 +60,14 @@ The Docker image is hardened by default:
 - **`http://` is only safe** when the connection is confined to a loopback address (`127.0.0.1`, `::1`) or a Unix socket — i.e. the LAPI process is on the same host and the connection never crosses a network interface. On a shared container bridge network, `http://` sends the LAPI key in plaintext and exposes it to any process that can observe the network traffic.
 - A non-loopback `http://` URL requires `CROWDSEC_LAPI_ALLOW_HTTP=true` and emits a startup warning.
 
-The `.env.example` file opts into HTTP for a same-host Docker network. Remote LAPI and multi-node deployments should use HTTPS with certificate verification.
+`.env.example` keeps the default `https://` URL and shows, commented out, the two lines an `http://` LAPI on a same-host Docker network needs. Remote LAPI and multi-node deployments should use HTTPS with certificate verification.
 
-## Connectivity Timeout Root Cause (resolved)
-
-Two issues combined to cause a 15-second timeout on UniFi API requests:
-
-1. **IPv6 happy eyeballs stall** — Go's `net.Dialer` with `network="tcp"` races
-   IPv4 and IPv6 simultaneously. On hosts with IPv6 interfaces but no IPv6 route
-   to the controller, the IPv6 attempt stalls silently for the full 15s timeout.
-   Fixed by `ENABLE_IPV6=false` (default) which forces `tcp4` dialing.
-
-2. **Missing `futex_waitv` syscall** — Go 1.21+ uses `futex_waitv` on kernel
-   5.16+ as an optimized goroutine park/unpark mechanism. Without it, every
-   goroutine yield during network I/O (TLS handshake, waiting for response)
-   silently blocks. On kernel 6.8 with Go 1.24 this caused all network operations
-   to hang until `http.Client.Timeout` fired at exactly 15 seconds.
-
-### Seccomp profile
+## Seccomp Profile
 
 The profile (`security/seccomp-unifi.json`) uses `SCMP_ACT_ERRNO` as the default
-action — all syscalls are denied unless explicitly listed.
+action — all syscalls are denied unless explicitly listed. `clone` is allowed
+only without namespace flags, and `clone3` fails with `ENOSYS` so that the Go
+runtime and runc fall back to `clone`, whose flags the filter can inspect.
 
 The allowlist is grouped into three categories:
 
@@ -96,7 +83,7 @@ The allowlist is grouped into three categories:
 | `set_tid_address` | Go runtime thread initialization |
 | `prlimit64` | Go runtime stack size checks at startup |
 | `eventfd2` | Go network poller creates its wakeup fd during `netpollinit()` |
-| `clone` / `clone3` | OS thread creation for the goroutine scheduler |
+| `clone` | OS thread creation for the goroutine scheduler; allowed only when no namespace flag is set |
 | `set_robust_list` | Kernel robust futex list — registered per-thread by the Go runtime |
 | `sigaltstack` | Alternate signal stack — set up per-thread by the Go runtime |
 | `rt_sigaction` / `rt_sigprocmask` / `rt_sigreturn` | Signal handling for goroutine preemption and panic recovery |
@@ -114,7 +101,9 @@ The allowlist is grouped into three categories:
 | `pselect6` | Go's netpoller fallback selector on systems without epoll support |
 | `ppoll` | Netpoller fallback, used alongside `epoll_pwait` |
 | `read` / `readv` / `write` / `writev` / `pread64` / `pwrite64` | File and socket reads/writes (vectored and positional variants) |
+| `close` | Closing files and sockets |
 | `openat` / `fstat` / `fstatfs` / `newfstatat` / `statx` / `stat` | File access (bbolt database, config) |
+| `mkdirat` | Creating `DATA_DIR` when it does not exist |
 | `flock` | bbolt acquires `LOCK_EX\|LOCK_NB` advisory lock on `bouncer.db` at open time |
 | `fallocate` | bbolt pre-allocates disk space on database creation and growth |
 | `fsync` / `fdatasync` / `ftruncate` | bbolt ACID write path; `fdatasync` flushes data faster than full `fsync` |
@@ -131,7 +120,7 @@ The allowlist is grouped into three categories:
 | `msync` | bbolt flushes dirty mmap pages to disk on every commit using `msync(MS_SYNC)` for ACID guarantees |
 | `brk` | Initial heap growth |
 | `futex` | Goroutine mutex and channel synchronization |
-| `futex_waitv` | Go 1.21+ goroutine scheduler optimization for kernel ≥ 5.16. Used for park/unpark during all I/O waits including TLS. **Root cause of 15s timeout.** |
+| `futex_waitv` | Go 1.21+ goroutine scheduler optimization for kernel ≥ 5.16. Used for park/unpark during all I/O waits including TLS; without it every network request hangs until its timeout |
 | `sched_getaffinity` / `sched_yield` | GOMAXPROCS detection and cooperative scheduling |
 | `nanosleep` / `clock_gettime` / `clock_nanosleep` / `gettimeofday` | Timers (decision TTL, rate limiter, batch window); `clock_nanosleep` is used by Go runtime timer implementation |
 | `timerfd_create` / `timerfd_settime` / `timerfd_gettime` | Go's timer implementation; `timerfd` is the kernel interface backing Go's efficient timer heap |
@@ -161,23 +150,26 @@ The allowlist is grouped into three categories:
 
 ### Validating the profile
 
-The CI `Seccomp Integration Test` job builds the production image and runs:
+The CI `Validate Seccomp Profile` job checks the allowlist with
+`scripts/validate-seccomp.sh`. The `Seccomp Integration Test` job then builds the
+production image and runs:
 
 ```bash
 docker run --rm \
   --security-opt "seccomp:./security/seccomp-unifi.json" \
   --security-opt no-new-privileges:true \
   --cap-drop ALL \
-  --read-only \
   cs-unifi-bouncer-test:ci \
   version
 ```
 
 The `version` subcommand prints the version string and exits 0. It requires no
-network, no UniFi controller, and no CrowdSec. It exercises the full Go runtime
-initialization path — the most syscall-dense phase — without needing external
-services. A clean exit confirms every syscall needed from process start through
-full runtime initialization is present in the allowlist.
+network, no UniFi controller, and no CrowdSec, and exercises the Go runtime
+initialization path, the most syscall-dense phase. A second step runs
+`reconcile` under the same options with an empty data volume and an unreachable
+controller: it must create and open the database and then fail on the
+connection (exit 1), not on a blocked syscall (`operation not permitted`, or
+exit 159 for `SIGSYS`).
 
 ### Profile maintenance
 
@@ -190,7 +182,7 @@ If the profile needs updating after a Go version bump or new dependency:
 5. Revert `defaultAction` to `SCMP_ACT_ERRNO`
 6. Validate with the CI test
 
-### Supply Chain Integrity
+## Supply Chain Integrity
 
 Every release tag triggers a GitHub Actions workflow that:
 
@@ -214,14 +206,18 @@ To verify a release image:
 
 ```bash
 # Verify Cosign signature
-cosign verify developingchet/cs-unifi-bouncer-pro:latest \
+cosign verify developingchet/cs-unifi-bouncer-pro:2.3.0 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 
 # Download and verify SBOM
-cosign download attestation developingchet/cs-unifi-bouncer-pro:latest \
+cosign download attestation developingchet/cs-unifi-bouncer-pro:2.3.0 \
   | jq -r '.payload | @base64d | fromjson | .predicate'
 ```
+
+Releases also publish the same image, with its signature and attestations, to
+`ghcr.io/developingchet/cs-unifi-bouncer-pro`; the commands above work with that
+name in place of `developingchet/cs-unifi-bouncer-pro`.
 
 To verify downloaded release binaries:
 

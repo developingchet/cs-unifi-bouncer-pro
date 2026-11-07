@@ -36,13 +36,19 @@ No API calls are made — safe to run in CI without network access.`,
 				fmt.Fprintf(os.Stderr, "configuration invalid: %v\n", err)
 				os.Exit(1)
 			}
-			pairStr := fmt.Sprintf("%d pair(s)", len(pairs))
-			if len(pairs) > 0 {
-				parts := make([]string, 0, len(pairs))
-				for _, p := range pairs {
-					parts = append(parts, p.Src+"->"+p.Dst)
+			egressPairs, err := cfg.ParseEgressZonePairs()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "configuration invalid: %v\n", err)
+				os.Exit(1)
+			}
+			rows := append(zonePairRows("zone_pairs", pairs, cfg), zonePairRows("egress_zone_pairs", egressPairs, cfg)...)
+			if cfg.CloudflareWhitelistEnabled {
+				cloudflarePairs, err := cfg.ParseCloudflareZonePairs()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "configuration invalid: %v\n", err)
+					os.Exit(1)
 				}
-				pairStr = strings.Join(parts, ", ")
+				rows = append(rows, zonePairRows("cloudflare_zone_pairs", cloudflarePairs, cfg)...)
 			}
 
 			v4Cap, _ := resolveCapacities(cfg)
@@ -50,7 +56,9 @@ No API calls are made — safe to run in CI without network access.`,
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "FIELD\tVALUE")
 			fmt.Fprintf(w, "firewall_mode\t%s\n", cfg.FirewallMode)
-			fmt.Fprintf(w, "zone_pairs\t%s\n", pairStr)
+			for _, row := range rows {
+				fmt.Fprintf(w, "%s\t%s\n", row[0], row[1])
+			}
 			fmt.Fprintf(w, "sites\t%s\n", strings.Join(cfg.UnifiSites, ", "))
 			fmt.Fprintf(w, "ban_ttl\t%s\n", cfg.BanTTL)
 			fmt.Fprintf(w, "shard_capacity\t%d\n", v4Cap)
@@ -71,6 +79,12 @@ No API calls are made — safe to run in CI without network access.`,
 			}
 			if w2 := cfg.InsecureLAPIURLWarning(); w2 != "" {
 				fmt.Fprintf(os.Stderr, "WARNING: %s\n", w2)
+			}
+			// Discovered sites are not known without contacting the controller.
+			if !cfg.UnifiSitesAuto {
+				for _, w2 := range cfg.UnenforcedIPv6Warnings(cfg.UnifiSites) {
+					fmt.Fprintf(os.Stderr, "WARNING: %s\n", w2)
+				}
 			}
 
 			fmt.Println("\nconfiguration valid ✓")
@@ -147,9 +161,13 @@ Exits 0 when all checks pass, 1 if any check fails.`,
 			checks = append(checks, diagCheck{"unifi_reachable", "PASS", cfg.UnifiURL + " ping ok"})
 		}
 
+		versionCheck, zoneOnly := diagnoseVersion(ctx, ctrl, cfg)
+		checks = append(checks, versionCheck)
+		allPass = allPass && versionCheck.status != "FAIL"
+
 		if cfg.FirewallMode != "legacy" {
 			for _, site := range cfg.UnifiSites {
-				siteChecks, ok := diagnoseSiteZones(ctx, ctrl, cfg.FirewallMode, site)
+				siteChecks, ok := diagnoseSiteZones(ctx, ctrl, cfg.FirewallMode, site, zoneOnly)
 				checks = append(checks, siteChecks...)
 				allPass = allPass && ok
 			}
@@ -219,15 +237,46 @@ func probeLAPIHealth(ctx context.Context, client *http.Client, base string) diag
 	return diagCheck{name, "WARN", detail}
 }
 
+// diagnoseVersion reports the controller's UniFi Network version and whether
+// that release applies only the zone-based firewall. A version that cannot be
+// read is a warning, as at startup; legacy mode on a zone-only release fails.
+func diagnoseVersion(ctx context.Context, ctrl controller.Controller, cfg *config.Config) (diagCheck, bool) {
+	const name = "unifi_version"
+	site := "default"
+	if len(cfg.UnifiSites) > 0 {
+		site = cfg.UnifiSites[0]
+	}
+	raw, err := ctrl.ApplicationVersion(ctx, site)
+	if err != nil {
+		return diagCheck{name, "WARN", err.Error()}, false
+	}
+	version, err := controller.ParseNetworkVersion(raw)
+	if err != nil {
+		return diagCheck{name, "WARN", err.Error()}, false
+	}
+	if !version.ZoneOnly() {
+		return diagCheck{name, "PASS", "UniFi Network " + version.String()}, false
+	}
+	detail := "UniFi Network " + version.String() + " (zone-based firewall only)"
+	if cfg.FirewallMode == "legacy" {
+		return diagCheck{name, "FAIL", detail + "; FIREWALL_MODE=legacy rules would block nothing"}, true
+	}
+	return diagCheck{name, "PASS", detail}, true
+}
+
 // diagnoseSiteZones resolves the firewall mode for one site (in auto mode, the
 // same way startup does) and lists its zones when the site uses zone mode.
 // Listing zones needs the integration API, so running it against a legacy
 // site authenticated by username/password would report a false failure.
-func diagnoseSiteZones(ctx context.Context, ctrl controller.Controller, mode, site string) ([]diagCheck, bool) {
+func diagnoseSiteZones(ctx context.Context, ctrl controller.Controller, mode, site string, zoneOnly bool) ([]diagCheck, bool) {
 	if mode == "auto" {
 		hasZones, err := ctrl.HasFeature(ctx, site, controller.FeatureZoneBasedFirewall)
 		if err != nil {
 			return []diagCheck{{"firewall_mode[" + site + "]", "FAIL", err.Error()}}, false
+		}
+		if !hasZones && zoneOnly {
+			return []diagCheck{{"firewall_mode[" + site + "]", "FAIL",
+				"site has no firewall zones, and this release applies no legacy rules"}}, false
 		}
 		if !hasZones {
 			return []diagCheck{{"firewall_mode[" + site + "]", "PASS", "legacy (site has no firewall zones)"}}, true

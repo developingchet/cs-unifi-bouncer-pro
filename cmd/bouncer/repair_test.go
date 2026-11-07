@@ -38,7 +38,7 @@ func TestRepairAndSyncWhitelistReportsFailure(t *testing.T) {
 				cancel()
 			}
 			failed := make(chan error, 1)
-			repairAndSyncWhitelist(ctx, &config.Config{}, nil, repairStub{err: tt.err}, nil, failed, zerolog.Nop())
+			repairAndSyncWhitelist(ctx, &config.Config{}, nil, repairStub{err: tt.err}, nil, nil, failed, zerolog.Nop())
 			select {
 			case err := <-failed:
 				if !tt.wantFail {

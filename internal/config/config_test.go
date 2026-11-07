@@ -36,6 +36,7 @@ func TestStripEnvQuotes(t *testing.T) {
 		{"'", "'"},                                     // single char — unchanged
 		{"", ""},                                       // empty — unchanged
 		{"'nested 'quotes''", "nested 'quotes'"},       // only outer pair stripped
+		{"'it's'", "it's"},                             // a scalar keeps a quote inside
 	}
 	for _, tc := range cases {
 		if got := stripEnvQuotes(tc.in); got != tc.want {
@@ -225,6 +226,90 @@ func TestFileSecretInjection(t *testing.T) {
 	}
 	if cfg.UnifiAPIKey != "secret-from-file" {
 		t.Errorf("expected trimmed file secret, got %q", cfg.UnifiAPIKey)
+	}
+}
+
+func TestZonePairsFromFile(t *testing.T) {
+	dir := t.TempDir()
+	pairsFile := filepath.Join(dir, "zone_pairs")
+	pairs := "# inbound\nExternal->Dmz:80,443\n\n  External->Internal@192.168.1.10,192.168.1.11  \r\n"
+	if err := os.WriteFile(pairsFile, []byte(pairs), 0600); err != nil {
+		t.Fatal(err)
+	}
+	egressFile := filepath.Join(dir, "egress_zone_pairs")
+	if err := os.WriteFile(egressFile, []byte("Dmz->External\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
+	setEnv(t, "UNIFI_API_KEY", "key")
+	setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
+	setEnv(t, "ZONE_PAIRS", "External->Hotspot")
+	setEnv(t, "ZONE_PAIRS_FILE", `"`+pairsFile+`"`)
+	setEnv(t, "EGRESS_ZONE_PAIRS_FILE", egressFile)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	inbound, err := cfg.ParseZonePairs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inbound) != 2 {
+		t.Fatalf("expected 2 pairs from the file, got %d: %+v", len(inbound), inbound)
+	}
+	if inbound[0].Dst != "Dmz" || len(inbound[0].DstPorts) != 2 {
+		t.Errorf("first pair = %+v, want External->Dmz with ports 80,443", inbound[0])
+	}
+	if inbound[1].Dst != "Internal" || len(inbound[1].DstIPs) != 2 {
+		t.Errorf("second pair = %+v, want External->Internal with two destination IPs", inbound[1])
+	}
+	egress, err := cfg.ParseEgressZonePairs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(egress) != 1 || egress[0].Src != "Dmz" {
+		t.Errorf("egress pairs = %+v, want Dmz->External", egress)
+	}
+}
+
+func TestJoinZonePairLines(t *testing.T) {
+	tests := []struct {
+		name, content string
+		want          []string
+	}{
+		{"comma list beside a port pair", "External->Dmz,External->Internal\nExternal->Hotspot:80,443\n",
+			[]string{"External->Dmz", "External->Internal", "External->Hotspot:80,443"}},
+		{"semicolon list beside a pair", "External->Dmz;External->Internal@10.0.0.1,10.0.0.2\n# note\n\nDmz->Internal\n",
+			[]string{"External->Dmz", "External->Internal@10.0.0.1,10.0.0.2", "Dmz->Internal"}},
+		{"one pair", "External->Dmz", []string{"External->Dmz"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := splitZonePairList(joinZonePairLines(tt.content))
+			if _, err := parseZonePairList(got); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("pairs = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	// A stray separator on a line is still reported, not dropped.
+	if _, err := parseZonePairList(splitZonePairList(joinZonePairLines("External->Dmz;\n"))); err == nil {
+		t.Error("a trailing semicolon in the file parsed without error")
+	}
+}
+
+func TestZonePairsFileMustBeReadable(t *testing.T) {
+	setEnv(t, "UNIFI_URL", "https://192.168.1.1")
+	setEnv(t, "UNIFI_API_KEY", "key")
+	setEnv(t, "CROWDSEC_LAPI_KEY", "lapi-key")
+	setEnv(t, "ZONE_PAIRS_FILE", filepath.Join(t.TempDir(), "missing"))
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ZONE_PAIRS_FILE") {
+		t.Fatalf("Load with a missing pairs file: err = %v, want a ZONE_PAIRS_FILE error", err)
 	}
 }
 
@@ -670,6 +755,119 @@ func TestLoad_QuotedEnvValues(t *testing.T) {
 	}
 	if cfg.UnifiAPIKey != "test-api-key" {
 		t.Errorf("UnifiAPIKey: got %q, want %q", cfg.UnifiAPIKey, "test-api-key")
+	}
+}
+
+// A list quoted as a whole ("a,b") or element by element ('a','b') reads as
+// the same elements: the quotes are never left on the first or last one.
+func TestLoad_QuotedListValues(t *testing.T) {
+	tests := []struct {
+		env  string
+		val  string
+		got  func(*Config) any
+		want any
+	}{
+		{"CROWDSEC_ORIGINS", `"crowdsec,lists"`, func(c *Config) any { return c.CrowdSecOrigins }, []string{"crowdsec", "lists"}},
+		{"BLOCK_SCENARIO_EXCLUDE", `'crowdsecurity/ssh-bf,crowdsecurity/http-probing'`,
+			func(c *Config) any { return c.BlockScenarioExclude }, []string{"crowdsecurity/ssh-bf", "crowdsecurity/http-probing"}},
+		{"BLOCK_DECISION_TYPES", `"ban,captcha"`, func(c *Config) any { return c.BlockDecisionTypes }, []string{"ban", "captcha"}},
+		{"BLOCK_WHITELIST", `"10.0.0.1,10.0.0.2"`, func(c *Config) any { return c.BlockWhitelist }, []string{"10.0.0.1", "10.0.0.2"}},
+		{"UNIFI_SITES", `"default,branch"`, func(c *Config) any { return c.UnifiSites }, []string{"default", "branch"}},
+		{"UNIFI_SITES_EXCLUDE", `"lab,test"`, func(c *Config) any { return c.UnifiSitesExclude }, []string{"lab", "test"}},
+		{"ZONE_PAIRS", `"External->Dmz,External->Internal"`, func(c *Config) any { return c.ZonePairs },
+			[]string{"External->Dmz", "External->Internal"}},
+		{"EGRESS_ZONE_PAIRS", `'Dmz->External;IoT->External'`, func(c *Config) any { return c.EgressZonePairs },
+			[]string{"Dmz->External", "IoT->External"}},
+		{"BLOCKLIST_URLS", `"https://a.example/list.txt,https://b.example/list.txt"`, func(c *Config) any { return c.BlocklistURLs },
+			[]string{"https://a.example/list.txt", "https://b.example/list.txt"}},
+		{"WEBHOOK_EVENTS", `"circuit_breaker_open,reconcile_drift"`, func(c *Config) any { return c.WebhookEvents },
+			[]string{"circuit_breaker_open", "reconcile_drift"}},
+		{"WEBHOOK_URL", `"https://hooks.example/notify"`, func(c *Config) any { return c.WebhookURL }, "https://hooks.example/notify"},
+		{"BLOCK_SCENARIO_DURATION_MAP", `"ssh-bf=168h;http-probing=24h"`, func(c *Config) any { return c.BlockScenarioDurationMap },
+			map[string]time.Duration{"ssh-bf": 168 * time.Hour, "http-probing": 24 * time.Hour}},
+		{"SYNC_INTERVAL", `"45s"`, func(c *Config) any { return c.SyncInterval }, 45 * time.Second},
+		{"FIREWALL_ENABLE_IPV6", `"false"`, func(c *Config) any { return c.FirewallEnableIPv6 }, false},
+		{"UNIFI_SITES", `'default','branch'`, func(c *Config) any { return c.UnifiSites }, []string{"default", "branch"}},
+		{"UNIFI_SITES", `"default","branch"`, func(c *Config) any { return c.UnifiSites }, []string{"default", "branch"}},
+		{"UNIFI_SITES", `"default",'branch'`, func(c *Config) any { return c.UnifiSites }, []string{"default", "branch"}},
+		{"CROWDSEC_ORIGINS", `"crowdsec","lists"`, func(c *Config) any { return c.CrowdSecOrigins }, []string{"crowdsec", "lists"}},
+		{"BLOCK_DECISION_TYPES", `'ban','captcha'`, func(c *Config) any { return c.BlockDecisionTypes }, []string{"ban", "captcha"}},
+		{"BLOCK_WHITELIST", `"10.0.0.1","10.0.0.2"`, func(c *Config) any { return c.BlockWhitelist }, []string{"10.0.0.1", "10.0.0.2"}},
+		{"ZONE_PAIRS", `'External->Dmz','External->Internal'`, func(c *Config) any { return c.ZonePairs },
+			[]string{"External->Dmz", "External->Internal"}},
+		{"ZONE_PAIRS", `"External:80,443->Internal";"External->Dmz"`, func(c *Config) any { return c.ZonePairs },
+			[]string{"External:80,443->Internal", "External->Dmz"}},
+		{"EGRESS_ZONE_PAIRS", `'Dmz->External';'IoT->External'`, func(c *Config) any { return c.EgressZonePairs },
+			[]string{"Dmz->External", "IoT->External"}},
+		{"WEBHOOK_EVENTS", `"circuit_breaker_open","reconcile_drift"`, func(c *Config) any { return c.WebhookEvents },
+			[]string{"circuit_breaker_open", "reconcile_drift"}},
+		{"BLOCK_SCENARIO_DURATION_MAP", `"ssh-bf=168h";"http-probing=24h"`, func(c *Config) any { return c.BlockScenarioDurationMap },
+			map[string]time.Duration{"ssh-bf": 168 * time.Hour, "http-probing": 24 * time.Hour}},
+		{"FIREWALL_CONNECTION_STATES", `'NEW','INVALID'`, func(c *Config) any {
+			states, _ := c.ParseFirewallConnectionStates()
+			return states
+		}, []string{"NEW", "INVALID"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.env+"="+tc.val, func(t *testing.T) {
+			baseEnv(t)
+			setEnv(t, tc.env, tc.val)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := tc.got(cfg); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("%s=%s: got %#v, want %#v", tc.env, tc.val, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_QuotedCountryCodes(t *testing.T) {
+	for _, val := range []string{`'us','ca'`, `"us,ca"`, `"us","ca"`} {
+		t.Run(val, func(t *testing.T) {
+			baseEnv(t)
+			setEnv(t, "ABUSEIPDB_LIST", "7d")
+			setEnv(t, "ABUSEIPDB_COUNTRY_EXCLUDE", val)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if want := []string{"US", "CA"}; !reflect.DeepEqual(cfg.AbuseIPDBCountryExclude, want) {
+				t.Errorf("AbuseIPDBCountryExclude = %q, want %q", cfg.AbuseIPDBCountryExclude, want)
+			}
+		})
+	}
+}
+
+// Zone pairs read from a file may be quoted line by line.
+func TestLoad_QuotedZonePairFile(t *testing.T) {
+	baseEnv(t)
+	path := filepath.Join(t.TempDir(), "zone-pairs")
+	content := "'External->Internal'\n\"default/Wan->Lan:80,443\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setEnv(t, "ZONE_PAIRS_FILE", path)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := []string{"External->Internal", "default/Wan->Lan:80,443"}; !reflect.DeepEqual(cfg.ZonePairs, want) {
+		t.Errorf("ZonePairs = %q, want %q", cfg.ZonePairs, want)
+	}
+}
+
+func TestLoad_QuotedCloudflareZonePairs(t *testing.T) {
+	baseEnv(t)
+	setEnv(t, "CLOUDFLARE_WHITELIST_ENABLED", "true")
+	setEnv(t, "CLOUDFLARE_ZONE_PAIRS", `"External->Internal:80,443;External->Dmz"`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := []string{"External->Internal:80,443", "External->Dmz"}; !reflect.DeepEqual(cfg.CloudflareZonePairs, want) {
+		t.Errorf("CloudflareZonePairs = %q, want %q", cfg.CloudflareZonePairs, want)
 	}
 }
 

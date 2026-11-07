@@ -44,7 +44,7 @@ func TestEnsurePolicies_OneRefusedShardDoesNotOrphanTheRest(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 	for _, ip := range []string{"203.0.113.1", "203.0.113.2", "203.0.113.3"} {
-		if _, _, err := sm.Add(ctx, ip); err != nil {
+		if _, err := sm.Add(ctx, ip); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
 	}

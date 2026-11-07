@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/banstate"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/bouncer"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
@@ -22,11 +23,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// reconcileCmd runs a one-shot full reconcile.
+// daemonReconcileTimeout bounds the wait for a reconcile run by the daemon.
+// It is longer than the daemon's own limit, so the daemon's answer arrives.
+const daemonReconcileTimeout = 31 * time.Minute
+
+// reconcileCmd runs a one-shot full reconcile, through the running bouncer
+// when there is one.
 func reconcileCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "reconcile",
 		Short: "Run a one-shot full reconcile and exit",
+		Long: `Reconcile every configured site's firewall objects with the ban database.
+While the bouncer runs, the reconcile is run by the bouncer itself through its
+health server (run the command inside the bouncer's container); otherwise the
+database is opened directly.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
 			if err != nil {
@@ -41,6 +51,11 @@ func reconcileCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 
+			if daemonRunning(cfg.DataDir) {
+				ctx, cancel := context.WithTimeout(ctx, daemonReconcileTimeout)
+				defer cancel()
+				return reconcileThroughDaemon(ctx, cfg.DataDir)
+			}
 			store, err := openStore(cfg, log)
 			if err != nil {
 				return err
@@ -53,7 +68,7 @@ func reconcileCmd() *cobra.Command {
 			}
 			defer ctrl.Close()
 
-			fwMgr, err := buildFWManager(cfg, ctrl, store, log, nil, nil)
+			fwMgr, err := buildFWManager(cfg, ctrl, store, log, nil)
 			if err != nil {
 				return err
 			}
@@ -125,7 +140,7 @@ Requires either --force or --dry-run for safety.`,
 		}
 		defer ctrl.Close()
 
-		fwMgr, err := buildFWManager(cfg, ctrl, store, log, nil, nil)
+		fwMgr, err := buildFWManager(cfg, ctrl, store, log, nil)
 		if err != nil {
 			return err
 		}
@@ -168,7 +183,13 @@ func banCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ban <IP>",
 		Short: "Manually ban an IP across all configured UniFi sites",
-		Args:  cobra.ExactArgs(1),
+		Long: `Ban an address or range across every configured site. The ban passes the
+same guards as a CrowdSec decision (private ranges, BLOCK_WHITELIST, ranges
+broader than /8 or /32) and is recorded in the history with origin "manual".
+While the bouncer runs, it applies the ban itself through its health server
+(run the command inside the bouncer's container); otherwise the database is
+opened directly.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dur, _ := cmd.Flags().GetDuration("duration")
 			return runManualBan(args[0], dur)
@@ -183,32 +204,15 @@ func unbanCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "unban <IP>",
 		Short: "Manually unban an IP from all configured UniFi sites",
-		Args:  cobra.ExactArgs(1),
+		Long: `Lift every ban on an address or range, whichever source made it, and record
+the unban in the history with origin "manual". While the bouncer runs, it
+lifts the ban itself through its health server; otherwise the database is
+opened directly.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runManualUnban(args[0])
 		},
 	}
-}
-
-// checkManualBan parses value and applies the guards the daemon applies to
-// CrowdSec decisions: a manual ban must not cut off the gateway, a private
-// network, a whitelisted address or most of the internet. It returns the
-// sanitized address or range.
-func checkManualBan(value string, whitelist []*net.IPNet) (string, error) {
-	ip, _, err := decision.ParseAndSanitize(value)
-	if err != nil {
-		return "", err
-	}
-	ipv6 := decision.IsIPv6(ip)
-	switch {
-	case decision.TooBroad(ip, ipv6):
-		return "", fmt.Errorf("refusing to ban %s: range is too broad (broader than /8 for IPv4 or /32 for IPv6)", ip)
-	case decision.IsPrivate(ip):
-		return "", fmt.Errorf("refusing to ban %s: private, loopback or link-local addresses are never banned", ip)
-	case decision.IsWhitelisted(ip, whitelist):
-		return "", fmt.Errorf("refusing to ban %s: it is covered by BLOCK_WHITELIST", ip)
-	}
-	return ip, nil
 }
 
 func runManualBan(value string, dur time.Duration) error {
@@ -220,39 +224,53 @@ func runManualBan(value string, dur time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("BLOCK_WHITELIST: %w", err)
 	}
-	ip, err := checkManualBan(value, whitelist)
+	ip, err := bouncer.CheckManualBan(value, whitelist)
 	if err != nil {
 		return err
 	}
-	log := buildLogger(cfg)
-	if dur < 0 {
-		return fmt.Errorf("ban duration must not be negative")
+	if _, err := bouncer.ManualBanDuration(dur, cfg.BanTTL); err != nil {
+		return err
 	}
+	log := buildLogger(cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	store, ctrl, fwMgr, err := openManualSession(ctx, cfg, log)
-	if err != nil {
+	if daemonRunning(cfg.DataDir) {
+		return banThroughDaemon(ctx, cfg.DataDir, ip, dur)
+	}
+	return withManualActions(ctx, cfg, log, func(actions *bouncer.ManualActions) error {
+		res, err := actions.Ban(ctx, ip, dur)
+		if err != nil {
+			return err
+		}
+		if res.SyncErr != nil {
+			return fmt.Errorf("ban of %s recorded, but %w; the bouncer writes it when it starts", res.IP, res.SyncErr)
+		}
+		fmt.Println(banMessage(res.IP, len(cfg.UnifiSites), res.ExpiresAt, cfg.DryRun))
+		return nil
+	})
+}
+
+// banThroughDaemon asks the running bouncer to ban ip.
+func banThroughDaemon(ctx context.Context, dataDir, ip string, dur time.Duration) error {
+	req := bouncer.ControlBanRequest{IP: ip}
+	if dur > 0 {
+		req.Duration = dur.String()
+	}
+	var resp bouncer.ControlResponse
+	if err := callControl(ctx, dataDir, http.MethodPost, bouncer.ControlBanPath, req, &resp); err != nil {
 		return err
 	}
-	defer store.Close()
-	defer ctrl.Close()
-
-	if dur == 0 || dur > cfg.BanTTL {
-		dur = cfg.BanTTL
+	if resp.SyncError != "" {
+		return fmt.Errorf("ban of %s recorded by the running bouncer, which retries writing it to UniFi: %s",
+			printable(resp.IP), printable(resp.SyncError))
 	}
-	expiresAt := time.Now().Add(dur)
-	isIPv6 := decision.IsIPv6(ip)
-
-	claims := banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun)
-	if _, err := claims.Claim(ctx, ip, isIPv6, "manual", expiresAt); err != nil {
-		return fmt.Errorf("ban %s: %w", ip, err)
+	var expiresAt time.Time
+	if resp.ExpiresAt != nil {
+		expiresAt = *resp.ExpiresAt
 	}
-	if err := fwMgr.SyncDirty(ctx, cfg.UnifiSites); err != nil {
-		return fmt.Errorf("flush manual ban to UniFi: %w", err)
-	}
-	fmt.Println(banMessage(ip, len(cfg.UnifiSites), expiresAt, cfg.DryRun))
+	fmt.Println(banMessage(printable(resp.IP), resp.Sites, expiresAt, false))
 	return nil
 }
 
@@ -273,11 +291,10 @@ func unbanMessage(ip string, sites int, dryRun bool) string {
 	return fmt.Sprintf("unbanned %s from %d site(s)", ip, sites)
 }
 
-func runManualUnban(ip string) error {
-	var parseErr error
-	ip, _, parseErr = decision.ParseAndSanitize(ip)
-	if parseErr != nil {
-		return parseErr
+func runManualUnban(value string) error {
+	ip, _, err := decision.ParseAndSanitize(value)
+	if err != nil {
+		return err
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -288,23 +305,92 @@ func runManualUnban(ip string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
+	if daemonRunning(cfg.DataDir) {
+		err = unbanThroughDaemon(ctx, cfg.DataDir, ip)
+	} else {
+		err = withManualActions(ctx, cfg, log, func(actions *bouncer.ManualActions) error {
+			res, err := actions.Unban(ctx, ip)
+			if err != nil {
+				return err
+			}
+			if res.SyncErr != nil {
+				return fmt.Errorf("unban of %s recorded, but %w; the bouncer writes it when it starts", res.IP, res.SyncErr)
+			}
+			fmt.Println(unbanMessage(res.IP, len(cfg.UnifiSites), cfg.DryRun))
+			return nil
+		})
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, crowdSecUnbanWarning(ip))
+	return nil
+}
+
+// unbanThroughDaemon asks the running bouncer to lift every ban on ip.
+func unbanThroughDaemon(ctx context.Context, dataDir, ip string) error {
+	var resp bouncer.ControlResponse
+	if err := callControl(ctx, dataDir, http.MethodPost, bouncer.ControlUnbanPath, bouncer.ControlUnbanRequest{IP: ip}, &resp); err != nil {
+		return err
+	}
+	if resp.SyncError != "" {
+		return fmt.Errorf("unban of %s recorded by the running bouncer, which retries writing it to UniFi: %s",
+			printable(resp.IP), printable(resp.SyncError))
+	}
+	fmt.Println(unbanMessage(printable(resp.IP), resp.Sites, false))
+	return nil
+}
+
+// reconcileThroughDaemon asks the running bouncer to reconcile every site.
+func reconcileThroughDaemon(ctx context.Context, dataDir string) error {
+	var resp bouncer.ReconcileResponse
+	if err := callControl(ctx, dataDir, http.MethodPost, bouncer.ControlReconcilePath, nil, &resp); err != nil {
+		return err
+	}
+	elapsed := time.Duration(resp.ElapsedSeconds * float64(time.Second)).Round(time.Millisecond)
+	fmt.Printf("reconcile complete: added=%d removed=%d elapsed=%s\n", resp.Added, resp.Removed, elapsed)
+	if resp.Error != "" {
+		return fmt.Errorf("reconcile was partial: %s", printable(resp.Error))
+	}
+	return nil
+}
+
+// withManualActions opens the database, controller and firewall state for a
+// one-shot ban or unban while the daemon is stopped, and runs fn on them.
+func withManualActions(ctx context.Context, cfg *config.Config, log zerolog.Logger, fn func(*bouncer.ManualActions) error) error {
 	store, ctrl, fwMgr, err := openManualSession(ctx, cfg, log)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 	defer ctrl.Close()
-
 	claims := banstate.New(store, fwMgr, cfg.UnifiSites, cfg.DryRun)
-	if _, err := claims.ReleaseAll(ctx, ip, decision.IsIPv6(ip)); err != nil {
-		return fmt.Errorf("unban %s: %w", ip, err)
+	actions, err := newManualActions(cfg, claims, fwMgr, store, log)
+	if err != nil {
+		return err
 	}
-	if err := fwMgr.SyncDirty(ctx, cfg.UnifiSites); err != nil {
-		return fmt.Errorf("flush manual unban to UniFi: %w", err)
+	return fn(actions)
+}
+
+// newManualActions builds the manual ban, unban and reconcile actions over
+// the ban-state manager, with the guards of BLOCK_WHITELIST.
+func newManualActions(cfg *config.Config, claims *banstate.Manager, fwMgr firewall.Manager,
+	store storage.Store, log zerolog.Logger,
+) (*bouncer.ManualActions, error) {
+	whitelist, err := decision.ParseWhitelist(cfg.BlockWhitelist)
+	if err != nil {
+		return nil, fmt.Errorf("BLOCK_WHITELIST: %w", err)
 	}
-	fmt.Println(unbanMessage(ip, len(cfg.UnifiSites), cfg.DryRun))
-	fmt.Fprintln(os.Stderr, crowdSecUnbanWarning(ip))
-	return nil
+	return &bouncer.ManualActions{
+		Claims:    claims,
+		Firewall:  fwMgr,
+		History:   store,
+		Sites:     cfg.UnifiSites,
+		BanTTL:    cfg.BanTTL,
+		Whitelist: whitelist,
+		DryRun:    cfg.DryRun,
+		Log:       log,
+	}, nil
 }
 
 // crowdSecUnbanWarning explains that an unban only lasts until CrowdSec
@@ -332,7 +418,7 @@ func openManualSession(ctx context.Context, cfg *config.Config, log zerolog.Logg
 		_ = store.Close()
 		return nil, nil, nil, fmt.Errorf("init UniFi client: %w", err)
 	}
-	fwMgr, err := buildFWManager(cfg, ctrl, store, log, nil, nil)
+	fwMgr, err := buildFWManager(cfg, ctrl, store, log, nil)
 	if err == nil {
 		err = fwMgr.EnsureInfrastructure(ctx, cfg.UnifiSites)
 	}

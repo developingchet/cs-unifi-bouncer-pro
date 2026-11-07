@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/testutil"
 )
 
 // TestDiffFamilyConfirmsChangesAgainstBanDatabase covers decisions applied
@@ -26,12 +28,12 @@ func TestDiffFamilyConfirmsChangesAgainstBanDatabase(t *testing.T) {
 		pending = "198.51.100.5" // in the snapshot and in the database, not on the shard
 	)
 	for _, ip := range []string{kept, fresh, pending} {
-		if err := store.BanRecord(ip, time.Time{}, false); err != nil {
+		if err := testutil.PutBan(store, ip, time.Time{}, false); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for _, ip := range []string{kept, fresh, stale} {
-		if _, _, err := sm.Add(ctx, ip); err != nil {
+		if _, err := sm.Add(ctx, ip); err != nil {
 			t.Fatal(err)
 		}
 	}

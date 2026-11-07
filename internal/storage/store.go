@@ -43,13 +43,15 @@ type PolicyRecord struct {
 type Store interface {
 	// Ban operations
 	BanExists(ip string) (bool, error)
-	BanRecord(ip string, expiresAt time.Time, ipv6 bool) error
 	BanGet(ip string) (*BanEntry, error)
 	BanPut(ip string, entry BanEntry) error
 	// BanPutMany writes every entry in one transaction.
 	BanPutMany(entries map[string]BanEntry) error
 	BanDelete(ip string) error
 	BanList() (map[string]BanEntry, error)
+	// BanCount and BanKeys read the ban bucket without decoding its entries.
+	BanCount() (int, error)
+	BanKeys() (map[string]struct{}, error)
 
 	// Group cache
 	GetGroup(name string) (*GroupRecord, error)
@@ -65,6 +67,8 @@ type Store interface {
 
 	// Event history (audit trail)
 	RecordEvent(e EventEntry) error
+	// RecordEvents appends events in order in one transaction.
+	RecordEvents(events []EventEntry) error
 	ListEvents(limit int) ([]EventEntry, error)
 	ListEventsForIP(ip string, limit int) ([]EventEntry, error)
 

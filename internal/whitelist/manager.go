@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/rs/zerolog"
 )
@@ -26,6 +27,7 @@ type Manager struct {
 	sites    []string
 	provider *CloudflareProvider
 	blocks   BlockRecreator
+	noIPv6   bool
 	log      zerolog.Logger
 }
 
@@ -47,8 +49,17 @@ func (m *Manager) SetBlockRecreator(r BlockRecreator) {
 	m.blocks = r
 }
 
+// SetIPv6 sets whether the whitelist covers IPv6. With IPv6 off no IPv6 list
+// or ALLOW policy is kept, and the ones an earlier run created are removed.
+func (m *Manager) SetIPv6(enabled bool) {
+	m.noIPv6 = !enabled
+}
+
 // ZonePairConfig holds zone IDs for a source/destination pair, with optional port and IP filters.
 type ZonePairConfig struct {
+	// Site limits the pair to one site; "" applies it to every site without
+	// pairs of its own (see config.SitePairs).
+	Site      string
 	SrcName   string
 	DstName   string
 	SrcZoneID string
@@ -65,20 +76,37 @@ func whitelistName(kind string, pair ZonePairConfig, suffix string) string {
 }
 
 // Sync fetches current Cloudflare IPs and ensures TMLs are up to date.
-// Call at startup and on each weekly tick.
+// Call at startup and on each weekly tick. A sync is one listing pass (see
+// controller.BeginPass): with a Controller wrapped by
+// controller.WithListingPasses, each site's lists are fetched once and the
+// steps share that listing.
 func (m *Manager) Sync(ctx context.Context, zonePairs []ZonePairConfig) error {
+	ctx, endPass := controller.BeginPass(ctx)
+	defer endPass()
+
 	ipv4, err := m.provider.FetchIPv4(ctx)
 	if err != nil {
 		return fmt.Errorf("fetch Cloudflare IPv4: %w", err)
 	}
-	ipv6, err := m.provider.FetchIPv6(ctx)
-	if err != nil {
-		return fmt.Errorf("fetch Cloudflare IPv6: %w", err)
+	var ipv6 []string
+	if !m.noIPv6 {
+		if ipv6, err = m.provider.FetchIPv6(ctx); err != nil {
+			return fmt.Errorf("fetch Cloudflare IPv6: %w", err)
+		}
 	}
 
 	var siteErrors []error
 	for _, site := range m.sites {
-		if err := m.syncSite(ctx, site, ipv4, ipv6, zonePairs); err != nil {
+		pairs := config.SitePairs(zonePairs, site, func(p ZonePairConfig) string { return p.Site })
+		if len(pairs) == 0 {
+			// The pairs of other sites leave this one without a whitelist;
+			// objects an earlier configuration created here are removed.
+			if err := m.drainSite(ctx, site, false); err != nil {
+				siteErrors = append(siteErrors, fmt.Errorf("site %s: %w", site, err))
+			}
+			continue
+		}
+		if err := m.syncSite(ctx, site, ipv4, ipv6, pairs); err != nil {
 			m.log.Error().Err(err).Str("site", site).Msg("Cloudflare whitelist sync failed for site")
 			siteErrors = append(siteErrors, fmt.Errorf("site %s: %w", site, err))
 		}
@@ -102,9 +130,11 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 	if err != nil {
 		return fmt.Errorf("ensure v4 TML: %w", err)
 	}
-	tmlV6, err := m.ensureTML(ctx, site, TMLNameV6, "IPV6_ADDRESSES", v6Items)
-	if err != nil {
-		return fmt.Errorf("ensure v6 TML: %w", err)
+	var tmlV6 controller.TrafficMatchingList
+	if !m.noIPv6 {
+		if tmlV6, err = m.ensureTML(ctx, site, TMLNameV6, "IPV6_ADDRESSES", v6Items); err != nil {
+			return fmt.Errorf("ensure v6 TML: %w", err)
+		}
 	}
 
 	existingPolicies, err := m.ctrl.ListZonePolicies(ctx, site)
@@ -169,6 +199,13 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 			{"IPv4", "-v4", "IPV4_ADDRESSES", "IPV4", tmlV4.ID, v4IPs},
 			{"IPv6", "-v6", "IPV6_ADDRESSES", "IPV6", tmlV6.ID, v6IPs},
 		}
+		if m.noIPv6 {
+			families = families[:1]
+			if len(pair.DstIPs) > 0 && len(v4IPs) == 0 {
+				m.log.Warn().Str("site", site).Str("pair", pair.SrcName+"->"+pair.DstName).
+					Msg("Cloudflare zone pair has only IPv6 destination addresses and FIREWALL_ENABLE_IPV6=false; it gets no ALLOW policy")
+			}
+		}
 		var pairPolicyIDs []string
 		for _, f := range families {
 			if len(pair.DstIPs) > 0 && len(f.dstIPs) == 0 {
@@ -204,13 +241,38 @@ func (m *Manager) syncSite(ctx context.Context, site string, ipv4, ipv6 []string
 
 	// Sweep a fresh listing: policies recreated above may have taken the IDs of
 	// the ones they replaced.
-	current, err := m.ctrl.ListZonePolicies(ctx, site)
+	current, err := m.ctrl.ListZonePolicies(controller.FreshListing(ctx), site)
 	if err != nil {
 		return errors.Join(append(orderErrs, fmt.Errorf("list zone policies for site %s: %w", site, err))...)
 	}
 	m.sweepOrphanPolicies(ctx, site, current, managedPolicyIDs)
 	m.sweepOrphanTMLs(ctx, site, expectedTMLNames)
+	if m.noIPv6 {
+		if err := m.removeIPv6List(ctx, site); err != nil {
+			orderErrs = append(orderErrs, err)
+		}
+	}
 	return errors.Join(orderErrs...)
+}
+
+// removeIPv6List deletes the shared Cloudflare IPv6 list once IPv6 is off.
+// The sweep before it has removed the IPv6 ALLOW policies that referenced it.
+func (m *Manager) removeIPv6List(ctx context.Context, site string) error {
+	tmls, err := m.ctrl.ListTrafficMatchingLists(ctx, site)
+	if err != nil {
+		return fmt.Errorf("list traffic matching lists for site %s: %w", site, err)
+	}
+	for _, t := range tmls {
+		if t.Name != TMLNameV6 {
+			continue
+		}
+		if err := m.ctrl.DeleteTrafficMatchingList(ctx, site, t.ID); err != nil {
+			return fmt.Errorf("delete %s with IPv6 off: %w", TMLNameV6, err)
+		}
+		m.log.Info().Str("tml", t.Name).Str("site", site).
+			Msg("deleted the Cloudflare IPv6 list: FIREWALL_ENABLE_IPV6=false")
+	}
+	return nil
 }
 
 // sweepOrphanPolicies deletes whitelist policies that are ours but no longer
@@ -476,8 +538,10 @@ func orderError(site string, wrong []misorderedBlock, err error) error {
 
 // blocksAheadOfAllow lists the enabled blocks of pair's zones and address
 // family that the controller evaluates before one of the allows in policyIDs.
+// The order is the controller's, which every create or delete may change, so
+// the policies are listed afresh.
 func (m *Manager) blocksAheadOfAllow(ctx context.Context, site string, pair ZonePairConfig, policyIDs []string) ([]misorderedBlock, error) {
-	policies, err := m.ctrl.ListZonePolicies(ctx, site)
+	policies, err := m.ctrl.ListZonePolicies(controller.FreshListing(ctx), site)
 	if err != nil {
 		return nil, fmt.Errorf("list policies to verify Cloudflare order in site %s: %w", site, err)
 	}
@@ -530,58 +594,79 @@ func (m *Manager) PreviewDrain(ctx context.Context) error {
 func (m *Manager) drain(ctx context.Context, dryRun bool) error {
 	var failed []error
 	for _, site := range m.sites {
-		policies, err := m.ctrl.ListZonePolicies(ctx, site)
-		if err != nil {
-			m.log.Warn().Err(err).Str("site", site).Msg("Cloudflare drain: failed to list zone policies")
-			failed = append(failed, fmt.Errorf("list zone policies for site %s: %w", site, err))
-		} else {
-			deletable := deletableWhitelistPolicies(policies)
-			for _, p := range policies {
-				if !deletable[p.ID] {
-					continue
-				}
-				if dryRun {
-					m.log.Info().Str("policy", p.Name).Str("site", site).
-						Msg("[DRY-RUN] Cloudflare drain: would delete whitelist policy")
-					continue
-				}
-				if err := m.ctrl.DeleteZonePolicy(ctx, site, p.ID); err != nil {
-					m.log.Warn().Err(err).Str("policy", p.Name).Str("site", site).
-						Msg("Cloudflare drain: failed to delete whitelist policy")
-					failed = append(failed, fmt.Errorf("delete whitelist policy %s: %w", p.Name, err))
-				} else {
-					m.log.Info().Str("policy", p.Name).Str("site", site).
-						Msg("Cloudflare drain: deleted whitelist policy")
-				}
-			}
-		}
-
-		tmls, err := m.ctrl.ListTrafficMatchingLists(ctx, site)
-		if err != nil {
-			m.log.Warn().Err(err).Str("site", site).Msg("Cloudflare drain: failed to list TMLs")
-			failed = append(failed, fmt.Errorf("list traffic matching lists for site %s: %w", site, err))
-		} else {
-			for _, t := range tmls {
-				if !strings.HasPrefix(t.Name, whitelistPrefix) {
-					continue
-				}
-				if dryRun {
-					m.log.Info().Str("tml", t.Name).Str("site", site).
-						Msg("[DRY-RUN] Cloudflare drain: would delete whitelist TML")
-					continue
-				}
-				if err := m.ctrl.DeleteTrafficMatchingList(ctx, site, t.ID); err != nil {
-					m.log.Warn().Err(err).Str("tml", t.Name).Str("site", site).
-						Msg("Cloudflare drain: failed to delete whitelist TML")
-					failed = append(failed, fmt.Errorf("delete whitelist list %s: %w", t.Name, err))
-				} else {
-					m.log.Info().Str("tml", t.Name).Str("site", site).
-						Msg("Cloudflare drain: deleted whitelist TML")
-				}
-			}
+		if err := m.drainSite(ctx, site, dryRun); err != nil {
+			failed = append(failed, err)
 		}
 	}
 	return errors.Join(failed...)
+}
+
+// drainSite removes the Cloudflare whitelist policies and TMLs of one site.
+func (m *Manager) drainSite(ctx context.Context, site string, dryRun bool) error {
+	return errors.Join(append(m.drainSitePolicies(ctx, site, dryRun), m.drainSiteTMLs(ctx, site, dryRun)...)...)
+}
+
+func (m *Manager) drainSitePolicies(ctx context.Context, site string, dryRun bool) []error {
+	policies, err := m.ctrl.ListZonePolicies(ctx, site)
+	if controller.ZoneFirewallNotConfigured(err) {
+		// A site on the legacy firewall has no zone policies, so no
+		// whitelist policies; its lists are still removed.
+		m.log.Debug().Str("site", site).Msg("Cloudflare drain: site has no zone-based firewall")
+		return nil
+	}
+	if err != nil {
+		m.log.Warn().Err(err).Str("site", site).Msg("Cloudflare drain: failed to list zone policies")
+		return []error{fmt.Errorf("list zone policies for site %s: %w", site, err)}
+	}
+	var failed []error
+	deletable := deletableWhitelistPolicies(policies)
+	for _, p := range policies {
+		if !deletable[p.ID] {
+			continue
+		}
+		if dryRun {
+			m.log.Info().Str("policy", p.Name).Str("site", site).
+				Msg("[DRY-RUN] Cloudflare drain: would delete whitelist policy")
+			continue
+		}
+		if err := m.ctrl.DeleteZonePolicy(ctx, site, p.ID); err != nil {
+			m.log.Warn().Err(err).Str("policy", p.Name).Str("site", site).
+				Msg("Cloudflare drain: failed to delete whitelist policy")
+			failed = append(failed, fmt.Errorf("delete whitelist policy %s: %w", p.Name, err))
+		} else {
+			m.log.Info().Str("policy", p.Name).Str("site", site).
+				Msg("Cloudflare drain: deleted whitelist policy")
+		}
+	}
+	return failed
+}
+
+func (m *Manager) drainSiteTMLs(ctx context.Context, site string, dryRun bool) []error {
+	tmls, err := m.ctrl.ListTrafficMatchingLists(ctx, site)
+	if err != nil {
+		m.log.Warn().Err(err).Str("site", site).Msg("Cloudflare drain: failed to list TMLs")
+		return []error{fmt.Errorf("list traffic matching lists for site %s: %w", site, err)}
+	}
+	var failed []error
+	for _, t := range tmls {
+		if !strings.HasPrefix(t.Name, whitelistPrefix) {
+			continue
+		}
+		if dryRun {
+			m.log.Info().Str("tml", t.Name).Str("site", site).
+				Msg("[DRY-RUN] Cloudflare drain: would delete whitelist TML")
+			continue
+		}
+		if err := m.ctrl.DeleteTrafficMatchingList(ctx, site, t.ID); err != nil {
+			m.log.Warn().Err(err).Str("tml", t.Name).Str("site", site).
+				Msg("Cloudflare drain: failed to delete whitelist TML")
+			failed = append(failed, fmt.Errorf("delete whitelist list %s: %w", t.Name, err))
+		} else {
+			m.log.Info().Str("tml", t.Name).Str("site", site).
+				Msg("Cloudflare drain: deleted whitelist TML")
+		}
+	}
+	return failed
 }
 
 // tmlItemsEqual returns true if two TML item slices have the same values (order-independent).

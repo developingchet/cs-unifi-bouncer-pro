@@ -29,13 +29,13 @@ func ensuredV4Shard(t *testing.T, ctrl controller.Controller, store storage.Stor
 	}
 	// With lazy creation, add a dummy IP to trigger shard allocation, then flush
 	// to transition Pending→Active (giving the shard a real UniFi ID), then remove.
-	if _, _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
+	if _, err := sm.Add(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Add dummy IP: %v", err)
 	}
 	if err := sm.FlushDirty(context.Background()); err != nil {
 		t.Fatalf("FlushDirty: %v", err)
 	}
-	if _, err := sm.Remove(context.Background(), "10.0.0.1"); err != nil {
+	if err := sm.Remove(context.Background(), "10.0.0.1"); err != nil {
 		t.Fatalf("Remove dummy IP: %v", err)
 	}
 	return sm
@@ -49,13 +49,13 @@ func ensuredV6Shard(t *testing.T, ctrl controller.Controller, store storage.Stor
 	}
 	// With lazy creation, add a dummy IP to trigger shard allocation, then flush
 	// to transition Pending→Active (giving the shard a real UniFi ID), then remove.
-	if _, _, err := sm.Add(context.Background(), "2001:db8::1"); err != nil {
+	if _, err := sm.Add(context.Background(), "2001:db8::1"); err != nil {
 		t.Fatalf("Add dummy IP: %v", err)
 	}
 	if err := sm.FlushDirty(context.Background()); err != nil {
 		t.Fatalf("FlushDirty: %v", err)
 	}
-	if _, err := sm.Remove(context.Background(), "2001:db8::1"); err != nil {
+	if err := sm.Remove(context.Background(), "2001:db8::1"); err != nil {
 		t.Fatalf("Remove dummy IP: %v", err)
 	}
 	return sm
@@ -120,7 +120,7 @@ func TestLegacyManager_RepairsSparseShardRuleReference(t *testing.T) {
 		RuleIndex: 22003, Action: "drop", Ruleset: "WAN_IN", Description: "test",
 		Protocol: "all", SrcFirewallGroupIDs: []string{"group-0"},
 	}})
-	if err := store.SetPolicy("crowdsec-drop-v4-3", storage.PolicyRecord{UnifiID: "rule-3", Site: testSite, Mode: "legacy"}); err != nil {
+	if err := store.SetPolicy(cacheKey(testSite, "crowdsec-drop-v4-3"), storage.PolicyRecord{UnifiID: "rule-3", Site: testSite, Mode: "legacy"}); err != nil {
 		t.Fatal(err)
 	}
 	v4 := NewShardManager(testSite, false, 5, testNamer(t), ctrl, store, zerolog.Nop(), 0, false, "legacy")
@@ -329,7 +329,7 @@ func TestLegacyManager_DeleteRuleForShard(t *testing.T) {
 	}
 
 	// Delete
-	if err := lm.DeleteRuleForShard(context.Background(), testSite, false, 0); err != nil {
+	if err := lm.DeleteRuleForShard(context.Background(), testSite, "group-without-rules", false, 0); err != nil {
 		t.Fatalf("DeleteRuleForShard: %v", err)
 	}
 
@@ -348,7 +348,7 @@ func TestLegacyManager_DeleteRuleForShard_NoOp(t *testing.T) {
 	lm := newTestLegacyManager(ctrl, store, namer)
 
 	// No rule was ever created
-	if err := lm.DeleteRuleForShard(context.Background(), testSite, false, 0); err != nil {
+	if err := lm.DeleteRuleForShard(context.Background(), testSite, "group-without-rules", false, 0); err != nil {
 		t.Fatalf("DeleteRuleForShard (no-op): %v", err)
 	}
 	if got := ctrl.Calls("DeleteFirewallRule"); got != 0 {

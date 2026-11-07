@@ -66,8 +66,10 @@ func (j *Janitor) tick(ctx context.Context) {
 	}
 }
 
+// hasExpiredClaim reports whether one of entry's claims has expired. A ban
+// without claims, which only 1.x writes, is held until the ban expires.
 func hasExpiredClaim(entry storage.BanEntry, now time.Time) bool {
-	if entry.Claims == nil {
+	if len(entry.Claims) == 0 {
 		return !entry.ExpiresAt.IsZero() && !entry.ExpiresAt.After(now)
 	}
 	for _, expiry := range entry.Claims {

@@ -17,7 +17,7 @@ func TestReadOnlyOpenOfLockedDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rw.Close()
-	if err := rw.BanRecord("198.51.100.7", time.Now().Add(time.Hour), false); err != nil {
+	if err := putBan(rw, "198.51.100.7", time.Now().Add(time.Hour), false); err != nil {
 		t.Fatal(err)
 	}
 

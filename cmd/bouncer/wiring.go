@@ -11,6 +11,7 @@ import (
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/firewall"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/logger"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/storage"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/webhook"
 	"github.com/rs/zerolog"
 )
 
@@ -28,6 +29,10 @@ func openStore(cfg *config.Config, log zerolog.Logger) (storage.Store, error) {
 	}
 	store, err := storage.NewBboltStore(cfg.DataDir, log, cfg.HistoryMaxEvents)
 	if err != nil {
+		return nil, err
+	}
+	if err := convertLegacyData(store, cfg, log); err != nil {
+		_ = store.Close()
 		return nil, err
 	}
 	rekeyed, err := banstate.CanonicalizeHostPrefixes(store)
@@ -77,17 +82,19 @@ func controllerConfig(cfg *config.Config) controller.ClientConfig {
 		ReauthMinGap:  cfg.SessionReauthMinGap,
 		ReauthTimeout: cfg.SessionReauthTimeout,
 		DryRun:        cfg.DryRun,
-		EnableIPv6:    cfg.EnableIPv6,
+		EnableIPv6:    cfg.UnifiDialIPv6,
 	}
 }
 
 // buildFWManager constructs a firewall.Manager from config, controller, store, and logger.
 // It does NOT call EnsureInfrastructure — callers do that themselves when needed.
-// cbOpen and cbClose are optional callbacks fired when the circuit breaker opens/closes; pass nil for no-op.
+// notifier receives circuit breaker transitions and shard failures as webhook
+// events; pass nil to send none.
 func buildFWManager(cfg *config.Config,
 	ctrl controller.Controller, store storage.Store, log zerolog.Logger,
-	cbOpen, cbClose func(),
+	notifier *webhook.Notifier,
 ) (firewall.Manager, error) {
+	cbOpen, cbClose, shardEvents := firewallHooks(notifier)
 	namer, err := firewall.NewNamer(
 		cfg.GroupNameTemplate,
 		cfg.RuleNameTemplate,
@@ -99,11 +106,15 @@ func buildFWManager(cfg *config.Config,
 
 	v4Cap, v6Cap := resolveCapacities(cfg)
 
-	zonePairs, err := cfg.ParseZonePairs()
+	zonePairs, err := cfg.ManagedZonePairs()
 	if err != nil {
 		return nil, fmt.Errorf("parse zone pairs: %w", err)
 	}
 	connectionStates, err := cfg.ParseFirewallConnectionStates()
+	if err != nil {
+		return nil, err
+	}
+	egressStates, err := cfg.ParseEgressConnectionStates()
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +131,7 @@ func buildFWManager(cfg *config.Config,
 		ShardMergeThreshold:         cfg.ShardMergeThreshold,
 		OnCircuitBreakerOpen:        cbOpen,
 		OnCircuitBreakerClose:       cbClose,
+		ShardEvents:                 shardEvents,
 		LegacyCfg: firewall.LegacyConfig{
 			RuleIndexStartV4: cfg.LegacyRuleIndexStartV4,
 			RuleIndexStartV6: cfg.LegacyRuleIndexStartV6,
@@ -131,41 +143,21 @@ func buildFWManager(cfg *config.Config,
 			APIWriteDelay:    cfg.FirewallAPIShardDelay,
 		},
 		ZoneCfg: firewall.ZoneConfig{
-			ZonePairs:        zonePairs,
-			Description:      cfg.ObjectDescription,
-			LogDrops:         cfg.FirewallLogDrops,
-			ConnectionStates: connectionStates,
-			APIWriteDelay:    cfg.FirewallAPIShardDelay,
+			ZonePairs:              zonePairs,
+			Description:            cfg.ObjectDescription,
+			LogDrops:               cfg.FirewallLogDrops,
+			ConnectionStates:       connectionStates,
+			EgressConnectionStates: egressStates,
+			APIWriteDelay:          cfg.FirewallAPIShardDelay,
 		},
 	}, ctrl, store, namer, log), nil
 }
 
-// resolveCapacities determines effective v4/v6 group capacities from config,
-// applying the per-family overrides and falling back to the shared capacity.
+// resolveCapacities returns the effective IPv4 and IPv6 shard capacities.
+// SHARD_LIMIT is the ceiling for each managed list; the per-family settings
+// may lower it but never exceed it.
 func resolveCapacities(cfg *config.Config) (v4Cap, v6Cap int) {
-	v4Cap = cfg.FirewallGroupCapacityV4
-	if v4Cap == 0 {
-		v4Cap = cfg.FirewallGroupCapacity
-	}
-	// Each family falls back to the shared FIREWALL_GROUP_CAPACITY, so a
-	// FIREWALL_GROUP_CAPACITY_V4 override does not also shrink IPv6 groups.
-	v6Cap = cfg.FirewallGroupCapacityV6
-	if v6Cap == 0 {
-		v6Cap = cfg.FirewallGroupCapacity
-	}
-	// SHARD_LIMIT is the controller's hard ceiling for each managed list.
-	// Per-family capacity settings may lower it but must not exceed it.
-	limit := cfg.ShardLimit
-	if limit == 0 {
-		limit = firewall.ShardLimit
-	}
-	if v4Cap == 0 || v4Cap > limit {
-		v4Cap = limit
-	}
-	if v6Cap == 0 || v6Cap > limit {
-		v6Cap = limit
-	}
-	return v4Cap, v6Cap
+	return cfg.ShardCapacities(firewall.ShardLimit)
 }
 
 // buildLogger constructs a zerolog.Logger based on config.

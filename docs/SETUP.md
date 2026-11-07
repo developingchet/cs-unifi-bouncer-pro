@@ -17,7 +17,7 @@ Pull the compose file, seccomp profile, and you're running in under 2 minutes.
 | Docker Engine | 20.10 or later |
 | Docker Compose | v2 or later (`docker compose` not `docker-compose`) |
 | CrowdSec | 1.4.0 or later, running and accessible |
-| UniFi controller | UniFi Network Application 7.x or later |
+| UniFi controller | UniFi Network 7.x or later; Network 11 and later need an API key (zone-based firewall only) |
 | UniFi credentials | API key (recommended) or local admin username/password |
 
 Verify CrowdSec is running:
@@ -59,15 +59,18 @@ EOF
 chmod 600 .env
 ```
 
-**Get your UniFi API key** from: **Settings → Control Plane → API Keys**
+**Get your UniFi API key** from: **Settings → Control Plane → Integrations**
 
 For all available configuration options, see [CONFIGURATION.md](CONFIGURATION.md).
 
-### Step 4: Start
+### Step 4: Check Network Connectivity
 
-The bouncer needs to reach both your CrowdSec LAPI and your UniFi controller. Ensure that:
-- `CROWDSEC_LAPI_URL` (defaults to `https://crowdsec:8080`) is reachable from inside the bouncer container
-- `UNIFI_URL` is reachable from inside the bouncer container
+The bouncer needs to reach both your CrowdSec LAPI and your UniFi controller from inside its container:
+
+- `CROWDSEC_LAPI_URL` defaults to `https://crowdsec:8080`.
+- `UNIFI_URL` must be reachable from the container, typically `https://192.168.1.1`.
+
+The standalone compose file passes only the variables listed under `environment:` to the container. To use another LAPI URL, set `CROWDSEC_LAPI_URL` in `.env` and uncomment its line in `docker-compose.standalone.yml`; an `http://` URL also needs the `CROWDSEC_LAPI_ALLOW_HTTP=true` line. Add other settings from [CONFIGURATION.md](CONFIGURATION.md) to that list the same way.
 
 If CrowdSec is in a separate container, you may need to connect them to the same Docker network, or use an IP address instead of a hostname.
 
@@ -87,9 +90,9 @@ docker exec crowdsec cscli bouncers list
 # Health check
 curl -s http://localhost:8081/healthz
 
-# Test with a manual decision
+# Test with a manual decision, then look it up in the bouncer's database
 docker exec crowdsec cscli decisions add -i 203.0.113.42 -t ban -d 1h -r "setup test"
-docker logs -f cs-unifi-bouncer-pro | grep 203.0.113.42
+docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status ip 203.0.113.42
 # Clean up
 docker exec crowdsec cscli decisions delete --ip 203.0.113.42
 ```
@@ -107,7 +110,7 @@ For contributors, `.env.example` access, or local builds.
 | Docker Engine | 20.10 or later |
 | Docker Compose | v2 or later (`docker compose` not `docker-compose`) |
 | CrowdSec | 1.4.0 or later, running and accessible |
-| UniFi controller | UniFi Network Application 7.x or later |
+| UniFi controller | UniFi Network 7.x or later; Network 11 and later need an API key (zone-based firewall only) |
 | UniFi credentials | API key (recommended) or local admin username/password |
 | Git | Latest stable version |
 
@@ -187,10 +190,10 @@ windows, exclusion filter, refresh interval, and trusted mirror URL option.
 
 #### Using API key authentication (recommended)
 
-UniFi Network ≥ 8.1 supports API key authentication, which is more secure than username/password:
+An API key needs no login session and is the only way to manage zone-based firewall policies:
 
-1. In the UniFi console, go to **Settings → Control Plane → API Keys**
-2. Create a key with the minimum required permissions (read/write on Firewall)
+1. In the UniFi console, go to **Settings → Control Plane → Integrations**
+2. Create an API key
 3. Set `UNIFI_API_KEY` in `.env`
 
 #### Using username/password authentication
@@ -203,11 +206,13 @@ UNIFI_PASSWORD=yourpassword
 # Leave UNIFI_API_KEY unset or commented out
 ```
 
-Username/password works with legacy firewall rules only. If the site uses the zone-based firewall, startup stops and asks for `UNIFI_API_KEY`; set one, or set `FIREWALL_MODE=legacy`.
+Username/password works with legacy firewall rules only. If the site uses the zone-based firewall, startup stops and asks for `UNIFI_API_KEY`; set one, or on UniFi Network 10.x and earlier set `FIREWALL_MODE=legacy`. UniFi Network 11 and later run every site on the zone-based firewall, so they need an API key.
 
 #### Self-hosted UniFi Network Application
 
 The bouncer also works with a self-hosted controller (for example the `linuxserver/unifi-network-application` Docker image). Point `UNIFI_URL` at its HTTPS port, usually `https://<host>:8443`. The bouncer detects the controller type on startup and logs `"layout":"standalone"`. Self-hosted controllers use a self-signed certificate by default, so set `UNIFI_CA_CERT` to its certificate, or `UNIFI_VERIFY_TLS=false` on a trusted network.
+
+The standalone Network Application ends at 10.6. UniFi Network 11 is self-hosted on UniFi OS Server, which the bouncer handles like a console (`"layout":"unifi-os"`, API keys under **Settings → Control Plane → Integrations**). See [Upgrading the controller to UniFi Network 11](UPGRADING.md#upgrading-the-controller-to-unifi-network-11) before moving a legacy-mode site.
 
 ### Step 4: Ensure Network Connectivity
 
@@ -228,7 +233,7 @@ If both are on the same Docker network naturally (via docker-compose service nam
 docker compose pull
 ```
 
-This pulls the pre-built image from Docker Hub. The image is under 20 MB, runs as
+This pulls the pre-built image from Docker Hub. The image is about an 8 MB download (about 31 MB unpacked), runs as
 a non-root user in a distroless container, and is Cosign-signed on every release.
 
 > **Building from source** is only needed for development or if you have forked
@@ -315,17 +320,13 @@ Inject a public test IP and confirm the bouncer processes it:
 # Add a test ban
 docker exec crowdsec cscli decisions add -i 203.0.113.42 -t ban -d 1h -r "setup test"
 
-# Watch the bouncer logs
-docker logs -f cs-unifi-bouncer-pro | grep 203.0.113.42
+# Look the address up in the bouncer's database
+docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status ip 203.0.113.42
 ```
 
-You should see a log line similar to:
+Individual bans are not logged at the default `info` level. Once the decision batch has been processed, the shard holding the address is written, logged as `shard flushed to UniFi`; a write that fails is retried every `SYNC_INTERVAL` (default 30 s). At `LOG_LEVEL=debug` each decision also logs `job applied` with `"action":"ban"` and the address.
 
-```json
-{"level":"info","action":"ban","ip":"203.0.113.42","site":"default","msg":"ban applied"}
-```
-
-Verify the IP appears in the UniFi firewall group or zone policy, then clean up:
+Verify the IP appears in a `crowdsec-block-v4-*` group (legacy mode) or traffic matching list (zone mode), then clean up:
 
 ```bash
 docker exec crowdsec cscli decisions delete --ip 203.0.113.42
@@ -386,16 +387,27 @@ Bans are applied to all listed sites simultaneously.
 
 ## Updating
 
-```bash
-# Pull the latest image
-docker compose pull
+The compose files run `latest` unless `BOUNCER_IMAGE` in `.env` names another
+image. Read the release notes first, then:
 
-# Recreate the container
+```bash
+# Check the signature of the release you are about to run (needs cosign)
+cosign verify developingchet/cs-unifi-bouncer-pro:latest \
+  --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
+  --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
+
+# Pull it and recreate the container
+docker compose pull
 docker compose up -d --force-recreate cs-unifi-bouncer-pro
 
 # Check logs after restart
 docker logs cs-unifi-bouncer-pro
 ```
+
+To stay on a release until you choose to move, set
+`BOUNCER_IMAGE=developingchet/cs-unifi-bouncer-pro:2.3.0` in `.env`, or pin the
+`@sha256:` digest that `cosign verify` printed; that digest runs exactly the
+image that was checked, even if a tag were later moved.
 
 The startup reconcile (`FIREWALL_RECONCILE_ON_START=true`) automatically syncs the UniFi firewall state with the bbolt database after an update.
 

@@ -30,10 +30,24 @@ const (
 	EventCircuitBreakerOpen  = "circuit_breaker_open"
 	EventCircuitBreakerClose = "circuit_breaker_close"
 	EventReconcileDrift      = "reconcile_drift"
+	// EventFirewallModeChanged fires when the daemon exits so that its
+	// supervisor restarts it in zone mode.
+	EventFirewallModeChanged = "firewall_mode_changed"
+	// EventShardCreateFailed fires when a shard object could not be created,
+	// leaving the bans assigned to it unenforced.
+	EventShardCreateFailed = "shard_create_failed"
+	// EventBanEntryRefused fires when the controller refuses a ban entry,
+	// which is then left out of its shard.
+	EventBanEntryRefused = "ban_entry_refused"
+	// EventCloudflareSyncFailed fires when a Cloudflare whitelist sync fails.
+	EventCloudflareSyncFailed = "cloudflare_whitelist_sync_failed"
 )
 
 // Events lists every event the bouncer fires.
-var Events = []string{EventCircuitBreakerOpen, EventCircuitBreakerClose, EventReconcileDrift}
+var Events = []string{
+	EventCircuitBreakerOpen, EventCircuitBreakerClose, EventReconcileDrift,
+	EventFirewallModeChanged, EventShardCreateFailed, EventBanEntryRefused, EventCloudflareSyncFailed,
+}
 
 // Event is the JSON payload sent to the webhook endpoint.
 type Event struct {
@@ -53,6 +67,7 @@ type Notifier struct {
 	queue   chan Event
 	client  *http.Client
 	log     zerolog.Logger
+	repeats *repeatLimiter
 }
 
 // New creates a Notifier. If rawURL is empty, all calls to Fire are no-ops.
@@ -76,7 +91,8 @@ func New(rawURL string, events []string, log zerolog.Logger) *Notifier {
 			// operator did not configure.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-		log: log,
+		log:     log,
+		repeats: newRepeatLimiter(repeatInterval, time.Now),
 	}
 	if isPlainHTTP(rawURL) {
 		log.Warn().Str("host", n.display).Msg("webhook: URL uses http://, event payloads are sent unencrypted; use https://")
@@ -94,14 +110,27 @@ func isPlainHTTP(raw string) bool {
 // If the URL is empty or the event name is not in the allowed set, it is a no-op.
 // When the queue is full the event is dropped with a warning.
 func (n *Notifier) Fire(event string, detail any) {
-	if n.url == "" {
+	if !n.wants(event) {
 		return
+	}
+	n.enqueue(event, detail)
+}
+
+// wants reports whether event is delivered at all. A nil Notifier delivers
+// nothing.
+func (n *Notifier) wants(event string) bool {
+	if n == nil || n.url == "" {
+		return false
 	}
 	if n.events != nil {
 		if _, ok := n.events[event]; !ok {
-			return
+			return false
 		}
 	}
+	return true
+}
+
+func (n *Notifier) enqueue(event string, detail any) {
 	ev := Event{Event: event, Timestamp: time.Now().UTC(), Detail: detail}
 	select {
 	case n.queue <- ev:

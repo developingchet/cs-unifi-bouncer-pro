@@ -70,7 +70,7 @@ func NewClient(ctx context.Context, cfg ClientConfig, log zerolog.Logger) (Contr
 
 	// dialNetwork is "tcp4" by default to avoid happy eyeballs stalls where IPv6
 	// attempts to the UniFi controller blackhole silently for 15 seconds.
-	// Set EnableIPv6 = true (ENABLE_IPV6=true) only if your controller is
+	// Set EnableIPv6 = true (UNIFI_DIAL_IPV6=true) only if your controller is
 	// reachable over IPv6 with a working path.
 	dialNetwork := "tcp4"
 	if cfg.EnableIPv6 {
@@ -171,7 +171,7 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 			c.log.Debug().Str("method", req.Method).Str("url", req.URL.String()).
 				Err(err).Stringer("elapsed", elapsed).Msg("unifi api request failed")
 		}
-		metrics.APICalls.WithLabelValues(endpoint, "error").Inc()
+		metrics.APICalls.WithLabelValues(endpoint, "error", metricSite(ctx)).Inc()
 		return nil, err
 	}
 
@@ -179,8 +179,8 @@ func (c *unifiClient) apiDo(ctx context.Context, req *http.Request, endpoint str
 	c.session.UpdateFromResponse(resp)
 
 	statusLabel := fmt.Sprintf("%dxx", resp.StatusCode/100)
-	metrics.APICalls.WithLabelValues(endpoint, statusLabel).Inc()
-	metrics.APIDuration.WithLabelValues(endpoint).Observe(elapsed.Seconds())
+	metrics.APICalls.WithLabelValues(endpoint, statusLabel, metricSite(ctx)).Inc()
+	metrics.APIDuration.WithLabelValues(endpoint, metricSite(ctx)).Observe(elapsed.Seconds())
 
 	if c.cfg.Debug {
 		c.log.Debug().Str("method", req.Method).Str("url", req.URL.String()).
@@ -330,50 +330,51 @@ func (c *unifiClient) InvalidateZoneCache(site string) {
 // ---- Firewall Groups -------------------------------------------------------
 
 func (c *unifiClient) ListFirewallGroups(ctx context.Context, site string) ([]FirewallGroup, error) {
-	return listFirewallGroups(ctx, c, site)
+	return listFirewallGroups(withMetricSite(ctx, site), c, site)
 }
 
 func (c *unifiClient) CreateFirewallGroup(ctx context.Context, site string, g FirewallGroup) (FirewallGroup, error) {
-	return createFirewallGroup(ctx, c, site, g)
+	return createFirewallGroup(withMetricSite(ctx, site), c, site, g)
 }
 
 func (c *unifiClient) UpdateFirewallGroup(ctx context.Context, site string, g FirewallGroup) error {
-	return updateFirewallGroup(ctx, c, site, g)
+	return updateFirewallGroup(withMetricSite(ctx, site), c, site, g)
 }
 
 func (c *unifiClient) DeleteFirewallGroup(ctx context.Context, site string, id string) error {
-	return deleteFirewallGroup(ctx, c, site, id)
+	return deleteFirewallGroup(withMetricSite(ctx, site), c, site, id)
 }
 
 // ---- Firewall Rules --------------------------------------------------------
 
 func (c *unifiClient) ListFirewallRules(ctx context.Context, site string) ([]FirewallRule, error) {
-	return listFirewallRules(ctx, c, site)
+	return listFirewallRules(withMetricSite(ctx, site), c, site)
 }
 
 func (c *unifiClient) CreateFirewallRule(ctx context.Context, site string, r FirewallRule) (FirewallRule, error) {
-	return createFirewallRule(ctx, c, site, r)
+	return createFirewallRule(withMetricSite(ctx, site), c, site, r)
 }
 
 func (c *unifiClient) UpdateFirewallRule(ctx context.Context, site string, r FirewallRule) error {
-	return updateFirewallRule(ctx, c, site, r)
+	return updateFirewallRule(withMetricSite(ctx, site), c, site, r)
 }
 
 func (c *unifiClient) DeleteFirewallRule(ctx context.Context, site string, id string) error {
-	return deleteFirewallRule(ctx, c, site, id)
+	return deleteFirewallRule(withMetricSite(ctx, site), c, site, id)
 }
 
 // ---- Site and Zone Resolution (integration v1) -----------------------------
 
 func (c *unifiClient) GetSiteID(ctx context.Context, siteName string) (string, error) {
-	return getSiteID(ctx, c, siteName)
+	return getSiteID(withMetricSite(ctx, siteName), c, siteName)
 }
 
 func (c *unifiClient) GetZoneID(ctx context.Context, site, zoneName string) (string, error) {
-	return getZoneID(ctx, c, site, zoneName)
+	return getZoneID(withMetricSite(ctx, site), c, site, zoneName)
 }
 
 func (c *unifiClient) DiscoverZones(ctx context.Context, site string) ([]Zone, error) {
+	ctx = withMetricSite(ctx, site)
 	siteID, err := getSiteID(ctx, c, site)
 	if err != nil {
 		return nil, err
@@ -388,6 +389,7 @@ func (c *unifiClient) DiscoverSites(ctx context.Context) ([]string, error) {
 // ---- Zone Policies (integration v1) ----------------------------------------
 
 func (c *unifiClient) ListZonePolicies(ctx context.Context, site string) ([]ZonePolicy, error) {
+	ctx = withMetricSite(ctx, site)
 	siteID, err := getSiteID(ctx, c, site)
 	if err != nil {
 		return nil, err
@@ -396,6 +398,7 @@ func (c *unifiClient) ListZonePolicies(ctx context.Context, site string) ([]Zone
 }
 
 func (c *unifiClient) CreateZonePolicy(ctx context.Context, site string, p ZonePolicy) (ZonePolicy, error) {
+	ctx = withMetricSite(ctx, site)
 	siteID, err := getSiteID(ctx, c, site)
 	if err != nil {
 		return ZonePolicy{}, err
@@ -404,6 +407,7 @@ func (c *unifiClient) CreateZonePolicy(ctx context.Context, site string, p ZoneP
 }
 
 func (c *unifiClient) UpdateZonePolicy(ctx context.Context, site string, p ZonePolicy) error {
+	ctx = withMetricSite(ctx, site)
 	siteID, err := getSiteID(ctx, c, site)
 	if err != nil {
 		return err
@@ -412,6 +416,7 @@ func (c *unifiClient) UpdateZonePolicy(ctx context.Context, site string, p ZoneP
 }
 
 func (c *unifiClient) DeleteZonePolicy(ctx context.Context, site string, id string) error {
+	ctx = withMetricSite(ctx, site)
 	siteID, err := getSiteID(ctx, c, site)
 	if err != nil {
 		return err
@@ -422,6 +427,7 @@ func (c *unifiClient) DeleteZonePolicy(ctx context.Context, site string, id stri
 // ---- Traffic Matching Lists (integration v1) --------------------------------
 
 func (c *unifiClient) ListTrafficMatchingLists(ctx context.Context, site string) ([]TrafficMatchingList, error) {
+	ctx = withMetricSite(ctx, site)
 	siteID, err := getSiteID(ctx, c, site)
 	if err != nil {
 		return nil, err
@@ -430,6 +436,7 @@ func (c *unifiClient) ListTrafficMatchingLists(ctx context.Context, site string)
 }
 
 func (c *unifiClient) CreateTrafficMatchingList(ctx context.Context, site string, list TrafficMatchingList) (TrafficMatchingList, error) {
+	ctx = withMetricSite(ctx, site)
 	siteID, err := getSiteID(ctx, c, site)
 	if err != nil {
 		return TrafficMatchingList{}, err
@@ -438,6 +445,7 @@ func (c *unifiClient) CreateTrafficMatchingList(ctx context.Context, site string
 }
 
 func (c *unifiClient) UpdateTrafficMatchingList(ctx context.Context, site string, list TrafficMatchingList) error {
+	ctx = withMetricSite(ctx, site)
 	siteID, err := getSiteID(ctx, c, site)
 	if err != nil {
 		return err
@@ -446,6 +454,7 @@ func (c *unifiClient) UpdateTrafficMatchingList(ctx context.Context, site string
 }
 
 func (c *unifiClient) DeleteTrafficMatchingList(ctx context.Context, site string, id string) error {
+	ctx = withMetricSite(ctx, site)
 	siteID, err := getSiteID(ctx, c, site)
 	if err != nil {
 		return err
@@ -456,5 +465,9 @@ func (c *unifiClient) DeleteTrafficMatchingList(ctx context.Context, site string
 // ---- Feature Detection -----------------------------------------------------
 
 func (c *unifiClient) HasFeature(ctx context.Context, site string, feature string) (bool, error) {
-	return hasFeature(ctx, c, site, feature)
+	return hasFeature(withMetricSite(ctx, site), c, site, feature)
+}
+
+func (c *unifiClient) ApplicationVersion(ctx context.Context, site string) (string, error) {
+	return applicationVersion(withMetricSite(ctx, site), c, site)
 }

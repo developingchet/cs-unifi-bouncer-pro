@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"fmt"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -20,7 +22,17 @@ func newTestStore(t *testing.T) Store {
 	return s
 }
 
-func TestBanRecordExistsDelete(t *testing.T) {
+// putBan stores a ban on ip held by one claim ending at expiresAt.
+func putBan(s Store, ip string, expiresAt time.Time, ipv6 bool) error {
+	return s.BanPut(ip, BanEntry{
+		RecordedAt: time.Now().UTC(),
+		ExpiresAt:  expiresAt.UTC(),
+		IPv6:       ipv6,
+		Claims:     map[string]time.Time{"test": expiresAt.UTC()},
+	})
+}
+
+func TestBanPutExistsDelete(t *testing.T) {
 	s := newTestStore(t)
 
 	const ip = "1.2.3.4"
@@ -33,8 +45,8 @@ func TestBanRecordExistsDelete(t *testing.T) {
 
 	// Record it
 	expires := time.Now().Add(24 * time.Hour)
-	if err := s.BanRecord(ip, expires, false); err != nil {
-		t.Fatalf("BanRecord: %v", err)
+	if err := putBan(s, ip, expires, false); err != nil {
+		t.Fatalf("putBan: %v", err)
 	}
 
 	// Now exists
@@ -69,12 +81,42 @@ func TestBanRecordExistsDelete(t *testing.T) {
 	}
 }
 
+func TestBanCountAndKeys(t *testing.T) {
+	s := newTestStore(t)
+	if n, err := s.BanCount(); err != nil || n != 0 {
+		t.Fatalf("BanCount of an empty store = %d, %v; want 0", n, err)
+	}
+	for _, ip := range []string{"192.0.2.1", "192.0.2.2", "2001:db8::1"} {
+		if err := putBan(s, ip, time.Time{}, ip == "2001:db8::1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.BanDelete("192.0.2.2"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.BanCount(); err != nil || n != 2 {
+		t.Errorf("BanCount = %d, %v; want 2", n, err)
+	}
+	keys, err := s.BanKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 2 {
+		t.Errorf("BanKeys = %v, want 2 keys", keys)
+	}
+	for _, ip := range []string{"192.0.2.1", "2001:db8::1"} {
+		if _, ok := keys[ip]; !ok {
+			t.Errorf("BanKeys is missing %s", ip)
+		}
+	}
+}
+
 func TestBanEntryExpiresAt(t *testing.T) {
 	s := newTestStore(t)
 	const ip = "5.6.7.8"
 	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
-	if err := s.BanRecord(ip, expires, false); err != nil {
-		t.Fatalf("BanRecord: %v", err)
+	if err := putBan(s, ip, expires, false); err != nil {
+		t.Fatalf("putBan: %v", err)
 	}
 	entry, err := s.BanGet(ip)
 	if err != nil || entry == nil {
@@ -109,7 +151,7 @@ func TestConcurrentBanAccess(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			ip := "192.0.2." + string(rune('0'+id))
-			_ = s.BanRecord(ip, time.Now().Add(time.Hour), false)
+			_ = putBan(s, ip, time.Now().Add(time.Hour), false)
 			_, _ = s.BanExists(ip)
 			_ = s.BanDelete(ip)
 		}(i)
@@ -307,6 +349,41 @@ func TestBbolt_EventRingBuffer(t *testing.T) {
 	}
 	if len(got) != 5 {
 		t.Errorf("ring buffer: expected 5 events, got %d", len(got))
+	}
+}
+
+// A batch keeps its order and the ring-buffer cap, also when the batch alone
+// is larger than the cap.
+func TestBbolt_RecordEvents(t *testing.T) {
+	s, err := NewBboltStore(t.TempDir(), zerolog.Nop(), 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.RecordEvent(EventEntry{Action: "ban", IP: "192.0.2.1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordEvents(nil); err != nil {
+		t.Fatalf("RecordEvents(nil): %v", err)
+	}
+	batch := make([]EventEntry, 7)
+	for i := range batch {
+		batch[i] = EventEntry{Action: "ban", IP: fmt.Sprintf("198.51.100.%d", i)}
+	}
+	if err := s.RecordEvents(batch); err != nil {
+		t.Fatalf("RecordEvents: %v", err)
+	}
+	got, err := s.ListEvents(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ips []string
+	for _, e := range got {
+		ips = append(ips, e.IP)
+	}
+	want := []string{"198.51.100.6", "198.51.100.5", "198.51.100.4", "198.51.100.3", "198.51.100.2"}
+	if !slices.Equal(ips, want) {
+		t.Fatalf("events newest first = %v, want %v", ips, want)
 	}
 }
 

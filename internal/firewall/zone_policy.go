@@ -28,11 +28,14 @@ func (zm *ZoneManager) policiesByID(ctx context.Context, site string) (map[strin
 	return existingByID, nil
 }
 
-// EnsurePolicies idempotently creates zone policies for each shard and zone pair.
+// EnsurePolicies idempotently creates zone policies for each shard and each
+// zone pair of site, and removes the site's block policies of pairs that no
+// longer apply to it.
 func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards, v6Shards *ShardManager) error {
 	zm.opMu.Lock()
 	defer zm.opMu.Unlock()
-	if len(zm.cfg.ZonePairs) == 0 {
+	pairs := zm.sitePairs(site)
+	if len(pairs) == 0 {
 		return errNoZonePairs
 	}
 	zoneMap, err := zm.zoneMapForSite(site)
@@ -49,7 +52,7 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	// Build the set of all policy names expected by the current config so that
 	// cleanupOrphanedBlockPolicies can identify policies from removed zone pairs.
 	expectedNames := make(map[string]bool)
-	for _, pair := range zm.cfg.ZonePairs {
+	for _, pair := range pairs {
 		for _, ipv6 := range []bool{false, true} {
 			sm := v4Shards
 			if ipv6 {
@@ -58,15 +61,8 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 			if sm == nil || !pairCoversFamily(pair, ipv6) {
 				continue
 			}
-			family := Family(ipv6)
 			for _, ref := range sm.OwnedRefs() {
-				name, err := zm.namer.PolicyName(NameData{
-					Family:  family,
-					Index:   ref.Index,
-					Site:    site,
-					SrcZone: pair.Src,
-					DstZone: pair.Dst,
-				})
+				name, err := zm.policyName(site, pair, ipv6, ref.Index)
 				if err == nil {
 					expectedNames[name] = true
 				}
@@ -77,7 +73,7 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	// One shard the controller refuses must not leave every later shard
 	// without a policy, so failures are collected and the rest carry on.
 	var failed []error
-	for _, pair := range zm.cfg.ZonePairs {
+	for _, pair := range pairs {
 		if pairCoversFamily(pair, false) {
 			failed = append(failed, zm.ensurePoliciesForPair(ctx, site, pair, zoneMap, existingByID, false, v4Shards)...)
 		}
@@ -90,7 +86,7 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	}
 
 	// Remove any block policies that were managed by this bouncer but whose
-	// zone pair has since been removed from ZONE_PAIRS config.
+	// zone pair no longer applies to this site.
 	if err := zm.cleanupOrphanedBlockPolicies(ctx, site, expectedNames, existingByID); err != nil {
 		return err
 	}
@@ -101,6 +97,7 @@ func (zm *ZoneManager) EnsurePolicies(ctx context.Context, site string, v4Shards
 	portIDs := zm.portTMLCache[site]
 	zm.mu.RUnlock()
 	zm.cleanupOrphanedPortTMLs(ctx, site, portIDs)
+	zm.recordZonePolicies(site, expectedNames, existingByID)
 	return provisionFailure(failed)
 }
 
@@ -137,40 +134,76 @@ func (zm *ZoneManager) ensureShardPolicy(ctx context.Context, site string, pair 
 	return zm.ensurePolicy(ctx, site, desired, existingByID, delay)
 }
 
+// policyName names the block policy of one shard and zone pair.
+func (zm *ZoneManager) policyName(site string, pair config.ZonePair, ipv6 bool, shardIdx int) (string, error) {
+	data := NameData{Family: Family(ipv6), Index: shardIdx, Site: site, SrcZone: pair.Src, DstZone: pair.Dst}
+	if pair.Egress {
+		return zm.namer.EgressPolicyName(data)
+	}
+	return zm.namer.PolicyName(data)
+}
+
 // desiredPolicy renders the block policy the bouncer maintains for one shard
-// and zone pair.
+// and zone pair. An inbound policy matches the shard list as the source; an
+// egress policy matches it as the destination.
 func (zm *ZoneManager) desiredPolicy(site string, pair config.ZonePair, zoneMap map[string]string, ipv6 bool, shardIdx int, groupID string) (controller.ZonePolicy, error) {
-	name, err := zm.namer.PolicyName(NameData{Family: Family(ipv6), Index: shardIdx, Site: site, SrcZone: pair.Src, DstZone: pair.Dst})
+	name, err := zm.policyName(site, pair, ipv6, shardIdx)
 	if err != nil {
 		return controller.ZonePolicy{}, err
 	}
 	if groupID == "" {
-		return controller.ZonePolicy{}, fmt.Errorf("shard %d for %s->%s has empty TML ID — cannot create block policy without source filter", shardIdx, pair.Src, pair.Dst)
+		return controller.ZonePolicy{}, fmt.Errorf("shard %d for %s->%s has empty TML ID — cannot create block policy without an address filter", shardIdx, pair.Src, pair.Dst)
 	}
 	ipVersion := "IPV4"
 	if ipv6 {
 		ipVersion = "IPV6"
 	}
 	policy := controller.ZonePolicy{
-		Name:                   name,
-		Enabled:                true,
-		Action:                 "BLOCK",
-		Description:            zm.cfg.Description,
-		SrcZone:                zoneMap[pair.Src],
-		DstZone:                zoneMap[pair.Dst],
-		IPVersion:              ipVersion,
-		TrafficMatchingListIDs: []string{groupID},
-		ConnectionStateFilter:  append([]string(nil), zm.cfg.ConnectionStates...),
-		LoggingEnabled:         zm.cfg.LogDrops,
+		Name:           name,
+		Enabled:        true,
+		Action:         "BLOCK",
+		Description:    zm.cfg.Description,
+		SrcZone:        zoneMap[pair.Src],
+		DstZone:        zoneMap[pair.Dst],
+		IPVersion:      ipVersion,
+		LoggingEnabled: zm.cfg.LogDrops,
 	}
 	zm.mu.RLock()
-	if ids, ok := zm.portTMLCache[site][pair.Src+":"+pair.Dst]; ok {
+	ids, filtered := zm.portTMLCache[site][filterKey(pair)]
+	zm.mu.RUnlock()
+	if filtered {
 		policy.SrcPortTMLID = ids.SrcTMLID
 		policy.DstPortTMLID = ids.DstTMLID
+	}
+	if pair.Egress {
+		policy.DstIPTMLID = groupID
+		policy.ConnectionStateFilter = append([]string(nil), zm.cfg.EgressConnectionStates...)
+		return policy, nil
+	}
+	policy.TrafficMatchingListIDs = []string{groupID}
+	policy.ConnectionStateFilter = append([]string(nil), zm.cfg.ConnectionStates...)
+	if filtered {
 		policy.DstIPTMLID = ids.dstIPTML(ipv6)
 	}
-	zm.mu.RUnlock()
 	return policy, nil
+}
+
+// policyListID returns the list a block policy matches addresses against:
+// the source list, or for an egress policy, which has none, the destination
+// list.
+func policyListID(p controller.ZonePolicy) string {
+	if len(p.TrafficMatchingListIDs) > 0 {
+		return p.TrafficMatchingListIDs[0]
+	}
+	return p.DstIPTMLID
+}
+
+// sourceListID returns the source list of p, or "" for a policy without one.
+func sourceListID(p controller.ZonePolicy) string {
+	if len(p.TrafficMatchingListIDs) > 0 {
+		return p.TrafficMatchingListIDs[0]
+	}
+	return ""
 }
 
 // ensurePolicy makes the controller hold desired: it adopts a policy with the
@@ -280,6 +313,7 @@ func (zm *ZoneManager) repairPolicy(ctx context.Context, site string, current, d
 	updated := desired
 	updated.ID = current.ID
 	updated.Index = current.Index
+	updated.ReportFlowEnabled = current.ReportFlowEnabled
 	err := zm.ctrl.UpdateZonePolicy(ctx, site, updated)
 	if err == nil {
 		existingByID[updated.ID] = updated
@@ -307,6 +341,7 @@ func (zm *ZoneManager) replacePolicy(ctx context.Context, site string, current, 
 	existingByID map[string]controller.ZonePolicy,
 ) error {
 	name := desired.Name
+	desired.ReportFlowEnabled = current.ReportFlowEnabled
 	staged, err := zm.stageReplacementPolicy(ctx, site, desired, existingByID)
 	if err != nil {
 		return fmt.Errorf("stage replacement for zone policy %s: %w", name, err)
@@ -363,7 +398,7 @@ func (zm *ZoneManager) deleteStagedPolicy(ctx context.Context, site string, stag
 // under; it changes with the shard list and filters.
 func stagedPolicyName(desired controller.ZonePolicy) string {
 	parts := []string{desired.Name, desired.SrcZone, desired.DstZone, desired.IPVersion,
-		desired.TrafficMatchingListIDs[0], desired.SrcPortTMLID, desired.DstPortTMLID, desired.DstIPTMLID}
+		sourceListID(desired), desired.SrcPortTMLID, desired.DstPortTMLID, desired.DstIPTMLID}
 	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return stagedPolicyPrefix + hex.EncodeToString(digest[:10])
 }
@@ -454,7 +489,7 @@ func (zm *ZoneManager) stageReplacementPolicy(ctx context.Context, site string, 
 	stagedDesired := desired
 	stagedDesired.Name = stagedName
 	reuse := func(candidate controller.ZonePolicy) (controller.ZonePolicy, error) {
-		if len(candidate.TrafficMatchingListIDs) != 1 || candidate.TrafficMatchingListIDs[0] != desired.TrafficMatchingListIDs[0] ||
+		if !slices.Equal(candidate.TrafficMatchingListIDs, desired.TrafficMatchingListIDs) ||
 			candidate.SrcPortTMLID != desired.SrcPortTMLID || candidate.DstPortTMLID != desired.DstPortTMLID || candidate.DstIPTMLID != desired.DstIPTMLID {
 			return controller.ZonePolicy{}, fmt.Errorf("staged policy %s has unexpected group or filter IDs", stagedName)
 		}
@@ -473,7 +508,7 @@ func (zm *ZoneManager) stageReplacementPolicy(ctx context.Context, site string, 
 	if !errors.As(err, &conflict) {
 		return controller.ZonePolicy{}, fmt.Errorf("create staged policy %s: %w", stagedName, err)
 	}
-	policies, listErr := zm.ctrl.ListZonePolicies(ctx, site)
+	policies, listErr := zm.ctrl.ListZonePolicies(controller.FreshListing(ctx), site)
 	if listErr != nil {
 		return controller.ZonePolicy{}, fmt.Errorf("find staged policy %s: %w", stagedName, listErr)
 	}
@@ -503,7 +538,7 @@ func (zm *ZoneManager) EnsurePoliciesForShard(ctx context.Context, site, groupID
 	}
 
 	firstCreate := true
-	for _, pair := range zm.cfg.ZonePairs {
+	for _, pair := range zm.sitePairs(site) {
 		if !pairCoversFamily(pair, ipv6) {
 			continue
 		}
@@ -559,9 +594,10 @@ func sameConnectionStates(a, b []string) bool {
 }
 
 // lookupPolicyByName finds a zone policy by name. It is used for conflict
-// recovery and to confirm a 404 before recreating a policy.
+// recovery and to confirm a 404 before recreating a policy, so it lists the
+// controller afresh rather than reading the pass's listing.
 func (zm *ZoneManager) lookupPolicyByName(ctx context.Context, site, name string) (controller.ZonePolicy, bool, error) {
-	policies, err := zm.ctrl.ListZonePolicies(ctx, site)
+	policies, err := zm.ctrl.ListZonePolicies(controller.FreshListing(ctx), site)
 	if err != nil {
 		return controller.ZonePolicy{}, false, fmt.Errorf("list zone policies: %w", err)
 	}

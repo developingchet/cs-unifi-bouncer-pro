@@ -82,10 +82,12 @@ func (sm *ShardManager) MarkRemoteDrift(ctx context.Context) (missing, extra int
 			// Deleted out of band; startup reconciliation recreates it.
 			continue
 		}
-		// Members the controller refused are never written, so they are not missing.
+		// Members the controller refused are not written while the refusal
+		// holds, so they are not missing. Once it lapses they count as
+		// missing, and the rewrite offers them to the controller again.
+		now := sm.now()
 		held := slices.DeleteFunc(shard.IPs.Members(), func(ip string) bool {
-			_, refused := shard.rejected[ip]
-			return refused
+			return shard.isRefused(ip, now)
 		})
 		m, e := diffMembers(held, members)
 		if m == 0 && e == 0 {

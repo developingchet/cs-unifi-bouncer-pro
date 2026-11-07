@@ -1,6 +1,7 @@
 package feedhttp
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -15,6 +16,8 @@ import (
 // same scheme, host and port. A request created by a redirect to a different
 // host is dialled through a transport that refuses internal addresses, which
 // covers host names that resolve to them: CheckRedirect only sees the name.
+// When such a request leaves through HTTP(S)_PROXY, its target is resolved
+// and checked before it is handed to the proxy.
 func NewClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout:       timeout,
@@ -28,6 +31,8 @@ func NewClient(timeout time.Duration) *http.Client {
 type redirectGuardTransport struct {
 	direct  *http.Transport
 	guarded *http.Transport
+	// lookup resolves a redirect target that leaves through a proxy.
+	lookup func(ctx context.Context, host string) ([]netip.Addr, error)
 }
 
 func newRedirectGuardTransport() *redirectGuardTransport {
@@ -39,16 +44,50 @@ func newRedirectGuardTransport() *redirectGuardTransport {
 		Control:   refuseInternalDial,
 	}
 	guarded.DialContext = dialer.DialContext
-	return &redirectGuardTransport{direct: direct, guarded: guarded}
+	return &redirectGuardTransport{direct: direct, guarded: guarded, lookup: lookupHost}
+}
+
+func lookupHost(ctx context.Context, host string) ([]netip.Addr, error) {
+	return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 }
 
 // RoundTrip implements http.RoundTripper. net/http sets Request.Response only
 // on requests it builds to follow a redirect.
 func (t *redirectGuardTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.Response == nil || sameOrigin(originalRequest(req).URL, req.URL) || t.viaProxy(req) {
+	if req.Response == nil || sameOrigin(originalRequest(req).URL, req.URL) {
+		return t.direct.RoundTrip(req)
+	}
+	if t.viaProxy(req) {
+		if err := t.refuseInternalTarget(req); err != nil {
+			return nil, err
+		}
 		return t.direct.RoundTrip(req)
 	}
 	return t.guarded.RoundTrip(req)
+}
+
+// refuseInternalTarget checks a redirect target that a proxy will connect
+// to. The dial guard cannot help there: the only address dialled here is the
+// proxy's. The target is resolved locally instead and refused when any
+// address is internal, or when it cannot be resolved at all, since an
+// unchecked name is exactly what the guard exists to stop. The proxy may
+// still resolve the name differently; restricting where the proxy itself may
+// connect closes that gap.
+func (t *redirectGuardTransport) refuseInternalTarget(req *http.Request) error {
+	host := normalizeHost(req.URL.Hostname())
+	addrs, err := t.lookup(req.Context(), host)
+	if err != nil {
+		return fmt.Errorf("refusing redirect through a proxy to %s: the name does not resolve here, so it cannot be checked: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("refusing redirect through a proxy to %s: the name has no addresses here", host)
+	}
+	for _, addr := range addrs {
+		if IsInternalAddr(addr) {
+			return fmt.Errorf("refusing redirect through a proxy to %s: it resolves to internal address %s", host, addr.Unmap())
+		}
+	}
+	return nil
 }
 
 // viaProxy reports whether req leaves through a configured proxy. The proxy

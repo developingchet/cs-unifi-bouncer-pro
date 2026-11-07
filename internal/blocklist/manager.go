@@ -161,6 +161,7 @@ func (m *Manager) Run(ctx context.Context) {
 		m.log.Info().Str("url", logger.SafeHost(feed.URL)).Str("source", feed.sourceKey()).
 			Msg("blocklist: feed configured")
 	}
+	m.registerFeedMetrics()
 	m.fetchAndApply(ctx)
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
@@ -178,6 +179,7 @@ func (m *Manager) fetchAndApply(ctx context.Context) {
 	for _, feed := range m.feeds {
 		if err := m.fetchFeed(ctx, feed); err != nil {
 			partial := errors.Is(err, errPartialFeed) || errors.Is(err, errPruningSkipped)
+			recordFeedOutcome(feed, err, partial)
 			if partial {
 				m.log.Warn().Err(err).Str("url", logger.SafeHost(feed.URL)).
 					Msg("blocklist: feed applied without pruning")
@@ -187,6 +189,7 @@ func (m *Manager) fetchAndApply(ctx context.Context) {
 			m.keepClaims(feed, partial)
 			continue
 		}
+		recordFeedOutcome(feed, nil, false)
 		m.lastGood[feed.sourceKey()] = time.Now()
 	}
 }
@@ -270,6 +273,7 @@ func (m *Manager) fetchFeed(ctx context.Context, feed Feed) error {
 		return noMatchError(feed, scan)
 	}
 	partial := feed.Prune && invalid > 0
+	recordFeedEntries(feed, len(entries))
 	if m.dryRun {
 		m.log.Info().Str("url", display).Int("entries", len(entries)).Int("filtered", filtered).
 			Msg("[DRY-RUN] would import blocklist")

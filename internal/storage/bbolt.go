@@ -97,16 +97,6 @@ func (s *bboltStore) BanExists(ip string) (bool, error) {
 	return exists, err
 }
 
-func (s *bboltStore) BanRecord(ip string, expiresAt time.Time, ipv6 bool) error {
-	entry := BanEntry{
-		RecordedAt: time.Now().UTC(),
-		ExpiresAt:  expiresAt.UTC(),
-		IPv6:       ipv6,
-		Claims:     map[string]time.Time{"legacy": expiresAt.UTC()},
-	}
-	return s.BanPut(ip, entry)
-}
-
 func (s *bboltStore) BanGet(ip string) (*BanEntry, error) {
 	var entry *BanEntry
 	err := s.db.View(func(tx *bolt.Tx) error {
@@ -176,6 +166,29 @@ func (s *bboltStore) BanList() (map[string]BanEntry, error) {
 		})
 	})
 	return result, err
+}
+
+// BanCount returns the number of stored bans without decoding them.
+func (s *bboltStore) BanCount() (int, error) {
+	var n int
+	err := s.db.View(func(tx *bolt.Tx) error {
+		n = tx.Bucket([]byte(bucketBans)).Stats().KeyN
+		return nil
+	})
+	return n, err
+}
+
+// BanKeys returns the address of every stored ban without decoding them.
+func (s *bboltStore) BanKeys() (map[string]struct{}, error) {
+	keys := make(map[string]struct{})
+	err := s.db.View(func(tx *bolt.Tx) error {
+		cursor := tx.Bucket([]byte(bucketBans)).Cursor()
+		for k, _ := cursor.First(); k != nil; k, _ = cursor.Next() {
+			keys[string(k)] = struct{}{}
+		}
+		return nil
+	})
+	return keys, err
 }
 
 // ---- Group cache -----------------------------------------------------------
@@ -298,33 +311,55 @@ func encodeSeq(seq uint64) []byte {
 // RecordEvent appends an audit event to the events ring buffer.
 // Oldest entries are pruned when the count exceeds s.maxEvents.
 func (s *bboltStore) RecordEvent(e EventEntry) error {
-	data, err := msgpack.Marshal(e)
-	if err != nil {
-		return fmt.Errorf("marshal EventEntry: %w", err)
+	return s.RecordEvents([]EventEntry{e})
+}
+
+// RecordEvents appends events in order in one transaction, pruning the
+// oldest entries once, after the last append.
+func (s *bboltStore) RecordEvents(events []EventEntry) error {
+	if len(events) == 0 {
+		return nil
+	}
+	encoded := make([][]byte, len(events))
+	for i, e := range events {
+		data, err := msgpack.Marshal(e)
+		if err != nil {
+			return fmt.Errorf("marshal EventEntry: %w", err)
+		}
+		encoded[i] = data
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(bucketEvents))
-		seq, err := b.NextSequence()
-		if err != nil {
-			return err
-		}
-		if err := b.Put(encodeSeq(seq), data); err != nil {
-			return err
-		}
-		// Sequence keys are ordered, so only entries older than the cap need
-		// inspection. A normal append removes at most one entry. cursor.Delete
-		// keeps the cursor in step; bucket deletes during a walk skip keys.
-		if seq > uint64(s.maxEvents) {
-			cutoff := encodeSeq(seq - uint64(s.maxEvents))
-			cursor := b.Cursor()
-			for key, _ := cursor.First(); key != nil && bytes.Compare(key, cutoff) <= 0; key, _ = cursor.First() {
-				if err := cursor.Delete(); err != nil {
-					return err
-				}
+		var seq uint64
+		for _, data := range encoded {
+			var err error
+			if seq, err = b.NextSequence(); err != nil {
+				return err
+			}
+			if err := b.Put(encodeSeq(seq), data); err != nil {
+				return err
 			}
 		}
-		return nil
+		return s.pruneEvents(b, seq)
 	})
+}
+
+// pruneEvents deletes the entries more than maxEvents older than seq, the
+// newest key. Sequence keys are ordered, so only entries older than the cap
+// need inspection. cursor.Delete keeps the cursor in step; bucket deletes
+// during a walk skip keys.
+func (s *bboltStore) pruneEvents(b *bolt.Bucket, seq uint64) error {
+	if seq <= uint64(s.maxEvents) {
+		return nil
+	}
+	cutoff := encodeSeq(seq - uint64(s.maxEvents))
+	cursor := b.Cursor()
+	for key, _ := cursor.First(); key != nil && bytes.Compare(key, cutoff) <= 0; key, _ = cursor.First() {
+		if err := cursor.Delete(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ListEvents returns up to limit events newest-first (limit=0 = all).

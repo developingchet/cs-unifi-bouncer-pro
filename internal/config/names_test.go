@@ -1,10 +1,69 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestLoadRejectsLegacyGroupNamesOver64Characters(t *testing.T) {
+	long := strings.Repeat("x", 58) + "-{{.Family}}-{{.Index}}" // 58 + "-v4-0" = 63
+	tests := []struct {
+		name    string
+		env     map[string]string
+		wantErr string
+	}{
+		{name: "63 characters", env: map[string]string{"FIREWALL_MODE": "legacy", "GROUP_NAME_TEMPLATE": long}},
+		{
+			name:    "65 characters",
+			env:     map[string]string{"FIREWALL_MODE": "legacy", "GROUP_NAME_TEMPLATE": "xx" + long},
+			wantErr: `(65 characters) for site "default"; legacy firewall groups are limited to 64 characters`,
+		},
+		{
+			name: "too long with a configured site",
+			env: map[string]string{
+				"FIREWALL_MODE":       "legacy",
+				"UNIFI_SITES":         "default,branch-office-east",
+				"GROUP_NAME_TEMPLATE": "crowdsec-block-" + strings.Repeat("y", 30) + "-{{.Site}}-{{.Family}}-{{.Index}}",
+			},
+			wantErr: `for site "branch-office-east"; legacy firewall groups are limited to 64 characters`,
+		},
+		{
+			name: "zone mode has no limit",
+			env:  map[string]string{"FIREWALL_MODE": "zone", "GROUP_NAME_TEMPLATE": "xx" + long},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadWith(t, tc.env)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Load: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.HasPrefix(err.Error(), "GROUP_NAME_TEMPLATE renders ") {
+				t.Fatalf("Load = %v, want error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// In auto mode the sites may all run the zone-based firewall, which names
+// traffic matching lists without that limit, so a long name is a warning.
+func TestLoadWarnsOfLongLegacyGroupNamesInAutoMode(t *testing.T) {
+	long := "xx" + strings.Repeat("x", 58) + "-{{.Family}}-{{.Index}}"
+	cfg, err := loadWith(t, map[string]string{"FIREWALL_MODE": "auto", "GROUP_NAME_TEMPLATE": long})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := `GROUP_NAME_TEMPLATE renders "` + strings.Repeat("x", 60) + `-v4-0" (65 characters) for site "default"; ` +
+		`legacy firewall groups are limited to 64 characters; sites on the legacy firewall will fail to create that group`
+	if !slices.Contains(cfg.DeprecationWarnings, want) {
+		t.Errorf("warnings = %q, want %q", cfg.DeprecationWarnings, want)
+	}
+}
 
 func TestValidateRejectsUnusableSettings(t *testing.T) {
 	tests := []struct {

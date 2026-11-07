@@ -3,6 +3,7 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
@@ -23,6 +24,10 @@ type MockController struct {
 	// orderPolicies assigns creation-order indices to new zone policies.
 	orderPolicies bool
 
+	// refuseReferencedLists makes DeleteTrafficMatchingList fail for a list a
+	// zone policy still references, as UniFi does.
+	refuseReferencedLists bool
+
 	// Preset site ID mappings: internalReference -> UUID
 	siteIDs map[string]string
 
@@ -31,6 +36,9 @@ type MockController struct {
 
 	// Preset feature detection results per site
 	features map[string]map[string]bool
+
+	// version is what ApplicationVersion reports.
+	version string
 
 	// Error injection: method -> next error (consumed on first call)
 	errors map[string]error
@@ -57,6 +65,13 @@ func (m *MockController) RefuseGroupMember(member string) {
 	m.refusedMembers[member] = true
 }
 
+// AcceptGroupMember undoes RefuseGroupMember for member.
+func (m *MockController) AcceptGroupMember(member string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.refusedMembers, member)
+}
+
 // NewMockController returns a zero-state MockController ready for use.
 func NewMockController() *MockController {
 	return &MockController{
@@ -69,6 +84,7 @@ func NewMockController() *MockController {
 		features: make(map[string]map[string]bool),
 		errors:   make(map[string]error),
 		calls:    make(map[string]int),
+		version:  "10.6.106",
 	}
 }
 
@@ -124,6 +140,13 @@ func (m *MockController) SetHasFeature(site, feature string, val bool) {
 	m.features[site][feature] = val
 }
 
+// SetVersion presets the UniFi Network version ApplicationVersion reports.
+func (m *MockController) SetVersion(version string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.version = version
+}
+
 // SetError injects an error to be returned on the next call to the named method.
 // The error is consumed (returned once) and then cleared.
 func (m *MockController) SetError(method string, err error) {
@@ -137,6 +160,14 @@ func (m *MockController) Calls(method string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.calls[method]
+}
+
+// ResetCalls clears every call count, so a test can count the calls of one
+// operation after setting up for it.
+func (m *MockController) ResetCalls() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clear(m.calls)
 }
 
 // popError returns and clears any pending error for the given method.
@@ -352,7 +383,11 @@ func (m *MockController) GetZoneID(ctx context.Context, siteID, zoneName string)
 			return z.ID, nil
 		}
 	}
-	// Default fallback for tests that provide UUID-like strings directly.
+	if len(zones) > 0 {
+		return "", fmt.Errorf("zone %q not found at site %q", zoneName, siteID)
+	}
+	// A site without preset zones resolves any name to itself, for tests
+	// that pass zone IDs directly.
 	return zoneName, nil
 }
 
@@ -368,6 +403,15 @@ func (m *MockController) HasFeature(ctx context.Context, site string, feature st
 		}
 	}
 	return false, nil
+}
+
+func (m *MockController) ApplicationVersion(ctx context.Context, site string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.track("ApplicationVersion"); err != nil {
+		return "", err
+	}
+	return m.version, nil
 }
 
 func (m *MockController) InvalidateZoneCache(site string) {
@@ -462,11 +506,26 @@ func (m *MockController) DiscoverSites(ctx context.Context) ([]string, error) {
 	return append([]string{}, m.discoveredSites...), nil
 }
 
+// RefuseReferencedListDeletes makes DeleteTrafficMatchingList refuse a list
+// that a zone policy still references, as UniFi does.
+func (m *MockController) RefuseReferencedListDeletes() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.refuseReferencedLists = true
+}
+
 func (m *MockController) DeleteTrafficMatchingList(ctx context.Context, site string, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.track("DeleteTrafficMatchingList"); err != nil {
 		return err
+	}
+	if m.refuseReferencedLists {
+		for _, p := range m.policies[site] {
+			if slices.Contains(p.TrafficMatchingListIDs, id) {
+				return &controller.ErrBadRequest{Body: `{"code":"api.firewall.traffic-matching-list.in-use","message":"list is referenced by policy ` + p.Name + `"}`}
+			}
+		}
 	}
 	tmls := m.tmls[site][:0]
 	for _, t := range m.tmls[site] {

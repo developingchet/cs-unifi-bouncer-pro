@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/bouncer"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/decision"
@@ -109,18 +110,18 @@ func TestCheckManualBan(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := checkManualBan(tt.value, whitelist)
+			got, err := bouncer.CheckManualBan(tt.value, whitelist)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("checkManualBan(%q) error = %v, want one containing %q", tt.value, err, tt.wantErr)
+					t.Fatalf("bouncer.CheckManualBan(%q) error = %v, want one containing %q", tt.value, err, tt.wantErr)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("checkManualBan(%q): %v", tt.value, err)
+				t.Fatalf("bouncer.CheckManualBan(%q): %v", tt.value, err)
 			}
 			if got != tt.want {
-				t.Fatalf("checkManualBan(%q) = %q, want %q", tt.value, got, tt.want)
+				t.Fatalf("bouncer.CheckManualBan(%q) = %q, want %q", tt.value, got, tt.want)
 			}
 		})
 	}

@@ -24,7 +24,7 @@ func TestShardCreate_BacksOffAndReportsUnsyncedIPs(t *testing.T) {
 		t.Fatalf("EnsureShards: %v", err)
 	}
 	for _, ip := range []string{"203.0.113.1", "203.0.113.2"} {
-		if _, _, err := sm.Add(ctx, ip); err != nil {
+		if _, err := sm.Add(ctx, ip); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
 	}
@@ -33,12 +33,14 @@ func TestShardCreate_BacksOffAndReportsUnsyncedIPs(t *testing.T) {
 		return promtest.ToFloat64(metrics.ShardCreateFailures.WithLabelValues("v4", site))
 	}
 
+	// The counter is process-wide, so measure this test's increase.
+	failuresBefore := failures()
 	ctrl.SetError("CreateTrafficMatchingList", errors.New("UniFi API returned HTTP 422: too many entries"))
 	if err := sm.FlushDirty(ctx); err == nil {
 		t.Fatal("FlushDirty succeeded although the create was refused")
 	}
-	if got := failures(); got != 1 {
-		t.Errorf("shard_create_failures_total = %v, want 1", got)
+	if got := failures() - failuresBefore; got != 1 {
+		t.Errorf("shard_create_failures_total rose by %v, want 1", got)
 	}
 	if got := unsynced(); got != 2 {
 		t.Errorf("unsynced_ips = %v, want 2", got)

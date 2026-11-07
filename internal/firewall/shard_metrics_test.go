@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/controller"
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/metrics"
@@ -96,5 +97,44 @@ func TestEnsureShards_SetsShardIPCountForCleanShards(t *testing.T) {
 	}
 	if got := promtest.ToFloat64(metrics.ShardIPCount.WithLabelValues("v4", "0", testSite)); got != 3 {
 		t.Errorf("shard_ip_count = %v, want 3", got)
+	}
+}
+
+// Adding addresses leaves the shard gauges to the next sync, which sets them
+// once for the whole batch, even while controller writes are held back.
+func TestSyncDirtySetsShardGaugesWhileWritesPaused(t *testing.T) {
+	ctx := context.Background()
+	metrics.FirewallGroupSize.Reset()
+	metrics.UnsyncedIPs.Reset()
+	mgr, ctrl, _ := newTestManager(t, defaultManagerConfig())
+	if err := mgr.EnsureInfrastructure(ctx, []string{testSite}); err != nil {
+		t.Fatal(err)
+	}
+	m := mgr.(*managerImpl)
+	for _, ip := range []string{"198.51.100.1", "198.51.100.2", "198.51.100.3"} {
+		if err := m.ApplyBan(ctx, testSite, ip, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	size := func() float64 {
+		return promtest.ToFloat64(metrics.FirewallGroupSize.WithLabelValues("v4", "crowdsec-block-v4-0", testSite))
+	}
+	unsynced := func() float64 { return promtest.ToFloat64(metrics.UnsyncedIPs.WithLabelValues("v4", testSite)) }
+	if got := size(); got != 0 {
+		t.Fatalf("firewall_group_size before the sync = %v, want 0 (not set per address)", got)
+	}
+
+	m.setRateLimitUntil(time.Now().Add(time.Hour))
+	if err := m.SyncDirty(ctx, []string{testSite}); err == nil {
+		t.Fatal("SyncDirty wrote during a rate-limit window")
+	}
+	if got := ctrl.Calls("CreateFirewallGroup"); got != 0 {
+		t.Fatalf("CreateFirewallGroup calls = %d, want 0", got)
+	}
+	if got := size(); got != 3 {
+		t.Errorf("firewall_group_size = %v, want 3", got)
+	}
+	if got := unsynced(); got != 3 {
+		t.Errorf("unsynced_ips = %v, want 3", got)
 	}
 }

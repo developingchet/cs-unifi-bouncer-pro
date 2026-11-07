@@ -55,7 +55,14 @@ are enabled.
 
 ## Hot-Reload (SIGHUP)
 
-To reload zone pair configuration without restarting the daemon:
+A reload re-reads the zone pairs (`ZONE_PAIRS`, `EGRESS_ZONE_PAIRS`, and
+`CLOUDFLARE_ZONE_PAIRS` while the Cloudflare whitelist runs) without
+restarting the daemon. systemd reads `bouncer.env` only when the service
+starts, so keep pairs that should change live in a file and point
+`ZONE_PAIRS_FILE` (and `EGRESS_ZONE_PAIRS_FILE` or
+`CLOUDFLARE_ZONE_PAIRS_FILE`) at it, for example
+`/etc/cs-unifi-bouncer-pro/zone-pairs` with one pair per line. Edit the file,
+then:
 ```bash
 sudo systemctl reload cs-unifi-bouncer-pro
 # or equivalently:
@@ -63,6 +70,8 @@ sudo kill -HUP $(systemctl show -p MainPID --value cs-unifi-bouncer-pro)
 ```
 
 `ExecReload=/bin/kill -HUP $MAINPID` maps directly to the bouncer's SIGHUP handler.
+Other settings, including rotated `_FILE` secrets, need a restart; the reload
+logs their names (see [SIGHUP Hot-Reload](../../README.md#sighup-hot-reload)).
 
 ## State Directory
 
@@ -72,17 +81,29 @@ created by `DynamicUser=yes`.
 
 ## Security Notes
 
-The unit file enables a comprehensive set of systemd hardening options:
+The unit file sets these hardening options:
 
-- `DynamicUser=yes` — a transient UID/GID is allocated at service start; no persistent user account is required.
-- `CapabilityBoundingSet=` (empty) — drops all Linux capabilities; the bouncer needs none.
-- `ProtectSystem=strict` — mounts the OS filesystem read-only (except `StateDirectory` and `TmpFiles`).
-- `NoNewPrivileges=yes` — prevents privilege escalation via `setuid`/`setgid` binaries.
-- `RestrictAddressFamilies=AF_INET AF_INET6` — only IPv4/IPv6 sockets are allowed.
-- `UMask=0077` — files the service creates, such as the database, are readable by its own user only.
-- `ProtectProc=invisible` and `ProcSubset=pid` — other processes' `/proc` entries and the non-process parts of `/proc` are hidden.
-- `ProtectKernelLogs=yes`, `ProtectClock=yes` and `ProtectHostname=yes` — no access to the kernel log buffer, no clock changes, no hostname changes.
-- `SystemCallArchitectures=native` — system calls of other ABIs, such as 32-bit on a 64-bit host, are refused.
+| Directive | Effect |
+|-----------|--------|
+| `DynamicUser=yes` | A transient UID/GID is allocated at service start; no persistent user account is required |
+| `CapabilityBoundingSet=` (empty), `AmbientCapabilities=` (empty) | All Linux capabilities dropped; the bouncer needs none |
+| `NoNewPrivileges=yes` | No privilege escalation via `setuid`/`setgid` binaries |
+| `PrivateTmp=yes` | Private `/tmp` |
+| `PrivateDevices=yes` | No access to raw device nodes |
+| `ProtectSystem=strict` | The OS filesystem is read-only, except the state directory and the private `/tmp` |
+| `ProtectHome=yes` | Home directories inaccessible |
+| `ProtectProc=invisible`, `ProcSubset=pid` | Other processes' `/proc` entries and the non-process parts of `/proc` are hidden |
+| `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`, `ProtectKernelLogs=yes` | `/proc/sys` and similar paths read-only, no module loading, no kernel log access |
+| `ProtectControlGroups=yes` | cgroup filesystem read-only |
+| `ProtectClock=yes`, `ProtectHostname=yes` | No clock or hostname changes |
+| `RestrictAddressFamilies=AF_INET AF_INET6` | Only IPv4/IPv6 sockets are allowed |
+| `RestrictNamespaces=yes` | Namespace creation blocked |
+| `LockPersonality=yes` | ABI personality locked |
+| `MemoryDenyWriteExecute=yes` | No writable and executable memory mappings |
+| `RestrictRealtime=yes` | Real-time scheduling blocked |
+| `UMask=0077` | Files the service creates, such as the database, are readable by its own user only |
+| `SystemCallArchitectures=native` | System calls of other ABIs, such as 32-bit on a 64-bit host, are refused |
+| `SystemCallFilter=@system-service`, `SystemCallErrorNumber=EPERM` | System calls outside the service set fail with `EPERM` |
 
 `ProtectProc=` and `ProcSubset=` need systemd 247 or newer. On an older release, remove those two lines; systemd 242 and later accept the rest.
 

@@ -1,8 +1,8 @@
 # Configuration Reference
 
-All configuration is provided through environment variables (or `_FILE` variants for secrets). Copy `.env.example` to `.env` and edit as needed.
+All configuration is provided through environment variables (or `_FILE` variants for secrets and zone pairs). Copy `.env.example` from the repository to `.env` and edit as needed. Values wrapped in one pair of matching single or double quotes are unquoted, because Docker's `--env-file` passes quotes through. This applies to every setting, including the contents of `_FILE` files; a list such as `CROWDSEC_ORIGINS="crowdsec,lists"` is unquoted as a whole before it is split, and each element is unquoted again (`'crowdsec','lists'`).
 
-Sensitive values support Docker secrets and Kubernetes secrets via the `_FILE` suffix: set the variable to the path of a file containing the secret, and the application reads and trims its contents at startup.
+`UNIFI_API_KEY`, `UNIFI_USERNAME`, `UNIFI_PASSWORD` and `CROWDSEC_LAPI_KEY` support Docker secrets and Kubernetes secrets via the `_FILE` suffix: set the variable to the path of a file containing the secret, and the application reads and trims its contents at startup.
 
 ```bash
 # Direct value
@@ -10,6 +10,16 @@ UNIFI_PASSWORD=mypassword
 
 # Via file (Docker secrets / Kubernetes secrets)
 UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
+```
+
+`ZONE_PAIRS_FILE`, `EGRESS_ZONE_PAIRS_FILE` and `CLOUDFLARE_ZONE_PAIRS_FILE` read the zone pairs from a file in the same way. Each line holds one pair (or a list in the variable's own syntax); blank lines and lines starting with `#` are skipped. A file setting takes precedence over the plain variable. The files are read again on SIGHUP, which is how pairs change without a restart; mount the directory that holds the file rather than the file itself, and on Kubernetes do not use `subPath` (see [SIGHUP Hot-Reload](../README.md#sighup-hot-reload)).
+
+A SIGHUP applies only the zone pair settings. It reads the whole configuration again, so a setting that fails validation, such as a `_FILE` secret that cannot be read, refuses the reload with `SIGHUP: reload config failed` and keeps the running pairs. Every other setting, including a rotated `_FILE` secret, takes effect only after a restart; the reload logs the names of those that changed (`SIGHUP: changed settings take effect only after a restart`).
+
+```text
+# /config/zone-pairs
+External->Dmz:80,443
+External->Internal@192.168.1.10
 ```
 
 ---
@@ -33,6 +43,7 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 - [AbuseIPDB Blocklist](#abuseipdb-blocklist)
 - [Webhook Notifications](#webhook-notifications)
 - [Operational](#operational)
+- [Removed and Renamed Settings](#removed-and-renamed-settings)
 
 ---
 
@@ -41,25 +52,27 @@ UNIFI_PASSWORD_FILE=/run/secrets/unifi_password
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `UNIFI_URL` | — | **Yes** | Controller URL including scheme, e.g. `https://192.168.1.1` or `https://unifi.local:8443`. Must not contain a username or password (`https://user:pass@host` stops startup); use `UNIFI_USERNAME`/`UNIFI_PASSWORD` instead. |
-| `UNIFI_API_KEY` | — | One of API key or user/pass | UniFi API key. Takes precedence over username/password. `_FILE` variant supported. Keys are created under Settings > Control Plane > Integrations, which UniFi OS consoles and UniFi OS Server provide; the standalone self-hosted Network Application has no such page, so use a username and password there (legacy mode). |
+| `UNIFI_API_KEY` | — | One of API key or user/pass | UniFi API key. Takes precedence over username/password. `_FILE` variant supported. Keys are created under Settings > Control Plane > Integrations, which UniFi OS consoles and UniFi OS Server provide; the standalone self-hosted Network Application (10.6 and earlier) has no such page, so use a username and password there (legacy mode). Required on UniFi Network 11 and later, which run every site on the zone-based firewall. |
 | `UNIFI_USERNAME` | — | One of API key or user/pass | Local admin username. `_FILE` variant supported. |
 | `UNIFI_PASSWORD` | — | One of API key or user/pass | Local admin password. `_FILE` variant supported. |
-| `UNIFI_VERIFY_TLS` | `true` | No | Verify the controller's TLS certificate. Use `UNIFI_CA_CERT` for a private CA. |
-| `UNIFI_CA_CERT` | — | No | Path to a PEM CA certificate for self-signed controller certs. |
+| `UNIFI_VERIFY_TLS` | `true` | No | Verify the controller's TLS certificate. Use `UNIFI_CA_CERT` for a private CA. With `false` and an `https://` URL, startup and `validate` print a warning that the certificate is not validated. |
+| `UNIFI_CA_CERT` | — | No | Path to a PEM CA certificate for self-signed controller certs. Validation fails when the file cannot be read (`UNIFI_CA_CERT: cannot read <path>: ...`) or holds no PEM certificate. |
 | `UNIFI_HTTP_TIMEOUT` | `120s` | No | HTTP request timeout for UniFi API calls. Must be greater than 0. |
 | `UNIFI_API_DEBUG` | `false` | No | Log each UniFi API call's method, URL, status and timing, plus connection trace events (DNS, connect, TLS handshake, first response byte). Logged at `debug` level only, so it also needs `LOG_LEVEL=debug` or `trace`; startup warns when the level hides it. Headers, cookies, CSRF tokens, API keys and request/response bodies are never logged, and the login request is not traced. |
 | `UNIFI_REQUIRE_HTTPS` | `true` | No | Refuses to start if `UNIFI_URL` uses `http://`. Set to `false` explicitly to allow a plaintext controller connection. |
-| `ENABLE_IPV6` | `false` | No | Enable IPv6 dialing for the HTTP client. Set to `true` only if your controller is reachable over IPv6 with a working network path. This is separate from `FIREWALL_ENABLE_IPV6`. |
+| `UNIFI_DIAL_IPV6` | `false` | No | Let the controller client dial IPv6 as well as IPv4. Set to `true` only if your controller is reachable over IPv6 with a working network path. This is separate from `FIREWALL_ENABLE_IPV6`, which decides whether IPv6 addresses are banned. `ENABLE_IPV6` is the deprecated name of this setting: it still works when `UNIFI_DIAL_IPV6` is unset, and logs a deprecation warning at startup. |
 
 ### Authentication priority
 
-API key authentication is preferred. If `UNIFI_API_KEY` is set, username/password fields are ignored. API key authentication is available in UniFi Network ≥ 8.1.
+API key authentication is preferred. If `UNIFI_API_KEY` is set, username/password fields are ignored. The key is sent with every request, so there is no login session to expire or rate-limit.
 
-Username/password authentication supports legacy firewall mode only. The zone-based firewall and the Cloudflare whitelist use the UniFi integration API, which rejects session logins, so they require `UNIFI_API_KEY`.
+Username/password authentication supports legacy firewall mode only. The zone-based firewall and the Cloudflare whitelist use the UniFi integration API, which rejects session logins, so they require `UNIFI_API_KEY`. UniFi Network 11 and later apply only the zone-based firewall, so a username and password cannot manage them.
 
 ### Controller type
 
-The bouncer supports both UniFi OS consoles (UDM, UCG, Cloud Key Gen2+, UniFi OS Server) and the self-hosted UniFi Network Application (Docker images such as `linuxserver/unifi-network-application`, or a package install). It detects which one `UNIFI_URL` points at on startup and logs it as `"layout":"unifi-os"` or `"layout":"standalone"`. The two use different login paths (`/api/auth/login` and `/api/login`) and API prefixes. Self-hosted controllers usually listen on port 8443, e.g. `UNIFI_URL=https://unifi.local:8443`.
+The bouncer supports both UniFi OS consoles (UDM, UCG, Cloud Key Gen2+, UniFi OS Server) and the self-hosted UniFi Network Application (Docker images such as `linuxserver/unifi-network-application`, or a package install). It detects which one `UNIFI_URL` points at on startup and logs it as `"layout":"unifi-os"` or `"layout":"standalone"`. The two use different login paths (`/api/auth/login` and `/api/login`) and API prefixes. Self-hosted controllers usually listen on port 8443, e.g. `UNIFI_URL=https://unifi.local:8443`. The standalone Network Application ends at 10.6; UniFi Network 11 runs only on UniFi OS consoles and UniFi OS Server.
+
+The startup log also reports the controller's release, read from the integration API's `/integration/v1/info` with an API key or from the site's `stat/sysinfo` with a username and password: `detected UniFi Network version` with `network_version` and `zone_only` (true from Network 11). `diagnose` shows it in the `unifi_version` row. If it cannot be read, startup logs a warning and continues.
 
 ---
 
@@ -87,45 +100,46 @@ UNIFI_SITES=default,homelab,iot
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `FIREWALL_MODE` | `auto` | No | `auto`, `legacy`, or `zone`. `auto` checks each site for firewall zones on startup: with an API key it asks the integration API; with username/password it reads the site's zone list. A site without zones uses legacy mode. A site with zones but no API key stops startup with an error asking for `UNIFI_API_KEY` or `FIREWALL_MODE=legacy`. |
-| `FIREWALL_BLOCK_ACTION` | `drop` | No | Block action for legacy rules: `drop` or `reject` |
-| `FIREWALL_ENABLE_IPV6` | `true` | No | Create separate IPv6 firewall groups and rules. Distinct from `ENABLE_IPV6` which controls HTTP client IPv6 dialing. Setting it to `false` stops IPv6 enforcement: startup removes the IPv6 rules or policies but leaves the IPv6 groups and their members, so setting it back to `true` restores them. Run `drain` to remove the groups too. |
-| `FIREWALL_GROUP_CAPACITY` | `10000` | No | Maximum IPs per firewall group shard (used if family-specific overrides are not set). Capped at `SHARD_LIMIT`. |
-| `FIREWALL_GROUP_CAPACITY_V4` | — | No | Override capacity for IPv4 groups (takes precedence over `FIREWALL_GROUP_CAPACITY`) |
-| `FIREWALL_GROUP_CAPACITY_V6` | — | No | Override capacity for IPv6 groups (takes precedence over `FIREWALL_GROUP_CAPACITY`) |
+| `FIREWALL_MODE` | `auto` | No | `auto`, `legacy`, or `zone`. `auto` checks each site for firewall zones on startup: with an API key it asks the integration API; with username/password it reads the site's zone list. A site without zones uses legacy mode. A site with zones but no API key stops startup with an error asking for `UNIFI_API_KEY` (or, on UniFi Network 10.x and earlier, `FIREWALL_MODE=legacy`). On UniFi Network 11 and later, legacy mode stops startup, whether set or detected. |
+| `FIREWALL_BLOCK_ACTION` | `drop` | No | Action of legacy rules: `drop` or `reject`. Zone block policies always use `BLOCK`. |
+| `FIREWALL_ENABLE_IPV6` | `true` | No | Create separate IPv6 firewall groups and rules. Distinct from `UNIFI_DIAL_IPV6` which controls HTTP client IPv6 dialing. With `false`, IPv6 decisions are ignored. Setting it to `false` stops IPv6 enforcement: startup removes the IPv6 rules or policies but leaves the IPv6 groups and their members, so setting it back to `true` restores them. Run `drain` to remove the groups too. |
 | `FIREWALL_API_SHARD_DELAY` | `250ms` | No | Pause before structural writes: before each legacy rule create after the first, before creating the rule or policies for a newly created shard, and before deleting a pruned or drained group. Group membership updates (`PUT`) are not delayed. Gives the UDM time to finish regenerating its ruleset between structural changes. Set `0` to disable; negative values are rejected. |
 | `FIREWALL_LOG_DROPS` | `false` | No | Enable logging on managed firewall rules and zone policies. Existing zone policies are updated on reconcile. |
 | `FIREWALL_CONNECTION_STATES` | `NEW,INVALID` | No | Connection states matched by zone block policies. Allowed values: `NEW`, `INVALID`, `ESTABLISHED`, or `ALL` for unrestricted matching. `ALL` can block replies to outbound connections. |
 | `FIREWALL_RECONCILE_ON_START` | `true` | No | Run a full reconcile on startup, once the first CrowdSec stream batch has been applied |
-| `FIREWALL_RECONCILE_INTERVAL` | `10m` | No | Periodically repair shard membership (including groups edited by hand in UniFi) and missing policies/rules. Set `0s` to disable periodic reconcile; negative values are rejected. |
+| `FIREWALL_RECONCILE_INTERVAL` | `10m` | No | Periodically repair shard membership (including groups edited by hand in UniFi) and missing policies/rules. Each reconcile first re-checks the sites loaded in legacy mode, and the bouncer exits for its restart policy to start it in zone mode once the controller runs UniFi Network 11 or `auto` finds zones (see [Firewall mode details](#firewall-mode-details)). Set `0s` to disable periodic reconcile and the re-check; negative values are rejected. |
 
-`FIREWALL_FLUSH_CONCURRENCY` is no longer used: shards are written one at a time. Setting it logs a warning at startup.
-
-### Traffic Matching List / Shard Management (Integration v1 / Zone Mode)
+### Shard management and sync
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `SYNC_INTERVAL` | `30s` | No | Retry interval for dirty shard flushes that failed after a decision batch. Shards are also flushed immediately after every decision batch. Minimum: `5s`. |
-| `SHARD_LIMIT` | `10000` | No | Maximum IPs per shard in both modes: Traffic Matching Lists in zone mode and firewall groups in legacy mode. The effective per-group capacity is the smaller of `FIREWALL_GROUP_CAPACITY` (or its `_V4`/`_V6` override) and `SHARD_LIMIT`. When a shard is full, a new shard (group plus its rule or zone policies) is created automatically; no IPs are dropped. Lowering the limit takes effect on restart: members beyond it move from existing shards into new ones. UniFi integration v1 supports up to 10,000 items per TML. |
+| `SHARD_LIMIT` | `10000` | No | Maximum IPs per shard in both modes: Traffic Matching Lists in zone mode and firewall groups in legacy mode, 1 to 10000. When a shard is full, a new shard (group plus its rule or zone policies) is created automatically; no IPs are dropped. Lowering the limit takes effect on restart: members beyond it move from existing shards into new ones. UniFi integration v1 supports up to 10,000 items per TML. |
+| `SHARD_LIMIT_V4` | — | No | Maximum IPs per IPv4 shard, 1 to 10000. `0` or unset uses `SHARD_LIMIT`; a value above `SHARD_LIMIT` is capped at it. |
+| `SHARD_LIMIT_V6` | — | No | Maximum IPs per IPv6 shard, 1 to 10000. `0` or unset uses `SHARD_LIMIT`; a value above `SHARD_LIMIT` is capped at it. |
 | `SHARD_MERGE_THRESHOLD` | `0` | No | IPs at or below this count make a shard eligible for consolidation into another shard. `0` = auto (50% of `SHARD_LIMIT`). `-1` disables rebalancing. |
-| `CIRCUIT_BREAKER_THRESHOLD` | `5` | No | Consecutive shard sync failures before the circuit breaker opens and suspends syncs. Must be at least 1. |
+| `CIRCUIT_BREAKER_THRESHOLD` | `5` | No | Consecutive controller failures before the circuit breaker opens and suspends syncs. A failed shard write counts unless the controller answered 400 or 429; a failed reconcile read or policy or rule check counts when it suggests the controller is unreachable or failing (a transport error, a timeout, a 5xx or a 401), not when it answers 400, 404, 409 or 429. Must be at least 1. |
 | `CIRCUIT_BREAKER_RESET_INTERVAL` | `60s` | No | How long the open breaker waits before allowing a probe request (half-open). Must be greater than 0. |
+
+`FIREWALL_GROUP_CAPACITY`, `FIREWALL_GROUP_CAPACITY_V4` and `FIREWALL_GROUP_CAPACITY_V6` are the deprecated names of the shard limits. They still work, and each logs a deprecation warning at startup. A family's capacity is the first of these that is set and non-zero, capped at `SHARD_LIMIT`: `SHARD_LIMIT_V4` (or `_V6`), then `FIREWALL_GROUP_CAPACITY_V4` (or `_V6`), then `FIREWALL_GROUP_CAPACITY`. With none of them set, a family uses `SHARD_LIMIT`.
 
 ### Firewall mode details
 
-**`auto`** (recommended): The bouncer queries the UniFi controller to detect whether zone-based firewall policies are supported. Controllers running UniFi Network ≥ 8.x use zone mode; older versions use legacy mode. The detected mode is logged at startup. If the probe fails for any reason other than the zone API being absent, startup stops instead of guessing a mode.
+**`auto`** (recommended): The bouncer checks each site for firewall zones at startup. A site that has zones uses zone mode; a site without them, or a controller without the zone API, uses legacy mode. If the probe fails for any other reason, startup stops instead of guessing a mode. UniFi Network 11 and later move every site to the zone-based firewall, so a site there without zones (no UniFi gateway adopted) stops startup rather than falling back to legacy rules that would not be applied. The mode is not logged as such: a zone-mode site logs `zone discovery complete`, and `diagnose` shows each site's mode in its `firewall_mode[<site>]` row.
 
-**`legacy`**: Creates `WAN_IN` and `WANv6_IN` drop rules that reference managed address-group shards. Works with all UniFi Network versions.
+**`legacy`**: Creates drop rules in `LEGACY_RULESET_V4`/`LEGACY_RULESET_V6` (`WAN_IN` and `WANv6_IN`) that reference managed address-group shards. Works with UniFi Network 10.x and earlier, on sites that have not moved to the zone-based firewall. Refused on UniFi Network 11 and later, which ignore these rules.
 
-**`zone`**: Creates zone-based firewall policies for each pair in `ZONE_PAIRS`. Requires UniFi Network ≥ 8.x and `UNIFI_API_KEY`: zone policies are managed through the integration API, which does not accept a username and password, so validation rejects `FIREWALL_MODE=zone` without a key. Specify at least one zone pair.
+**`zone`**: Creates zone-based firewall policies for each pair in `ZONE_PAIRS` and `EGRESS_ZONE_PAIRS`. Requires a site on the zone-based firewall and `UNIFI_API_KEY`: zone policies are managed through the integration API, which does not accept a username and password, so validation rejects `FIREWALL_MODE=zone` without a key. `ZONE_PAIRS` must name at least one pair.
+
+**Switching while running:** the mode is chosen when the bouncer starts. Each periodic reconcile re-checks the sites loaded in legacy mode, and when the controller now runs UniFi Network 11, or `auto` now finds zones on the site, the bouncer logs `firewall mode changed` and exits with an error so its restart policy starts it in zone mode. Without a restart policy (`restart: unless-stopped`, `Restart=on-failure`, a Kubernetes Deployment) it stays stopped and blocks nothing until started again. In zone mode it then removes the zone policies the controller converted from its legacy rules, once its own block policies cover the same lists. See [Upgrading the controller to UniFi Network 11](UPGRADING.md#upgrading-the-controller-to-unifi-network-11).
 
 ### Group capacity and sharding
 
-UniFi firewall groups (legacy mode) and Traffic Matching Lists (zone mode) have a maximum capacity of 10,000 items per shard. When the number of banned IPs exceeds the configured capacity, the bouncer automatically creates additional shards (e.g. `crowdsec-block-v4-0`, `crowdsec-block-v4-1`, ...) and creates matching rules or policies for each.
+UniFi firewall groups (legacy mode) and Traffic Matching Lists (zone mode) hold at most 10,000 entries. When the number of banned IPs exceeds a shard's capacity, the bouncer creates additional shards (e.g. `crowdsec-block-v4-0`, `crowdsec-block-v4-1`, ...) and matching rules or policies for each.
 
-IPs are distributed across shards using **bin-packing**: each shard is filled to capacity before a new shard is created. This minimizes the number of shards and keeps the firewall configuration compact.
+IPs are distributed across shards using **bin-packing**: each shard is filled to capacity before a new shard is created. As bans expire, a shard at or below `SHARD_MERGE_THRESHOLD` is merged into the others and deleted, which keeps the number of firewall objects small.
 
-After every CrowdSec decision batch, all dirty shards are flushed to the UniFi API immediately (`SyncDirty`). If a flush fails (e.g. transient network error), the shard remains dirty and is retried at the next `SYNC_INTERVAL` tick. This means multiple IP changes within a single decision batch are merged into one PUT request per shard.
+After every CrowdSec decision batch, all dirty shards are written to the controller with one `PUT` each, so the changes of a whole batch cost one request per shard. A shard whose write fails stays dirty and is retried at the next `SYNC_INTERVAL` tick. See [Shards and Syncing](DESIGN.md#shards-and-syncing) for the sync cycle and the circuit breaker.
 
 ---
 
@@ -135,7 +149,7 @@ The bouncer uses Go templates for all managed UniFi object names. This allows mu
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GROUP_NAME_TEMPLATE` | `crowdsec-block-{{.Family}}-{{.Index}}` | Name template for firewall address groups |
+| `GROUP_NAME_TEMPLATE` | `crowdsec-block-{{.Family}}-{{.Index}}` | Name template for firewall address groups. The classic firewall API refuses a group name longer than 64 characters, so with `FIREWALL_MODE=legacy`, validation fails when the name of the first shard (index `0`, on each site in `UNIFI_SITES`, or `default` with `UNIFI_SITES_AUTO`) is longer; with `auto` it logs a warning instead, as sites on the zone-based firewall name traffic matching lists, which accept names of up to 1000 characters, as do zone policies. A name that passes 64 characters only at a higher index is refused when that shard is created, which logs an error and fires `shard_create_failed`. |
 | `RULE_NAME_TEMPLATE` | `crowdsec-drop-{{.Family}}-{{.Index}}` | Name template for legacy firewall rules |
 | `POLICY_NAME_TEMPLATE` | `crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}` | Name template for zone firewall policies |
 | `OBJECT_DESCRIPTION` | `Managed by cs-unifi-bouncer-pro. Do not edit manually.` | Description set on all managed objects |
@@ -168,7 +182,7 @@ RULE_NAME_TEMPLATE=crowdsec-staging-drop-{{.Family}}-{{.Index}}
 POLICY_NAME_TEMPLATE=crowdsec-staging-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}
 ```
 
-The per-pair port and destination-IP filter lists (`crowdsec-ports-*`, `crowdsec-dstips-*`) and the Cloudflare whitelist objects (`crowdsec-whitelist-cloudflare-*`) have fixed names that the templates do not change. Use `ZONE_PAIRS` port or destination-IP filters and `CLOUDFLARE_WHITELIST_ENABLED` on only one instance per site.
+The per-pair port and destination-IP filter lists (`crowdsec-ports-*`, `crowdsec-dstips-*`), the temporary copies made while a policy is replaced (`crowdsec-policy-stage-*`) and the Cloudflare whitelist objects (`crowdsec-whitelist-cloudflare-*`) have fixed names that the templates do not change. Use port or destination-IP filters in `ZONE_PAIRS` or `EGRESS_ZONE_PAIRS`, and `CLOUDFLARE_WHITELIST_ENABLED`, on only one instance per site.
 
 At startup the bouncer logs a warning when the controller holds groups or lists named like its own that its database has no record of; see [Troubleshooting](TROUBLESHOOTING.md#log-warns-that-objects-exist-that-the-database-has-no-record-of).
 
@@ -182,12 +196,16 @@ These settings apply only when `FIREWALL_MODE=legacy` or when `auto` detects a l
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LEGACY_RULE_INDEX_START_V4` | `22000` | Starting rule index for IPv4 drop rules (WAN_IN). Higher numbers = lower priority. |
-| `LEGACY_RULE_INDEX_START_V6` | `27000` | Starting rule index for IPv6 drop rules (WANv6_IN). |
-| `LEGACY_RULESET_V4` | `WAN_IN` | IPv4 ruleset to attach drop rules to |
-| `LEGACY_RULESET_V6` | `WANv6_IN` | IPv6 ruleset to attach drop rules to |
+| `LEGACY_RULE_INDEX_START_V4` | `22000` | Starting rule index for IPv4 drop rules (WAN_IN). Higher numbers = lower priority. Must be between 1 and 99999. |
+| `LEGACY_RULE_INDEX_START_V6` | `27000` | Starting rule index for IPv6 drop rules (WANv6_IN). Must be between 1 and 99999. |
+| `LEGACY_RULESET_V4` | `WAN_IN` | IPv4 ruleset to attach drop rules to: `WAN_IN`, `WAN_OUT`, `WAN_LOCAL`, `LAN_IN`, `LAN_OUT`, `LAN_LOCAL`, `GUEST_IN`, `GUEST_OUT` or `GUEST_LOCAL`. |
+| `LEGACY_RULESET_V6` | `WANv6_IN` | IPv6 ruleset to attach drop rules to: `WANv6_IN`, `WANv6_OUT`, `WANv6_LOCAL`, `LANv6_IN`, `LANv6_OUT`, `LANv6_LOCAL`, `GUESTv6_IN`, `GUESTv6_OUT` or `GUESTv6_LOCAL`. |
 
 Rules are indexed sequentially from the start value across shards: `22000`, `22001`, `22002`, ...
+
+These settings are validated with `FIREWALL_MODE=legacy` and `auto`, and ignored with `zone`.
+
+Changing `FIREWALL_BLOCK_ACTION` or a ruleset updates the rules of the current shards at the next startup or reconcile. A rule that keeps the old action or ruleset, because its database record was lost, is not removed by the orphan sweep, which leaves alone rules it could not have created; it is deleted when its shard's group is pruned or drained, so it never keeps `drain` from deleting the group.
 
 ---
 
@@ -197,7 +215,7 @@ These settings apply only when `FIREWALL_MODE=zone` or when `auto` detects a zon
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ZONE_PAIRS` | `External->Dmz` | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. Use commas between simple pairs; use semicolons between pairs when ports or destination IPs contain commas. Ambiguous strings fail validation. A block policy is created for each pair and shard. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. Standard UUIDs and MongoDB ObjectIDs are also accepted. Optional port lists and `@ip1,ip2,...` scope each policy. An empty value is rejected when `FIREWALL_MODE=zone`, and a SIGHUP reload with an empty value is ignored, because an empty set would delete every block policy. |
+| `ZONE_PAIRS` | `External->Dmz` | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP,...]` format. Use commas between simple pairs; use semicolons between pairs when ports or destination IPs contain commas. Ambiguous strings fail validation. A block policy is created for each pair, shard and address family, with the shard list as its source filter. Zone names are auto-resolved to UUIDs at startup via the integration v1 API. Standard UUIDs and MongoDB ObjectIDs are also accepted. Optional port lists and `@ip1,ip2,...` scope each policy. An empty value is rejected when `FIREWALL_MODE=zone`, and a SIGHUP reload with an empty value is ignored, because an empty set would delete every block policy. Each `src->dst` pair may appear only once for a site, because its policies and filter lists are named after its zones: put all its ports in one entry (`External->Internal:80,443`), not one entry per port. A `site/` prefix limits a pair to one site (see [Pairs for one site](#pairs-for-one-site)). `ZONE_PAIRS_FILE` variant supported; pairs read from a file can change on SIGHUP. |
 
 ```bash
 # Named zones (auto-resolved at startup) — no port filter (any port)
@@ -227,17 +245,41 @@ ZONE_PAIRS=aaaaaaaa-0000-4000-8000-aaaaaaaaaaaa->bbbbbbbb-0000-4000-8000-bbbbbbb
 
 Zone names are case-sensitive and must match the names shown in Settings → Firewall → Zones. If a zone name cannot be found at startup the bouncer exits with an error listing the available zones. A configured zone with an explicitly empty network list also stops startup or reload; External and Gateway do not require network membership.
 
-### Per-scenario zone routing
+### Pairs for one site
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ZONE_PAIRS_SCENARIO_MAP` | — | Unsupported. The bouncer rejects this setting because it cannot provision separate policies for each scenario. |
+Without a prefix, every pair applies to every site in `UNIFI_SITES`. When sites name their zones differently, prefix a pair with the site's short name (as in `UNIFI_SITES`) and a slash:
 
-Per-scenario zone routing requires separate shards and policies for each scenario. Until that is implemented, remove `ZONE_PAIRS_SCENARIO_MAP` and configure the shared `ZONE_PAIRS` list instead.
+```
+[site/]src[:sport,...]->dst[:dport,...][@dstIP,...]
+```
+
+A site with at least one prefixed pair in a setting uses only its own pairs from that setting; every other site uses the pairs without a prefix. `ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS` are resolved separately, so a site may have its own `ZONE_PAIRS` pairs and still use the shared `EGRESS_ZONE_PAIRS`.
+
+```bash
+UNIFI_SITES=default,branch
+
+# default uses External->Dmz; branch uses its own two pairs
+ZONE_PAIRS=External->Dmz;branch/Wan->Lan;branch/Wan->Iot:22,23
+
+# both sites block egress from their DMZ, under each site's zone names
+EGRESS_ZONE_PAIRS=default/Dmz->External;branch/Servers->Wan
+```
+
+The same pairs in a `ZONE_PAIRS_FILE`:
+
+```
+# head office: the unprefixed pairs
+External->Dmz
+# branch office
+branch/Wan->Lan
+branch/Wan->Iot:22,23
+```
+
+A prefix that names a site not in `UNIFI_SITES` fails validation. A site left without a `ZONE_PAIRS` pair fails validation with `FIREWALL_MODE=zone` (`ZONE_PAIRS leaves site "branch" without a zone pair; add a pair without a site prefix or one starting with "branch/"`); with `auto`, once a `ZONE_PAIRS` pair has a prefix, the same text is a startup warning ending `; if the site uses the zone-based firewall it will not start`, because a site on the classic firewall needs no pair. With `UNIFI_SITES_AUTO=true` the sites are known only after discovery, so an unknown prefix logs a warning at startup and its pairs apply to no site. At startup, and after each SIGHUP reload, the bouncer logs the pairs each site uses (`zone pairs for site`), and `validate` prints one `zone_pairs[site]` row per site when a setting has prefixes. A SIGHUP that changes one site's pairs adds and removes only that site's policies; each site's orphan sweep looks only at its own policies. Duplicate pairs in `ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS` are checked per site: a pair may appear once without a prefix and once more for a site.
 
 ### Port filtering for zone pairs
 
-Both `ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS` support an optional port list appended to either zone name using a colon separator:
+`ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS` support an optional port list appended to either zone name using a colon separator:
 
 ```
 src[:sport1,sport2,...]->dst[:dport1,dport2,...]
@@ -252,7 +294,7 @@ When a port list is provided, the bouncer creates a separate PORTS Traffic Match
 | `External:81,8443->Internal` | Match only source ports 81 and 8443 |
 | `External:81,8443->Internal:80,443` | Match source ports 81/8443 **and** destination ports 80/443 |
 
-Port TMLs are named `crowdsec-ports-src-{Src}-{Dst}` and `crowdsec-ports-dst-{Src}-{Dst}` (block policies) or `crowdsec-whitelist-cloudflare-srcports-{Src}-{Dst}` and `crowdsec-whitelist-cloudflare-dstports-{Src}-{Dst}` (Cloudflare ALLOW policies). They are created or updated at startup alongside the zone cache.
+Port TMLs are named `crowdsec-ports-src-{Src}-{Dst}` and `crowdsec-ports-dst-{Src}-{Dst}` (block policies; `crowdsec-ports-src-egress-{Src}-{Dst}` and so on for egress pairs) or `crowdsec-whitelist-cloudflare-srcports-{Src}-{Dst}` and `crowdsec-whitelist-cloudflare-dstports-{Src}-{Dst}` (Cloudflare ALLOW policies). Block policy port lists are created or updated at startup alongside the zone cache, Cloudflare ones at each whitelist sync.
 
 ### Destination IP filtering for zone pairs
 
@@ -273,6 +315,38 @@ src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]
 
 IPv4 and IPv6 destination IPs are split into separate Traffic Matching Lists (`crowdsec-dstips-v4-{Src}-{Dst}` and `crowdsec-dstips-v6-{Src}-{Dst}`), and each policy uses the list of its own family. When the destination IPs are all one family, the pair gets policies for that family only: UniFi rejects a policy whose destination list is of the other family (HTTP 500), and traffic of that family cannot reach those destinations anyway. A policy of the other family left from an earlier version or configuration is removed. The same applies to Cloudflare ALLOW policies. The UniFi PUT endpoint drops port and destination filters, so a filtered policy is never updated in place: any change to it, including its filters, replaces it with a new policy.
 
+### Egress blocking
+
+`ZONE_PAIRS` policies match banned addresses as the **source**, so banned hosts cannot reach yours, but your hosts can still connect out to them. A compromised host in a DMZ or IoT zone can then still call back to an address CrowdSec has banned, for example to open a reverse shell, fetch a payload or check in. Egress pairs close that path. Their block policies match the same ban lists as the **destination**.
+
+```mermaid
+flowchart LR
+    list["Shard list<br/>crowdsec-block-v4-0"]
+    list -->|"source filter"| inbound["ZONE_PAIRS External->Dmz<br/>crowdsec-policy-External-Dmz-v4-0"]
+    list -->|"destination filter"| egress["EGRESS_ZONE_PAIRS Dmz->External<br/>crowdsec-policy-egress-Dmz-External-v4-0"]
+    inbound -->|"blocks"| in["Banned address -> host in Dmz"]
+    egress -->|"blocks"| out["Host in Dmz -> banned address"]
+```
+
+Both kinds of pair reference the same shard lists; only the side of the policy that carries the list differs.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EGRESS_ZONE_PAIRS` | — | Zone pairs in `src[:sport,...]->dst[:dport,...]` format, for example `Dmz->External;IoT->External`. A block policy is created for each pair, shard and address family, with the shard list as its destination filter. Port lists work as in `ZONE_PAIRS`. A destination IP list (`@...`) is rejected, because the ban list is the destination filter. Requires the zone-based firewall and `UNIFI_API_KEY`; validation rejects it with `FIREWALL_MODE=legacy`, and with `FIREWALL_MODE=auto` a site that resolves to legacy mode logs a warning that it has no effect there. Each pair may appear only once for a site. A `site/` prefix limits a pair to one site (see [Pairs for one site](#pairs-for-one-site)). `EGRESS_ZONE_PAIRS_FILE` variant supported. Reloaded on SIGHUP together with `ZONE_PAIRS`. |
+| `EGRESS_CONNECTION_STATES` | `NEW` | Connection states matched by egress block policies. Same values as `FIREWALL_CONNECTION_STATES`. The default matches only new connections, so replies to inbound connections that `ZONE_PAIRS` allows are never cut. |
+
+```bash
+# Stop the DMZ and IoT zones from connecting to banned addresses
+EGRESS_ZONE_PAIRS=Dmz->External;IoT->External
+
+# Only outbound web traffic
+EGRESS_ZONE_PAIRS=IoT->External:80,443
+```
+
+Egress pairs reuse the inbound shards and lists, so they need no extra groups, but each pair adds one policy per shard and family: with 13 v4 shards, two egress pairs add 26 policies. Egress policies are named with `egress-` after the policy prefix (`crowdsec-policy-egress-Dmz-External-v4-0` for `Dmz->External` with the default template), and their port lists with `egress-` after the list prefix (`crowdsec-ports-dst-egress-IoT-External`), so they never collide with an inbound pair over the same zones. The `crowdsec_unifi_zone_block_policies` metric counts the policies per site and direction (`inbound` or `egress`).
+
+The controller evaluates policies in order, and an ALLOW policy for the same zones that comes before an egress block lets its traffic through to banned addresses. The bouncer logs a warning naming each such ALLOW (`an ALLOW policy is evaluated before an egress block policy for the same zones`) and repeats it only when the set changes. It cannot fix the order itself, because recreating its block would move it further back. Move the ALLOW after the block policies in the UniFi policy list.
+
 ---
 
 ## Cloudflare Whitelist
@@ -281,11 +355,11 @@ When enabled, the bouncer periodically fetches current Cloudflare IP ranges and 
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | No | Enable the Cloudflare IP whitelist sync. Requires zone mode and `UNIFI_API_KEY`; startup fails with `FIREWALL_MODE=legacy` or without an API key. |
+| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | No | Enable the Cloudflare IP whitelist sync. Requires zone mode and `UNIFI_API_KEY`; startup fails with `FIREWALL_MODE=legacy` or without an API key. With `FIREWALL_ENABLE_IPV6=false` only the IPv4 list and ALLOW policies are kept; IPv6 ones from an earlier run are removed, and a pair whose destination IPs are all IPv6 logs a warning, as it then gets no policy. |
 | `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | No | How often to re-fetch Cloudflare IP ranges and update the IP TMLs (default: weekly). |
 | `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | No | `https://` URL to fetch the current Cloudflare IPv4 CIDR list. |
 | `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | No | `https://` URL to fetch the current Cloudflare IPv6 CIDR list. |
-| `CLOUDFLARE_ZONE_PAIRS` | — | If enabled | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]` format. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. Use semicolons between pairs when a pair contains comma-separated ports or IPs. Zones are resolved separately for each site. Filter creation failure prevents a broader ALLOW policy from being created. |
+| `CLOUDFLARE_ZONE_PAIRS` | — | If enabled | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]` format. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. Use semicolons between pairs when a pair contains comma-separated ports or IPs. Each `src->dst` pair may appear only once for a site. Zones are resolved separately for each site. A `site/` prefix limits a pair to one site (see [Pairs for one site](#pairs-for-one-site)); a site left without a pair has its whitelist policies and lists removed. Filter creation failure prevents a broader ALLOW policy from being created. `CLOUDFLARE_ZONE_PAIRS_FILE` variant supported. Reloaded on SIGHUP while the whitelist runs: a change syncs the whitelist at once, after the `ZONE_PAIRS` reload succeeds. A reload whose pairs name a zone a site does not have is refused, and the zone pairs are kept as well; sites on the classic firewall, which have no zones to check, are skipped by that check. |
 
 A fetched list is applied only if every entry passes validation: IPv4 ranges no broader than a /12, IPv6 ranges no broader than a /29, no private, loopback, link-local, multicast or other non-public ranges, and at most 1000 entries per list. A list that fails validation, or an empty one, is rejected with an error and the ranges from the last successful sync stay in place.
 
@@ -307,7 +381,7 @@ CLOUDFLARE_ZONE_PAIRS=External->Dmz:80,443@10.0.5.251
 CLOUDFLARE_ZONE_PAIRS=External->Internal,External->DMZ
 ```
 
-The shared IPv4 and IPv6 source IP TMLs are named `crowdsec-whitelist-cloudflare-v4` and `crowdsec-whitelist-cloudflare-v6`. ALLOW policies are named `crowdsec-whitelist-cloudflare-External-{DstName}-v4` and `crowdsec-whitelist-cloudflare-External-{DstName}-v6`. When destination IP filtering is configured via `@IP`, per-pair destination IP TMLs are also created: `crowdsec-whitelist-cloudflare-dstips-{Src}-{Dst}-v4` and `crowdsec-whitelist-cloudflare-dstips-{Src}-{Dst}-v6`.
+The shared IPv4 and IPv6 source IP TMLs are named `crowdsec-whitelist-cloudflare-v4` and `crowdsec-whitelist-cloudflare-v6`. ALLOW policies are named `crowdsec-whitelist-cloudflare-{Src}-{Dst}-v4` and `crowdsec-whitelist-cloudflare-{Src}-{Dst}-v6`. When destination IP filtering is configured via `@IP`, per-pair destination IP TMLs are also created: `crowdsec-whitelist-cloudflare-dstips-{Src}-{Dst}-v4` and `crowdsec-whitelist-cloudflare-dstips-{Src}-{Dst}-v6`.
 
 Zone names in `CLOUDFLARE_ZONE_PAIRS` are resolved independently of `ZONE_PAIRS` — they do not need to be the same pairs.
 
@@ -320,12 +394,12 @@ Zone names in `CLOUDFLARE_ZONE_PAIRS` are resolved independently of `ZONE_PAIRS`
 | `CROWDSEC_LAPI_URL` | `https://crowdsec:8080` | No | URL of the CrowdSec Local API |
 | `CROWDSEC_LAPI_KEY` | — | **Yes** | Bouncer API key generated by `cscli bouncers add`. `_FILE` variant supported. |
 | `CROWDSEC_LAPI_VERIFY_TLS` | `true` | No | Verify the LAPI's TLS certificate |
-| `CROWDSEC_LAPI_CA_CERT` | — | No | CA bundle for a private LAPI certificate |
+| `CROWDSEC_LAPI_CA_CERT` | — | No | CA bundle for a private LAPI certificate. Validation fails when the file cannot be read or holds no PEM certificate. |
 | `CROWDSEC_LAPI_ALLOW_HTTP` | `false` | No | Required for non-loopback HTTP; use only on a trusted local network |
 | `CROWDSEC_ORIGINS` | — | No | Comma-separated allowed decision origins. Empty = all origins accepted. Example: `crowdsec,lists` |
 | `CROWDSEC_POLL_INTERVAL` | `30s` | No | How often to poll the LAPI stream for new decisions |
 | `CROWDSEC_RESYNC_INTERVAL` | `1h` | No | How often every active decision is re-read from the LAPI (`GET /v1/decisions`) to apply bans the stream skipped. The LAPI stream can miss a decision created in the same second as a poll until the bouncer restarts; this recovers it. Only bans are recovered: a missed deletion still ends when the ban expires. `0` disables; otherwise minimum `5m`. Not run in `DRY_RUN`. |
-| `LAPI_METRICS_PUSH_INTERVAL` | `30m` | No | Interval for pushing metrics to LAPI `/v1/usage-metrics`; `0` disables; minimum enforced value is `10m` |
+| `LAPI_METRICS_PUSH_INTERVAL` | `30m` | No | Interval for pushing metrics to LAPI `/v1/usage-metrics`; `0` disables; minimum enforced value is `10m`; negative values are rejected |
 
 ---
 
@@ -335,9 +409,10 @@ Decisions from CrowdSec pass through an 8-stage filter pipeline before being enq
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `BLOCK_DECISION_TYPES` | `ban` | Comma-separated CrowdSec decision types enforced as bans. A firewall can only block, so a listed type such as `captcha` blocks the address like a ban, through every other stage of the filter. Example: `ban,captcha`. Types are case-insensitive; an entry other than lower-case letters, digits, `_` and `-`, or the word `delete`, stops startup. Leave `ban` in the list unless ban decisions should be ignored. A deletion releases its ban when its type is `ban` or is listed here, so taking a type out of the list leaves the bans it made until they expire. |
 | `BLOCK_SCENARIO_EXCLUDE` | — | Comma-separated scenario substrings to skip. Example: `impossible-travel,test` |
 | `BLOCK_WHITELIST` | — | Comma-separated IP addresses or CIDR ranges that are never blocked. Add your public WAN IP here; private and CGNAT ranges are skipped automatically. Adding an address takes effect for existing bans on restart (see below). |
-| `BLOCK_MIN_DURATION` | — | Ignore ban decisions shorter than this duration. Example: `1h`. Useful to filter out short test decisions. The decision's own duration is checked, before any `BLOCK_SCENARIO_DURATION_MAP` override, so a mapped duration below this minimum still applies. |
+| `BLOCK_MIN_DURATION` | — | Ignore ban decisions shorter than this duration. Example: `1h`. Negative values are rejected. Useful to filter out short test decisions. The decision's own duration is checked, before any `BLOCK_SCENARIO_DURATION_MAP` override, so a mapped duration below this minimum still applies. |
 | `BLOCK_SCENARIO_DURATION_MAP` | — | Per-scenario ban duration overrides. Comma- or semicolon-separated `key=duration` pairs where the longest matching key wins (equal-length keys resolve alphabetically). A configured override may exceed `BAN_TTL`. Example: `ssh-bf=168h;http-probing=24h`. A malformed entry or non-positive duration stops startup. |
 
 ### Filter pipeline stages
@@ -346,14 +421,16 @@ The stage names below are the `stage` label values of `crowdsec_unifi_decisions_
 
 | Stage | What it rejects |
 |-------|----------------|
-| `1_action` | Decisions whose type is neither `ban` nor `delete` |
+| `1_action` | Decisions whose type is not in `BLOCK_DECISION_TYPES` (reason `unsupported_action`, or `not_a_ban` for a new decision of type `delete`, or `ban` left out of the list) |
 | `2_scenario_exclude` | Scenarios matching any `BLOCK_SCENARIO_EXCLUDE` substring |
 | `3_origin` | Origins not in `CROWDSEC_ORIGINS` (when set) |
 | `4_scope` | Non-IP/CIDR scopes (ASN, country, etc.) |
 | `5_parse` | Decisions missing required fields (reason `missing_field`), invalid or malformed IP addresses (`parse_error`), and ranges broader than `/8` (IPv4) or `/32` (IPv6), which are never banned (`range_too_broad`). The same range limit applies to blocklist entries. |
-| `6_private` | RFC 1918, loopback, link-local, and ULA addresses |
+| `6_private` | RFC 1918, CGNAT (100.64.0.0/10), loopback, link-local, and ULA addresses |
 | `7_whitelist` | IPs matching `BLOCK_WHITELIST` |
-| `8_min_duration` | Decisions shorter than `BLOCK_MIN_DURATION` |
+| `8_min_duration` | Bans with a zero or negative duration, and bans shorter than `BLOCK_MIN_DURATION` |
+
+See [Filter Pipeline](DESIGN.md#filter-pipeline) for a diagram of the stages.
 
 Deletions skip stages 2, 3, 6, 7 and 8. A deletion only releases the claim its own decision made, so narrowing `BLOCK_SCENARIO_EXCLUDE`, `CROWDSEC_ORIGINS` or `BLOCK_WHITELIST` does not strand bans applied before the change.
 
@@ -365,11 +442,11 @@ On startup, stored bans that `BLOCK_WHITELIST` now covers, private addresses, an
 
 ## Decision Rate Limiting
 
-A token-bucket rate limiter can throttle how fast decisions are dequeued and applied to UniFi during large ban waves. When the limiter is active, excess decisions are queued and processed as tokens refill.
+A token-bucket rate limiter can throttle how fast decisions are dequeued and applied to UniFi during large ban waves. When the limiter is active, excess decisions are queued and processed as tokens refill. Only bans are limited; deleted and expired decisions are applied at once, so a restart against a LAPI holding many expired decisions does not stay unready while they are worked through.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DECISION_RATE_LIMIT` | `0` | Maximum decisions processed per second. `0` disables rate limiting (unlimited throughput). |
+| `DECISION_RATE_LIMIT` | `0` | Maximum ban decisions applied per second; deleted and expired decisions are not paced. `0` disables rate limiting (unlimited throughput). |
 | `DECISION_BURST_SIZE` | `1000` | Token-bucket burst capacity — the maximum number of decisions that can be processed in a single burst before the rate limit takes effect. Must be at least 1 when `DECISION_RATE_LIMIT` is set; has no effect when `DECISION_RATE_LIMIT=0`. |
 
 ```bash
@@ -402,10 +479,12 @@ The database contains four bbolt buckets:
 
 | Bucket | Contents |
 |--------|---------|
-| `bans` | IP → BanEntry (recorded at, expires at, IPv6 flag) |
-| `groups` | Firewall group shard cache (UniFi ID, members, dirty flag) |
+| `bans` | IP → BanEntry (recorded at, expires at, IPv6 flag, claims per source, pending flag) |
+| `groups` | Shard cache (UniFi ID, shard index, family, members) |
 | `policies` | Zone policy / legacy rule cache |
 | `events` | Ban audit trail ring buffer (see [Ban History](#ban-history)) |
+
+The daemon holds an exclusive lock on `bouncer.db`. `status` works while it runs (see below), and `reconcile`, `ban` and `unban`, run inside its container, ask the running daemon to do the work through `HEALTH_ADDR`. `drain` always opens the file itself, so it needs the daemon stopped first.
 
 ---
 
@@ -415,13 +494,13 @@ The bouncer keeps an audit trail of every ban, unban, and expiry event in the `e
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HISTORY_MAX_EVENTS` | `10000` | Maximum number of audit trail events retained in the ring buffer. Once the limit is reached, the oldest entry is dropped for each new entry written. Set to `0` to use the default. |
+| `HISTORY_MAX_EVENTS` | `10000` | Maximum number of audit trail events retained in the ring buffer. Once the limit is reached, the oldest entry is dropped for each new entry written. `0` or a negative value uses the default. |
 
 Events are written after each successful ban (`action=ban`), unban (`action=unban`), and janitor expiry (`action=expire`). Each event records: action, origin, scenario, IP address, and timestamp.
 
 ### Querying the audit trail
 
-Stop the daemon to release the bbolt database lock, then use the `status` subcommands to inspect stored state:
+The `status` subcommands read the database without changing it. While the daemon runs, run them inside its container (`docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status ...`): they then read a snapshot the daemon serves on `HEALTH_ADDR`. With the daemon stopped they open the database directly.
 
 ```bash
 # Show currently active bans (paginated, sortable)
@@ -448,7 +527,6 @@ The bouncer can periodically fetch plain-text IP/CIDR blocklists from external U
 |----------|---------|-------------|
 | `BLOCKLIST_URLS` | — | Comma-separated list of URLs to fetch. Each URL must return a plain-text list with one IP address or CIDR per line. Anything after `#` or `;` is a comment, so annotated feeds such as Spamhaus DROP (`192.0.2.0/24 ; SBL123`) work; only the first field of a line is read. A `/32` or `/128` entry is stored as the bare address. Blank and comment-only lines are ignored. |
 | `BLOCKLIST_REFRESH_INTERVAL` | `24h` | How often to re-fetch and re-apply each URL. Each successful fetch sets its bans to expire at `now + 2×BLOCKLIST_REFRESH_INTERVAL`, so an entry the feed drops lapses within two intervals. A failed fetch (error, non-200, or a 200 with no valid entries) extends the bans from the last good fetch instead, for up to `BAN_TTL` since that fetch. |
-
 | `BLOCKLIST_MIN_PREFIX_V4` | `8` | Shortest IPv4 prefix length accepted for a feed entry, from `8` to `32`. A broader range is skipped and counted as skipped in the fetch log. Applies to `BLOCKLIST_URLS` and the AbuseIPDB list, not to CrowdSec decisions. |
 | `BLOCKLIST_MIN_PREFIX_V6` | `32` | Shortest IPv6 prefix length accepted for a feed entry, from `32` to `128`. Same scope as the IPv4 setting. |
 
@@ -458,11 +536,17 @@ BLOCKLIST_URLS=https://example.com/badips.txt,https://example.net/threatlist.txt
 BLOCKLIST_REFRESH_INTERVAL=12h
 ```
 
-Each feed URL owns a separate ban claim. If CrowdSec or another feed still claims an IP, expiry of one feed's claim does not remove the firewall ban. Feed refreshes extend claim expiry to twice the refresh interval. A failed fetch keeps the feed's current bans (logged as "keeping bans from the last successful fetch"); once a feed has failed for longer than `BAN_TTL`, its bans are no longer extended and expire. Feed imports are logged with entry, new and skipped counts. Logs show only the feed scheme and host. Stored claim sources use an opaque SHA-256 key derived from the full URL and importer kind, so URL path tokens and query credentials are not stored in new claims. On startup, old URL-based claims migrate while preserving their expiry. If multiple configured importers matched the same old claim, its original expiry is retained under an opaque legacy key until a fresh fetch establishes ownership.
+Each feed URL owns a separate ban claim. If CrowdSec or another feed still claims an IP, expiry of one feed's claim does not remove the firewall ban. Feed refreshes extend claim expiry to twice the refresh interval. A failed fetch keeps the feed's current bans (logged as "keeping bans from the last successful fetch"); once a feed has failed for longer than `BAN_TTL`, its bans are no longer extended and expire. Feed imports are logged with entry, new and skipped counts. Logs show only the feed scheme and host. Stored claim sources use an opaque SHA-256 key derived from the full URL and importer kind, so URL path tokens and query credentials are not stored in new claims. On the first start of 2.4 or later, old URL-based claims migrate while preserving their expiry. If multiple configured importers matched the same old claim, its original expiry is retained under an opaque legacy key until a fresh fetch establishes ownership.
 
 A fetch that looks damaged never prunes. A feed with a country filter whose entries are all rejected by that filter (a mistyped code, or a feed that stopped tagging its lines) is treated as a failed fetch and keeps its previous bans. A feed that lists fewer than half the entries it listed on its last full fetch, when that was at least 50, has its entries applied but nothing pruned, and its previous bans are kept as for a failed fetch. After a feed has stayed in either state for `BAN_TTL`, its old bans expire and the smaller list is accepted. The comparison uses the feed's size before the country filter, so narrowing a filter still releases the entries it now excludes.
 
+A feed may hold at most 250,000 entries and 16 MiB; a larger response fails the fetch and keeps the previous bans. Feed entries pass the same private-range, range-size and `BLOCK_WHITELIST` checks as CrowdSec decisions.
+
 Addresses are recorded and applied in batches of 500, so a large feed does not hold up CrowdSec decisions while it imports. Addresses the controller rejects stay recorded as pending and are retried by the next reconcile.
+
+Each feed, including the AbuseIPDB feed, has three Prometheus metrics labelled with its claim source (`source="blocklist:sha256:..."`, which the `blocklist: feed configured` startup log line pairs with the feed's host): `crowdsec_unifi_feed_entries` (entries the last applied fetch listed), `crowdsec_unifi_feed_last_success_timestamp_seconds` (last fetch applied in full) and `crowdsec_unifi_feed_fetch_errors_total` (failed fetches). Alert when the last success is older than a few refresh intervals, for example `time() - crowdsec_unifi_feed_last_success_timestamp_seconds > 3 * 86400` with the default 24h interval.
+
+A feed may redirect up to three times. A redirect from `https://` to `http://` is refused, and so is a redirect to a different host on a private, loopback, link-local or other internal address: literal addresses are refused before the request, and host names when they resolve to one at connect time. A feed URL configured with an internal address directly is fetched as configured. With `HTTPS_PROXY` or `HTTP_PROXY` set, the proxy connects to the redirect target, so the bouncer resolves the target name itself first and refuses the redirect when the name resolves to an internal address or does not resolve at all. The proxy can still resolve the name differently; limit where the proxy itself may connect if that matters in your network.
 
 ---
 
@@ -492,11 +576,11 @@ ABUSEIPDB_COUNTRY_EXCLUDE=US
 
 **How filtering saves space.** Upstream only publishes whole-world files, so the full list is downloaded each time. The body is filtered line by line as it arrives: entries outside the filter are never held in memory, written to the ban database, or sent to UniFi. Every 10,000 addresses is one firewall group shard, so a tight filter directly cuts the number of shards and API writes.
 
-**Changing the filter.** After each successful fetch, bans this feed placed on addresses it no longer lists (because upstream dropped them, or because you narrowed the filter) are released straight away, so the first fetch after a restart shrinks UniFi to match. An address CrowdSec or another feed also blocks stays banned. A filter that matches nothing is not treated as a feed outage: it logs a warning and releases the feed's bans.
+**Changing the filter.** After each successful fetch, bans this feed placed on addresses it no longer lists (because upstream dropped them, or because you narrowed the filter) are released straight away, so the first fetch after a restart shrinks UniFi to match. An address CrowdSec or another feed also blocks stays banned. A filter that matches none of the entries is treated as a failed fetch, because a mistyped code or a change in the feed's format looks the same: it logs `blocklist: fetch failed` with `country filter matched none of the ... entries; previous bans kept`, and the feed's bans stay until the outage outlasts `BAN_TTL`.
 
 If a response contains an invalid entry, valid matching entries are still imported, but no existing feed claims are pruned that round. The response does not reset the `BAN_TTL` outage timer; if incomplete responses continue, claims absent from the valid entries eventually expire. The startup log pairs each opaque claim source key with the feed's scheme and host for database troubleshooting, without logging URL paths or queries.
 
-**Size limits.** A feed may hold at most 250,000 addresses, counted after filtering, and the download is capped at 64 MB. As of this writing the `1d` list is about 51,000 addresses and `90d` about 13 MB; `120d` and longer exceed the address limit unfiltered, so they are only accepted with `ABUSEIPDB_COUNTRY_INCLUDE`. If a filtered result still exceeds the limit, the fetch fails and the previous bans are kept, as for any failing feed.
+**Size limits.** A feed may hold at most 250,000 addresses, counted after filtering, and the download is capped at 64 MiB. As of this writing the `1d` list is about 51,000 addresses and `90d` about 13 MB; `120d` and longer exceed the address limit unfiltered, so they are only accepted with `ABUSEIPDB_COUNTRY_INCLUDE`. If a filtered result still exceeds the limit, the fetch fails and the previous bans are kept, as for any failing feed.
 
 The feed shares the ban database, whitelist (`BLOCK_WHITELIST`) and outage handling of [External Blocklists](#external-blocklists). Its opaque `abuseipdb:sha256:...` claim key is distinct from a generic blocklist claim even when both use the same URL. Fetch logs include `filtered` and `removed` counts.
 
@@ -509,15 +593,21 @@ The bouncer can POST a JSON notification to a webhook URL when significant event
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WEBHOOK_URL` | — | URL to POST notifications to. Leave empty to disable. |
-| `WEBHOOK_EVENTS` | — | Comma-separated list of event names to send. Empty sends all supported events when `WEBHOOK_URL` is set. Only `circuit_breaker_open`, `circuit_breaker_close` and `reconcile_drift` are accepted; an unknown name stops startup. |
+| `WEBHOOK_EVENTS` | — | Comma-separated list of event names to send. Empty sends all supported events when `WEBHOOK_URL` is set. Only the event names below are accepted; an unknown name stops startup. |
 
 ### Supported event names
 
 | Event | Fired when | `detail` |
 |-------|-----------|----------|
-| `circuit_breaker_open` | The circuit breaker opens after consecutive sync failures | omitted |
+| `circuit_breaker_open` | The circuit breaker opens after consecutive controller failures (see `CIRCUIT_BREAKER_THRESHOLD`) | omitted |
 | `circuit_breaker_close` | The circuit breaker resets to closed after a successful probe | omitted |
 | `reconcile_drift` | A periodic reconcile adds and removes 100 or more IPs in total (`added + removed >= 100`). The startup reconcile does not fire it. | `{"added": N, "removed": N}` |
+| `firewall_mode_changed` | The bouncer exits because a site loaded in legacy mode now needs zone mode (see [Firewall mode details](#firewall-mode-details)); its restart policy starts it again | `{"site": "...", "reason": "..."}` |
+| `shard_create_failed` | A shard object could not be created on the controller, so the bans assigned to it are not enforced. Repeats at most once an hour per shard | `{"site", "family", "shard", "unsynced_ips", "consecutive_failures", "retry_in_seconds"}` |
+| `ban_entry_refused` | The controller refused a ban entry, which is left out of its shard for an hour and then offered again. Repeats at most once an hour per entry and site | `{"site", "family", "shard", "entry", "retry_in_seconds"}` |
+| `cloudflare_whitelist_sync_failed` | The initial, a periodic, or a SIGHUP-triggered Cloudflare whitelist sync failed. Repeats at most once an hour | `{"phase": "initial"}`, `{"phase": "refresh"}` or `{"phase": "reload"}` |
+
+The events that repeat at most once an hour add `"suppressed": N` to `detail` when N more of them were held back since the previous one, so a persistent failure does not flood the receiver. The controller's error text is in the bouncer's log, not in the payload.
 
 ### Notification payload
 
@@ -529,9 +619,9 @@ The bouncer can POST a JSON notification to a webhook URL when significant event
 }
 ```
 
-The payload always has `event` and `timestamp` (UTC, RFC 3339). `detail` is present only for `reconcile_drift`.
+The payload always has `event` and `timestamp` (UTC, RFC 3339). `detail` is omitted for the circuit breaker events.
 
-Notifications are delivered in the background, so a slow endpoint never delays syncing. Up to 64 events can be queued; further events are dropped with a `webhook: queue full` warning. On shutdown, queued events get up to 5 seconds to send. Webhook errors are logged at `warn` level and never cause the bouncer to exit or retry. The HTTP timeout for webhook POSTs is 5 seconds. Redirects are not followed, so the payload is only ever sent to `WEBHOOK_URL` itself, and an `http://` URL logs a startup warning because the payload then travels unencrypted. Logs show only the webhook host, because Slack- and Discord-style URLs carry a token in the path.
+Notifications are delivered in the background, so a slow endpoint never delays syncing. Up to 64 events can be queued; further events are dropped with a `webhook: queue full, event dropped` warning. On shutdown, including the exit on a firewall mode change, queued events get up to 5 seconds to send. Webhook errors are logged at `warn` level and never cause the bouncer to exit or retry. The HTTP timeout for webhook POSTs is 5 seconds. Redirects are not followed, so the payload is only ever sent to `WEBHOOK_URL` itself, and an `http://` URL logs a startup warning because the payload then travels unencrypted. Logs show only the webhook host, because Slack- and Discord-style URLs carry a token in the path.
 
 ```bash
 # Fire a notification when the circuit breaker trips or resets
@@ -545,12 +635,24 @@ WEBHOOK_EVENTS=circuit_breaker_open,circuit_breaker_close,reconcile_drift
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DRY_RUN` | `false` | Safe testing mode. The bouncer connects to both the UniFi controller and CrowdSec LAPI, reads existing state, and logs actions it *would* take. It does not change UniFi configuration or mutate bbolt state. Username/password authentication still sends a login `POST` to create a session; API key authentication does not. Turning off dry run after a dry run session starts cleanly with no phantom bbolt entries. |
-| `LOG_LEVEL` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error`. Messages from the CrowdSec stream client carry `"component":"crowdsec-client"`; its per-poll debug messages appear only at `trace`. |
+| `DRY_RUN` | `false` | Safe testing mode. The bouncer connects to both the UniFi controller and CrowdSec LAPI, reads existing state, and logs actions it *would* take. It does not change UniFi configuration or mutate bbolt state: the controller client refuses every request other than `GET` and `HEAD`, and the existing database is opened read-only. Username/password authentication still sends a login `POST` to create a session; API key authentication does not. The LAPI resync, the usage-metrics push, webhooks and the Cloudflare whitelist sync are skipped, and blocklist feeds are fetched but only logged. Turning off dry run after a dry run session starts cleanly with no phantom bbolt entries. |
+| `LOG_LEVEL` | `info` | Log verbosity: `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `panic`. Logs are written to stderr. Messages from the CrowdSec stream client carry `"component":"crowdsec-client"`; its per-poll debug messages appear only at `trace`. |
 | `LOG_FORMAT` | `json` | Log format: `json` (structured, for Loki/Splunk) or `text` (human-readable) |
 | `METRICS_ENABLED` | `true` | Enable the Prometheus metrics HTTP server |
-| `METRICS_ADDR` | `:9090` | Address for the Prometheus metrics endpoint. Must differ from `HEALTH_ADDR` while metrics are enabled. The default listens on every interface, which a container needs for published ports and scraping; when running on a host (for example under systemd) set `127.0.0.1:9090` unless a remote Prometheus must reach it. The shipped systemd unit does this. |
+| `METRICS_ADDR` | `:9090` | Address for the Prometheus metrics endpoint. Must not listen on the same port as `HEALTH_ADDR` while metrics are enabled: the same host and port, or the same port where either host is empty, `0.0.0.0` or `::` (every interface), fails validation. The default listens on every interface, which a container needs for published ports and scraping; when running on a host (for example under systemd) set `127.0.0.1:9090` unless a remote Prometheus must reach it. The shipped systemd unit does this. |
 | `HEALTH_ADDR` | `:8081` | Address for health endpoints (`/healthz`, `/readyz`). The default listens on every interface; on a host set `127.0.0.1:8081`. The `healthcheck` subcommand reads this variable too. |
 | `JANITOR_INTERVAL` | `1h` | How often the background janitor lifts expired ban claims, records `expire` history events, and updates the `crowdsec_unifi_db_size_bytes` metric |
 | `SHUTDOWN_GRACE_PERIOD` | `30s` | Time given to in-flight goroutines to finish cleanly after a shutdown signal before the process exits forcefully. |
 | `HEALTH_CHECK_LAPI` | `true` | When `true`, `/readyz` checks both the UniFi controller and CrowdSec LAPI. Set to `false` to check only the controller. Either way `/readyz` returns 503 `starting` until the first LAPI decision batch has been processed, so it stays unready while the LAPI is unreachable at startup. |
+
+---
+
+## Removed and Renamed Settings
+
+| Variable | Effect |
+|----------|--------|
+| `FIREWALL_BATCH_WINDOW` | Renamed to `SYNC_INTERVAL`. When `SYNC_INTERVAL` is not set, its value is used, with a deprecation warning at startup; a value that is not a duration fails validation. |
+| `FIREWALL_FLUSH_CONCURRENCY` | No effect: shards are written one at a time. Setting it logs a warning at startup. |
+| `BLOCKLIST_NAME_PREFIX` | Ignored. |
+| `ZONE_PAIRS_SCENARIO_MAP` | Startup error. Per-scenario policies were never provisioned; use `ZONE_PAIRS`. |
+| `CLOUDFLARE_ZWHITELIST_ENABLED` | Startup error naming `CLOUDFLARE_WHITELIST_ENABLED`, the correct spelling. |

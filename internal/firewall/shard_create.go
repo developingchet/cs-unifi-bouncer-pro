@@ -71,21 +71,18 @@ func (sm *ShardManager) doCreateUniFiGroup(ctx context.Context, name string) (st
 
 // createShardObject sends the create request for a shard object.
 func (sm *ShardManager) createShardObject(ctx context.Context, name string) (string, error) {
-	groupType := "address-group"
-	if sm.ipv6 {
-		groupType = "ipv6-address-group"
-	}
 	if sm.mode == "zone" {
 		created, err := sm.ctrl.CreateTrafficMatchingList(ctx, sm.site, controller.TrafficMatchingList{
-			Name:      name,
-			Type:      tmlTypeForFamily(Family(sm.ipv6)),
-			GroupType: groupType,
-			Items:     tmlPlaceholderItems(sm.ipv6), // API requires non-empty items on create
+			Name:  name,
+			Type:  tmlTypeForFamily(Family(sm.ipv6)),
+			Items: tmlPlaceholderItems(sm.ipv6), // API requires non-empty items on create
 		})
 		return created.ID, err
 	}
+	groupType := "address-group"
 	placeholder := TMLPlaceholderV4
 	if sm.ipv6 {
+		groupType = "ipv6-address-group"
 		placeholder = TMLPlaceholderV6
 	}
 	created, err := sm.ctrl.CreateFirewallGroup(ctx, sm.site, controller.FirewallGroup{
@@ -135,6 +132,10 @@ func (sm *ShardManager) recordCreateFailure(shard *Shard, ipCount int, err error
 	sm.log.Error().Err(err).Str("shard", shard.Name).Int("unsynced_ips", ipCount).
 		Int("consecutive_failures", failures).Stringer("retry_in", delay).
 		Msg("failed to create shard on the controller; its bans are not enforced until it exists")
+	sm.events.createFailed(ShardCreateFailure{
+		Site: sm.site, Family: shard.Family, Shard: shard.Name,
+		UnsyncedIPs: ipCount, ConsecutiveFailures: failures, RetryIn: delay,
+	})
 }
 
 // createPendingShard creates a Pending shard's controller object and caches
@@ -178,11 +179,13 @@ func (sm *ShardManager) createPendingShard(ctx context.Context, shard *Shard, ip
 // only ownership marker. The adoption lookups below also require the shard's
 // own object type, so a same-named object of another kind (a port list, a
 // group of the other address family) is never taken over and overwritten.
+// They run after a refused create or a 404, which the listing a pass holds
+// does not explain, so they list the controller afresh.
 
 // lookupTMLByName returns the ID of the address TML of this family named
 // name, "" if there is none, or the listing error.
 func (sm *ShardManager) lookupTMLByName(ctx context.Context, name string) (string, error) {
-	tmls, err := sm.ctrl.ListTrafficMatchingLists(ctx, sm.site)
+	tmls, err := sm.ctrl.ListTrafficMatchingLists(controller.FreshListing(ctx), sm.site)
 	if err != nil {
 		return "", err
 	}
@@ -198,7 +201,7 @@ func (sm *ShardManager) lookupTMLByName(ctx context.Context, name string) (strin
 // lookupGroupByName returns the ID of the address group of this family named
 // name, "" if there is none, or the listing error.
 func (sm *ShardManager) lookupGroupByName(ctx context.Context, name string) (string, error) {
-	groups, err := sm.ctrl.ListFirewallGroups(ctx, sm.site)
+	groups, err := sm.ctrl.ListFirewallGroups(controller.FreshListing(ctx), sm.site)
 	if err != nil {
 		return "", err
 	}

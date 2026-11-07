@@ -69,6 +69,8 @@ Restart the pod after changing its Secret or ConfigMap. Kubernetes refreshes mou
 kubectl -n crowdsec rollout restart deployment/cs-unifi-bouncer-pro
 ```
 
+Zone pairs are the one setting a SIGHUP reloads, from the files named by `ZONE_PAIRS_FILE`, `EGRESS_ZONE_PAIRS_FILE` and `CLOUDFLARE_ZONE_PAIRS_FILE` (see [SIGHUP Hot-Reload](../../README.md#sighup-hot-reload)). To use that here, keep the pairs in a ConfigMap mounted as a volume without `subPath`, which the kubelet updates in place within about a minute. The image has no shell to send the signal from, so a rollout restart remains the simplest way to apply a changed ConfigMap.
+
 ## Prometheus Scraping
 
 The deployment includes `prometheus.io/scrape: "true"` annotations on the pod template.
@@ -86,8 +88,8 @@ The pod runs with the runtime default seccomp profile, a read-only root filesyst
 | Path     | Port | Description                                     |
 |----------|------|-------------------------------------------------|
 | /healthz | 8081 | Liveness: process is running                    |
-| /readyz  | 8081 | Readiness: first LAPI batch processed, UniFi controller reachable (Ping) |
+| /readyz  | 8081 | Readiness: first LAPI batch processed, UniFi controller reachable, and LAPI reachable unless `HEALTH_CHECK_LAPI=false` |
 
 The pod stays unready until the first LAPI pull has been processed, which can take several minutes on a large ban list. The manifest raises `progressDeadlineSeconds` to 1200 so `kubectl rollout status` does not report a stalled rollout meanwhile; raise it, and any `helm --wait` or GitOps health timeout, further for larger lists.
 
-`/status/db` on the same port serves the ban database to `kubectl exec … status` inside the pod; it refuses requests without the token in `DATA_DIR/status.token`, so it does not need a Service port.
+`/status/db` on the same port serves the ban database to `kubectl exec … status` inside the pod; `/status/sync` and `/control/*` serve `status sync`, `ban`, `unban` and `reconcile` the same way. They refuse requests without the token in `DATA_DIR/status.token`, so they do not need a Service port.

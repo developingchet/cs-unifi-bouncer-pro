@@ -1,5 +1,265 @@
 # Upgrading
 
+## Upgrading the controller to UniFi Network 11
+
+UniFi Network 11 moves every site to the zone-based firewall during the
+upgrade and no longer applies legacy `WAN_IN`/`WANv6_IN` rules. It needs
+UniFi OS 6.0 or newer. The standalone self-hosted Network Application ends at
+10.6; self-hosted installs move to UniFi OS Server, which the bouncer treats
+like a console (`"layout":"unifi-os"`). Network 11 also drops the USG: keep a
+controller whose sites use a USG on 10.6, where legacy mode still works.
+
+Before upgrading a controller that the bouncer manages in legacy mode:
+
+- Create an API key (**Settings → Control Plane → Integrations**) and set
+  `UNIFI_API_KEY`. Zone policies are managed through the integration API,
+  which does not accept a username and password.
+- Set `ZONE_PAIRS` to the zones the block policies should cover, for example
+  `External->Internal`.
+- Leave `FIREWALL_MODE` at `auto`, or set `zone`. On Network 11 the bouncer
+  refuses to start with `FIREWALL_MODE=legacy`, because the rules would be
+  created but block nothing.
+- Make sure something restarts the bouncer when it exits with an error:
+  `restart: unless-stopped` in Compose, `--restart unless-stopped` for
+  `docker run`, `Restart=on-failure` under systemd, or a Kubernetes
+  Deployment. The bouncer exits on its own when it sees the site move to
+  zones (below). A container or binary started without a restart policy
+  stays stopped, and nothing is blocked until it is started again.
+
+During and after the upgrade:
+
+- The startup log reports the controller's release (`detected UniFi Network
+  version`, with `network_version` and `zone_only`), and `diagnose` shows it
+  in the `unifi_version` row.
+- A bouncer that keeps running through the upgrade re-checks its legacy sites
+  on every periodic reconcile. Once the controller reports Network 11, or
+  `FIREWALL_MODE=auto` finds zones on the site, it logs `firewall mode
+  changed` and exits with an error, and the restart policy starts it again in
+  zone mode. With `FIREWALL_RECONCILE_INTERVAL=0` nothing is re-checked;
+  restart the bouncer once the upgrade has finished.
+- The shard lists keep their names through the migration, and zone mode picks
+  them up with their members. The migration turns the bouncer's legacy rules
+  into zone policies. The bouncer recognises those by name (a rule its
+  database records, or the `RULE_NAME_TEMPLATE` prefix, `crowdsec-drop-` by
+  default) and by blocking one of its shard lists. Once its own block
+  policies (`crowdsec-policy-*`) cover a list, it deletes the converted
+  policies that block that list, then forgets the old rules. A converted
+  policy whose list has no block policy yet is kept, so bans stay enforced.
+
+## From 2.3 to 2.4
+
+The compose files still run `latest`, and now read `BOUNCER_IMAGE` from
+`.env` when it is set, so a release or `@sha256:` digest can be pinned without
+editing the compose file (see [SETUP.md](SETUP.md#updating)). Release images
+are also published to `ghcr.io/developingchet/cs-unifi-bouncer-pro`, with
+their own signature and attestations (see [SECURITY.md](../SECURITY.md#supply-chain-integrity)).
+
+Building from source now requires Go 1.27.3 or newer, which fixes
+CVE-2026-111943 in `crypto/x509`.
+
+Behaviour that changes without action:
+
+- **Egress blocking**: `EGRESS_ZONE_PAIRS` is new; nothing changes until it
+  is set (see [CONFIGURATION.md](CONFIGURATION.md#egress-blocking)).
+- **Refused ban entries are retried**: an entry the controller refuses is
+  left out of its shard for an hour and then offered again, instead of until
+  the next restart. A shard leaves out at most 10 entries; past that the
+  write fails.
+- **`DECISION_RATE_LIMIT` paces bans only**: deleted and expired decisions
+  are applied at once. Before, each took a token, and the first stream block
+  after a restart lists every expired decision the LAPI still holds, so a low
+  limit kept `/readyz` at 503 for minutes while they were worked through.
+- **Reconcile reads count toward the circuit breaker**: a reconcile's
+  membership reads and policy or rule checks that fail with a transport
+  error, a timeout, a 5xx or a 401 now count like a failed shard write, so a
+  controller that stops answering during a reconcile opens the breaker
+  instead of leaving queued bans waiting behind it. A 400, 404, 409 or 429
+  does not count.
+- **SIGHUP before the first CrowdSec batch** only repairs the block policies
+  for the new zone pairs; bans are reconciled once the startup reconcile runs.
+  A deployment with no zone-mode site now takes the legacy skip path on a
+  SIGHUP (`SIGHUP: ZoneManager not available (legacy mode?), skipping
+  reload`, at warn) instead of logging an error about empty zone pairs.
+- **A complete first batch**: `/readyz`, the reconcile gate and the
+  retirement of 1.x claims wait for the first decision block to be applied in
+  full. A shutdown during that block leaves them to the next start.
+- **Zone pairs from a file**: `ZONE_PAIRS_FILE`, `EGRESS_ZONE_PAIRS_FILE`
+  and `CLOUDFLARE_ZONE_PAIRS_FILE` are new. A SIGHUP reads them again, so
+  pairs kept in a file change without a restart; pairs in the environment
+  still need one.
+- **Cloudflare pairs on SIGHUP**: while the Cloudflare whitelist runs, a
+  SIGHUP applies a changed `CLOUDFLARE_ZONE_PAIRS` and syncs the whitelist
+  at once; before, it needed a restart. The new pairs take effect only once
+  the `ZONE_PAIRS` reload has succeeded. Pairs that name a zone a site does
+  not have refuse the whole reload (`SIGHUP: Cloudflare zone pairs refused;
+  keeping the current zone pairs`); sites on the classic firewall are skipped
+  by that check, as they have no zones. A failed sync fires
+  `cloudflare_whitelist_sync_failed` with the new phase `reload`.
+- **What SIGHUP does not apply**: a SIGHUP logs, at info, the names of
+  changed settings it does not apply (`SIGHUP: changed settings take effect
+  only after a restart`), such as a rotated `_FILE` secret, which still
+  needs a restart.
+- **Zone pairs for one site**: a `site/` prefix (`branch/Wan->Lan`) limits a
+  `ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` or `CLOUDFLARE_ZONE_PAIRS` pair to one
+  site, and a site with prefixed pairs uses only those, so one instance can
+  manage sites whose zones have different names (see
+  [CONFIGURATION.md](CONFIGURATION.md#pairs-for-one-site)). Pairs without a
+  prefix apply to every site as before. A zone name that contains `/` is now
+  read as a site prefix; use the zone's ID instead. With
+  `FIREWALL_MODE=zone`, validation requires every site in `UNIFI_SITES` to
+  be left with a pair (`ZONE_PAIRS leaves site "branch" without a zone pair;
+  add a pair without a site prefix or one starting with "branch/"`), since a
+  site on the zone-based firewall without one cannot start. With `auto`,
+  once a `ZONE_PAIRS` pair has a prefix, the same text is a startup warning
+  ending `; if the site uses the zone-based firewall it will not start`: a
+  site on the classic firewall needs no pair.
+- **Feed redirects through a proxy**: with `HTTPS_PROXY` or `HTTP_PROXY` set,
+  a feed redirect to another host is followed only when that host name
+  resolves, from the bouncer, to public addresses. A redirect to a name the
+  bouncer cannot resolve itself now fails the fetch, and the feed keeps its
+  previous bans.
+- **Flow reports on Network 11**: repairs keep a zone policy's Insights flow
+  report setting (`reportFlowEnabled`) instead of resetting it to on.
+- **API metrics by site**: `crowdsec_unifi_api_calls_total` and
+  `crowdsec_unifi_api_duration_seconds` carry a `site` label, empty for calls
+  that belong to no site. Queries that select series by their exact label set
+  need `site` added or summed away, for example
+  `sum by (endpoint) (rate(crowdsec_unifi_api_calls_total[5m]))`.
+- **Feed metrics**: `crowdsec_unifi_feed_entries`,
+  `crowdsec_unifi_feed_last_success_timestamp_seconds` and
+  `crowdsec_unifi_feed_fetch_errors_total` are new, one series per
+  `BLOCKLIST_URLS` entry and for the AbuseIPDB feed, labelled with the feed's
+  claim source rather than its URL (see
+  [External Blocklists](CONFIGURATION.md#external-blocklists)). The metric
+  count rises from 25 to 28.
+- **Manual commands while running**: `ban`, `unban` and `reconcile` no
+  longer need the bouncer stopped. Run inside its container, they ask the
+  running bouncer to do the work through `HEALTH_ADDR`; `status sync` is
+  new. Manual bans and unbans now appear in `status history` with origin
+  `manual`.
+- **More webhook events**: `firewall_mode_changed`, `shard_create_failed`,
+  `ban_entry_refused` and `cloudflare_whitelist_sync_failed` are new. With
+  `WEBHOOK_URL` set and `WEBHOOK_EVENTS` empty they are sent as well; list
+  the events to keep receiving only the earlier three.
+- **Decision types**: `BLOCK_DECISION_TYPES` is new and defaults to `ban`,
+  so captcha and other non-ban decisions are still ignored until it lists
+  them (see [CONFIGURATION.md](CONFIGURATION.md#decision-filtering)).
+- **`crowdsec_unifi_active_bans` per site**: the gauge counts the addresses in
+  each site's shards, so a site whose ban could not be applied shows fewer.
+  Before, every site showed the size of the whole ban database.
+- **Shard records in the database**: a shard's member list is saved when the
+  shard is created, then at most every 10 minutes, at each reconcile and on
+  shutdown, instead of after every write to the controller. `status` reports
+  `last_group_update` from those saves.
+- **Shard 0 is pruned too**: an emptied shard 0 is deleted with its rule or
+  policies at the next reconcile like any other empty tail shard, instead of
+  keeping a list holding only the placeholder address until a restart. The
+  next ban of the family creates a shard again.
+- **Cloudflare whitelist without IPv6**: with `FIREWALL_ENABLE_IPV6=false`
+  the whitelist keeps only the IPv4 list and ALLOW policies, removes IPv6
+  ones an earlier run created, and warns about a pair whose destination IPs
+  are all IPv6. Before, it created IPv6 ALLOW policies with no block policies
+  behind them.
+- **`drain` and pruning finish**: a rule or group the controller no longer
+  holds (`api.err.IdInvalid`) is confirmed against the listing and counted as
+  deleted, the records of objects removed with a placeholder-only shard are
+  dropped, and a site still on the legacy firewall no longer fails the
+  Cloudflare whitelist drain. Each of these stopped `drain` or shard pruning
+  part-way before.
+- **1.x data converted when the database opens**: bans without claims,
+  cache records keyed by name and blocklist claims keyed by URL are
+  converted each time the database is opened, instead of being checked on
+  every request, so a database that 1.x wrote to after a rollback is
+  converted again on the next upgrade. A 1.x database upgraded straight to
+  2.4 is converted the same way. A 1.x ban that an active CrowdSec decision
+  claims in the first LAPI batch is lifted when that decision is deleted;
+  before, deleting any decision for the address lifted it. One that no
+  decision claims stays until it expires. `DRY_RUN` converts nothing, so a
+  dry run against a 1.x database shows its bans without claims.
+- **Legacy rules removed with their group**: when a shard's group is pruned,
+  merged away or drained, every rule of the bouncer's that uses only that
+  group is deleted first, with either block action (`drop` or `reject`) and
+  any ruleset. A rule left by an
+  earlier `FIREWALL_BLOCK_ACTION` or `LEGACY_RULESET_*` whose database record
+  was lost no longer keeps the group from being deleted or stays behind
+  after `drain`. Pruning and draining a legacy shard list the site's rules
+  once more to find them.
+- **IPv6 warning per site**: the warning that IPv6 bans have no policy to
+  enforce them is checked for each site with the pairs that site uses, and
+  names the site. It is logged once the sites are known (after discovery
+  with `UNIFI_SITES_AUTO`), again after each SIGHUP reload, and printed by
+  `validate`. Its text changed: it now reads `every ZONE_PAIRS pair of site
+  "<site>" is limited to IPv4 destination addresses`.
+- **Quoted lists**: a quoted list value such as
+  `CROWDSEC_ORIGINS="crowdsec,lists"` is unquoted before it is split. Before,
+  the quotes stayed on the first and last elements, so that origin filter
+  matched no decision and `UNIFI_SITES="default,branch"` named sites that do
+  not exist. Every setting is now unquoted the same way, including
+  `UNIFI_SITES_EXCLUDE`, `BLOCKLIST_URLS`, `WEBHOOK_URL`, `WEBHOOK_EVENTS`,
+  `BLOCK_SCENARIO_DURATION_MAP`, durations, numbers and booleans, which kept
+  their quotes before. A list whose elements are quoted one by one, such as
+  `UNIFI_SITES='default','branch'`, still reads as those elements; this now
+  also holds for `BLOCK_SCENARIO_DURATION_MAP`, the connection state lists
+  and the AbuseIPDB country lists.
+- **Blank durations**: a duration setting left empty, such as `SYNC_INTERVAL=`
+  in an env file, takes its default. Before, it stopped startup with
+  `'sync_interval' time: invalid duration ""`.
+
+Renamed settings. The old names keep working with the same effect, and each
+one in use logs a deprecation warning at startup:
+
+| Old name | New name |
+|----------|----------|
+| `FIREWALL_GROUP_CAPACITY` | `SHARD_LIMIT` |
+| `FIREWALL_GROUP_CAPACITY_V4` | `SHARD_LIMIT_V4` |
+| `FIREWALL_GROUP_CAPACITY_V6` | `SHARD_LIMIT_V6` |
+| `ENABLE_IPV6` | `UNIFI_DIAL_IPV6` |
+
+`SHARD_LIMIT_V4` and `SHARD_LIMIT_V6` take precedence over the old per-family
+names, and `UNIFI_DIAL_IPV6` over `ENABLE_IPV6`. Replacing
+`FIREWALL_GROUP_CAPACITY` with `SHARD_LIMIT` keeps the same shard sizes
+unless a per-family setting is larger than it: `SHARD_LIMIT` caps the
+per-family settings, `FIREWALL_GROUP_CAPACITY` did not. `ENABLE_IPV6` still
+accepts only the boolean forms Go reads (`true`, `false`, `1`, `0`, ...); any
+other value, such as `yes`, stops startup with `ENABLE_IPV6 must be true or
+false; got "yes"`, also when `UNIFI_DIAL_IPV6` is set.
+
+Settings now rejected. These configurations were accepted by 2.3 and now stop
+startup with a validation error, and a SIGHUP reload that introduces one is
+refused; run `validate` before upgrading:
+
+- **A zone pair named twice**: `ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS`
+  reject a `src->dst` pair that appears twice for one site, as
+  `EGRESS_ZONE_PAIRS` already did (`ZONE_PAIRS names External->Internal
+  more than once`). The two entries shared policy and filter list names and
+  overwrote each other, so only one was enforced. Merge them into one entry
+  with all the ports: `External->Internal:80,443`.
+- **`METRICS_ADDR` and `HEALTH_ADDR` on one port**: the addresses are
+  compared as listen addresses, so `0.0.0.0:8081` and `:8081` clash; before,
+  only identical strings were refused and the second listener failed at
+  startup.
+- **Negative durations**: `LAPI_METRICS_PUSH_INTERVAL` and
+  `BLOCK_MIN_DURATION` reject negative values (`0` still disables them).
+- **`FIREWALL_BATCH_WINDOW`** that is not a duration fails validation
+  instead of being ignored.
+- **Legacy rule settings**: with `FIREWALL_MODE=legacy` or `auto`,
+  `LEGACY_RULESET_V4` must be one of the classic IPv4 rulesets (`WAN_IN`,
+  `WAN_LOCAL`, `LAN_IN`, ...) and `LEGACY_RULESET_V6` one of the IPv6 ones
+  (`WANv6_IN`, ...), and `LEGACY_RULE_INDEX_START_V4` and `_V6` must be
+  between 1 and 99999.
+- **Long group names**: with `FIREWALL_MODE=legacy`, a
+  `GROUP_NAME_TEMPLATE` whose first shard renders a name longer than 64
+  characters fails validation (`GROUP_NAME_TEMPLATE renders "..." (65
+  characters) for site "default"; legacy firewall groups are limited to 64
+  characters`). The classic API refused every such group, so no shard could
+  be created. With `auto`, where the sites may all use the zone-based
+  firewall, whose lists and policies accept names of up to 1000 characters,
+  the same text is logged as a warning at startup and printed by `validate`,
+  ending `; sites on the legacy firewall will fail to create that group`.
+- **CA certificate files**: `UNIFI_CA_CERT` and `CROWDSEC_LAPI_CA_CERT` must
+  name a readable file holding a PEM certificate. Before, a wrong path passed
+  `validate` and stopped the daemon when it built its HTTP client.
+
 ## From 2.2 to 2.3
 
 The periodic LAPI resync (`CROWDSEC_RESYNC_INTERVAL`) now accepts a decision
@@ -158,7 +418,9 @@ first; the rest describes behaviour that changes without any action.
 1. Back up the bouncer's database (`/data/bouncer.db` in the container, or the
    `DATA_DIR` you configured). 2.0 rewrites its cache keys on first start, and
    1.x cannot read them back. To roll back, restore the backup, or run
-   `cs-unifi-bouncer-pro drain` with 2.0 first.
+   `cs-unifi-bouncer-pro drain` with 2.x first and then start 1.x. Upgrading
+   again converts the bans and records 1.x wrote in the meantime, as on the
+   first upgrade.
 2. Run `cs-unifi-bouncer-pro validate` with the 2.0 image against your
    current environment. It checks the configuration without contacting the
    controller or the LAPI; only the `UNIFI_SITES` check against the
@@ -223,7 +485,10 @@ setting.
   `CLOUDFLARE_IPV6_URL` must be absolute http(s) URLs,
   `BLOCKLIST_REFRESH_INTERVAL` must be positive when feeds are set, and
   `WEBHOOK_EVENTS` accepts only `circuit_breaker_open`,
-  `circuit_breaker_close` and `reconcile_drift`.
+  `circuit_breaker_close` and `reconcile_drift`, the events 2.0 sends. Later
+  releases add events; see
+  [Webhook Notifications](CONFIGURATION.md#webhook-notifications) for the
+  current list.
 - `FIREWALL_CONNECTION_STATES` (new) must be `ALL` or a list of `NEW`,
   `INVALID` and `ESTABLISHED`.
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/developingchet/cs-unifi-bouncer-pro/internal/config"
+	"github.com/developingchet/cs-unifi-bouncer-pro/internal/testutil"
 )
 
 // TestRepairInfrastructureDuringSyncs runs the startup repair while bans are
@@ -46,8 +47,8 @@ func TestRepairInfrastructureDuringSyncs(t *testing.T) {
 					ip := fmt.Sprintf("198.51.100.%d", i+1)
 					// Reconcile removes controller IPs the store does not hold,
 					// so each ban is recorded first, as the daemon does.
-					if err := store.BanRecord(ip, time.Time{}, false); err != nil {
-						errs <- fmt.Errorf("BanRecord: %w", err)
+					if err := testutil.PutBan(store, ip, time.Time{}, false); err != nil {
+						errs <- fmt.Errorf("PutBan: %w", err)
 						return
 					}
 					if err := mgr.ApplyBan(ctx, testSite, ip, false); err != nil {
