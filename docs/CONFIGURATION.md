@@ -475,7 +475,7 @@ When the UniFi controller returns a 401 Unauthorized, only one goroutine perform
 | `DATA_DIR` | `/data` | Directory for the bbolt database file (`bouncer.db`). Mount as a named Docker volume for persistence. |
 | `BAN_TTL` | `168h` | Maximum ban length (default 7 days). When a decision is received, its expiry is capped at `now + BAN_TTL`; this applies to decisions with no duration, an unparseable duration, or one longer than `BAN_TTL`. A `BLOCK_SCENARIO_DURATION_MAP` override is not capped. The janitor lifts expired bans every `JANITOR_INTERVAL` and the unban reaches UniFi at the next sync. If CrowdSec still holds the decision, a restart or the periodic `CROWDSEC_RESYNC_INTERVAL` re-read applies it again for another `BAN_TTL`. `BAN_TTL` also bounds how long a failing blocklist feed keeps its bans, and caps manual `ban --duration`. |
 
-The database contains four bbolt buckets (an empty `migrations` bucket left by a 2.4 pre-release build is deleted when the database is opened):
+The database contains four bbolt buckets:
 
 | Bucket | Contents |
 |--------|---------|

@@ -175,9 +175,7 @@ Behaviour that changes without action:
   claims in the first LAPI batch is lifted when that decision is deleted;
   before, deleting any decision for the address lifted it. One that no
   decision claims stays until it expires. `DRY_RUN` converts nothing, so a
-  dry run against a 1.x database shows its bans without claims. An empty
-  `migrations` bucket left by a 2.4 pre-release build is deleted when the
-  database is opened.
+  dry run against a 1.x database shows its bans without claims.
 - **Legacy rules removed with their group**: when a shard's group is pruned,
   merged away or drained, every rule of the bouncer's that uses only that
   group is deleted first, with either block action (`drop` or `reject`) and
