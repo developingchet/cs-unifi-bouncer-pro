@@ -50,7 +50,12 @@ During and after the upgrade:
 
 The compose files still run `latest`, and now read `BOUNCER_IMAGE` from
 `.env` when it is set, so a release or `@sha256:` digest can be pinned without
-editing the compose file (see [SETUP.md](SETUP.md#updating)).
+editing the compose file (see [SETUP.md](SETUP.md#updating)). Release images
+are also published to `ghcr.io/developingchet/cs-unifi-bouncer-pro`, with
+their own signature and attestations (see [SECURITY.md](../SECURITY.md#supply-chain-integrity)).
+
+Building from source now requires Go 1.27.3 or newer, which fixes
+CVE-2026-111943 in `crypto/x509`.
 
 Behaviour that changes without action:
 
@@ -64,8 +69,20 @@ Behaviour that changes without action:
   are applied at once. Before, each took a token, and the first stream block
   after a restart lists every expired decision the LAPI still holds, so a low
   limit kept `/readyz` at 503 for minutes while they were worked through.
+- **Reconcile reads count toward the circuit breaker**: a reconcile's
+  membership reads and policy or rule checks that fail with a transport
+  error, a timeout, a 5xx or a 401 now count like a failed shard write, so a
+  controller that stops answering during a reconcile opens the breaker
+  instead of leaving queued bans waiting behind it. A 400, 404, 409 or 429
+  does not count.
 - **SIGHUP before the first CrowdSec batch** only repairs the block policies
   for the new zone pairs; bans are reconciled once the startup reconcile runs.
+  A deployment with no zone-mode site now takes the legacy skip path on a
+  SIGHUP (`SIGHUP: ZoneManager not available (legacy mode?), skipping
+  reload`, at warn) instead of logging an error about empty zone pairs.
+- **A complete first batch**: `/readyz`, the reconcile gate and the
+  retirement of 1.x claims wait for the first decision block to be applied in
+  full. A shutdown during that block leaves them to the next start.
 - **Zone pairs from a file**: `ZONE_PAIRS_FILE`, `EGRESS_ZONE_PAIRS_FILE`
   and `CLOUDFLARE_ZONE_PAIRS_FILE` are new. A SIGHUP reads them again, so
   pairs kept in a file change without a restart; pairs in the environment
@@ -105,6 +122,13 @@ Behaviour that changes without action:
   that belong to no site. Queries that select series by their exact label set
   need `site` added or summed away, for example
   `sum by (endpoint) (rate(crowdsec_unifi_api_calls_total[5m]))`.
+- **Feed metrics**: `crowdsec_unifi_feed_entries`,
+  `crowdsec_unifi_feed_last_success_timestamp_seconds` and
+  `crowdsec_unifi_feed_fetch_errors_total` are new, one series per
+  `BLOCKLIST_URLS` entry and for the AbuseIPDB feed, labelled with the feed's
+  claim source rather than its URL (see
+  [External Blocklists](CONFIGURATION.md#external-blocklists)). The metric
+  count rises from 25 to 28.
 - **Manual commands while running**: `ban`, `unban` and `reconcile` no
   longer need the bouncer stopped. Run inside its container, they ask the
   running bouncer to do the work through `HEALTH_ADDR`; `status sync` is
@@ -124,6 +148,21 @@ Behaviour that changes without action:
   shard is created, then at most every 10 minutes, at each reconcile and on
   shutdown, instead of after every write to the controller. `status` reports
   `last_group_update` from those saves.
+- **Shard 0 is pruned too**: an emptied shard 0 is deleted with its rule or
+  policies at the next reconcile like any other empty tail shard, instead of
+  keeping a list holding only the placeholder address until a restart. The
+  next ban of the family creates a shard again.
+- **Cloudflare whitelist without IPv6**: with `FIREWALL_ENABLE_IPV6=false`
+  the whitelist keeps only the IPv4 list and ALLOW policies, removes IPv6
+  ones an earlier run created, and warns about a pair whose destination IPs
+  are all IPv6. Before, it created IPv6 ALLOW policies with no block policies
+  behind them.
+- **`drain` and pruning finish**: a rule or group the controller no longer
+  holds (`api.err.IdInvalid`) is confirmed against the listing and counted as
+  deleted, the records of objects removed with a placeholder-only shard are
+  dropped, and a site still on the legacy firewall no longer fails the
+  Cloudflare whitelist drain. Each of these stopped `drain` or shard pruning
+  part-way before.
 - **1.x data converted when the database opens**: bans without claims,
   cache records keyed by name and blocklist claims keyed by URL are
   converted each time the database is opened, instead of being checked on
@@ -211,9 +250,9 @@ refused; run `validate` before upgrading:
   characters) for site "default"; legacy firewall groups are limited to 64
   characters`). The classic API refused every such group, so no shard could
   be created. With `auto`, where the sites may all use the zone-based
-  firewall and its lists have no such limit, the same text is logged as a
-  warning at startup and printed by `validate`, ending `; sites on the
-  legacy firewall will fail to create that group`.
+  firewall, whose lists and policies accept names of up to 1000 characters,
+  the same text is logged as a warning at startup and printed by `validate`,
+  ending `; sites on the legacy firewall will fail to create that group`.
 - **CA certificate files**: `UNIFI_CA_CERT` and `CROWDSEC_LAPI_CA_CERT` must
   name a readable file holding a PEM certificate. Before, a wrong path passed
   `validate` and stopped the daemon when it built its HTTP client.
