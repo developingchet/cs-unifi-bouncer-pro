@@ -160,7 +160,7 @@ var (
 	DecisionLatency = promauto.NewHistogram(prometheus.HistogramOpts{
 		Namespace: namespace,
 		Name:      "decision_latency_seconds",
-		Help:      "Time from decision received (post-filter) to successful UniFi API write.",
+		Help:      "Time from a ban decision being received to its ban being recorded in the database and its shard, before the controller write.",
 		Buckets:   []float64{0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0},
 	})
 

@@ -106,8 +106,8 @@ func (c *Config) validateFirewall() error {
 // checkLegacyGroupNames checks the length of the legacy group names
 // GROUP_NAME_TEMPLATE renders. Too long a name is an error with
 // FIREWALL_MODE=legacy and a warning with auto, where the sites that resolve
-// to the zone-based firewall name traffic matching lists instead, whose length
-// limit is not known. Zone mode is not checked.
+// to the zone-based firewall name traffic matching lists instead, which take
+// longer names. Zone mode is not checked.
 func (c *Config) checkLegacyGroupNames() error {
 	if c.FirewallMode == "zone" {
 		return nil

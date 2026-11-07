@@ -52,7 +52,7 @@ func fireModeChanged(n *webhook.Notifier, err error) {
 }
 
 // fireCloudflareSyncFailed reports a failed Cloudflare whitelist sync, at most
-// once an hour; phase is "initial" or "refresh".
+// once an hour; phase is "initial", "refresh" or "reload".
 func fireCloudflareSyncFailed(n *webhook.Notifier, phase string) {
 	n.FireLimited(webhook.EventCloudflareSyncFailed, "", map[string]any{"phase": phase})
 }
