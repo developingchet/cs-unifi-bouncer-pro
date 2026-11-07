@@ -275,7 +275,7 @@ branch/Wan->Lan
 branch/Wan->Iot:22,23
 ```
 
-A prefix that names a site not in `UNIFI_SITES` fails validation, as does a site left without a `ZONE_PAIRS` pair, with `FIREWALL_MODE=zone` or, once a `ZONE_PAIRS` pair has a prefix, with `auto`. With `UNIFI_SITES_AUTO=true` the sites are known only after discovery, so an unknown prefix logs a warning at startup and its pairs apply to no site. At startup, and after each SIGHUP reload, the bouncer logs the pairs each site uses (`zone pairs for site`), and `validate` prints one `zone_pairs[site]` row per site when a setting has prefixes. A SIGHUP that changes one site's pairs adds and removes only that site's policies; each site's orphan sweep looks only at its own policies. Duplicate pairs in `ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS` are checked per site: a pair may appear once without a prefix and once more for a site.
+A prefix that names a site not in `UNIFI_SITES` fails validation. A site left without a `ZONE_PAIRS` pair fails validation with `FIREWALL_MODE=zone` (`ZONE_PAIRS leaves site "branch" without a zone pair; add a pair without a site prefix or one starting with "branch/"`); with `auto`, once a `ZONE_PAIRS` pair has a prefix, the same text is a startup warning ending `; if the site uses the zone-based firewall it will not start`, because a site on the classic firewall needs no pair. With `UNIFI_SITES_AUTO=true` the sites are known only after discovery, so an unknown prefix logs a warning at startup and its pairs apply to no site. At startup, and after each SIGHUP reload, the bouncer logs the pairs each site uses (`zone pairs for site`), and `validate` prints one `zone_pairs[site]` row per site when a setting has prefixes. A SIGHUP that changes one site's pairs adds and removes only that site's policies; each site's orphan sweep looks only at its own policies. Duplicate pairs in `ZONE_PAIRS`, `EGRESS_ZONE_PAIRS` and `CLOUDFLARE_ZONE_PAIRS` are checked per site: a pair may appear once without a prefix and once more for a site.
 
 ### Port filtering for zone pairs
 
@@ -359,7 +359,7 @@ When enabled, the bouncer periodically fetches current Cloudflare IP ranges and 
 | `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | No | How often to re-fetch Cloudflare IP ranges and update the IP TMLs (default: weekly). |
 | `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | No | `https://` URL to fetch the current Cloudflare IPv4 CIDR list. |
 | `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | No | `https://` URL to fetch the current Cloudflare IPv6 CIDR list. |
-| `CLOUDFLARE_ZONE_PAIRS` | — | If enabled | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]` format. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. Use semicolons between pairs when a pair contains comma-separated ports or IPs. Each `src->dst` pair may appear only once for a site. Zones are resolved separately for each site. A `site/` prefix limits a pair to one site (see [Pairs for one site](#pairs-for-one-site)); a site left without a pair has its whitelist policies and lists removed. Filter creation failure prevents a broader ALLOW policy from being created. `CLOUDFLARE_ZONE_PAIRS_FILE` variant supported. Reloaded on SIGHUP while the whitelist runs: a change syncs the whitelist at once, after the `ZONE_PAIRS` reload succeeds. A reload whose pairs name a zone a site does not have is refused, and the zone pairs are kept as well. |
+| `CLOUDFLARE_ZONE_PAIRS` | — | If enabled | Zone pairs in `src[:sport,...]->dst[:dport,...][@dstIP1,dstIP2,...]` format. Required when `CLOUDFLARE_WHITELIST_ENABLED=true`. Use semicolons between pairs when a pair contains comma-separated ports or IPs. Each `src->dst` pair may appear only once for a site. Zones are resolved separately for each site. A `site/` prefix limits a pair to one site (see [Pairs for one site](#pairs-for-one-site)); a site left without a pair has its whitelist policies and lists removed. Filter creation failure prevents a broader ALLOW policy from being created. `CLOUDFLARE_ZONE_PAIRS_FILE` variant supported. Reloaded on SIGHUP while the whitelist runs: a change syncs the whitelist at once, after the `ZONE_PAIRS` reload succeeds. A reload whose pairs name a zone a site does not have is refused, and the zone pairs are kept as well; sites on the classic firewall, which have no zones to check, are skipped by that check. |
 
 A fetched list is applied only if every entry passes validation: IPv4 ranges no broader than a /12, IPv6 ranges no broader than a /29, no private, loopback, link-local, multicast or other non-public ranges, and at most 1000 entries per list. A list that fails validation, or an empty one, is rejected with an error and the ranges from the last successful sync stay in place.
 
@@ -446,7 +446,7 @@ A token-bucket rate limiter can throttle how fast decisions are dequeued and app
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DECISION_RATE_LIMIT` | `0` | Maximum decisions processed per second. `0` disables rate limiting (unlimited throughput). |
+| `DECISION_RATE_LIMIT` | `0` | Maximum ban decisions applied per second; deleted and expired decisions are not paced. `0` disables rate limiting (unlimited throughput). |
 | `DECISION_BURST_SIZE` | `1000` | Token-bucket burst capacity — the maximum number of decisions that can be processed in a single burst before the rate limit takes effect. Must be at least 1 when `DECISION_RATE_LIMIT` is set; has no effect when `DECISION_RATE_LIMIT=0`. |
 
 ```bash
@@ -475,7 +475,7 @@ When the UniFi controller returns a 401 Unauthorized, only one goroutine perform
 | `DATA_DIR` | `/data` | Directory for the bbolt database file (`bouncer.db`). Mount as a named Docker volume for persistence. |
 | `BAN_TTL` | `168h` | Maximum ban length (default 7 days). When a decision is received, its expiry is capped at `now + BAN_TTL`; this applies to decisions with no duration, an unparseable duration, or one longer than `BAN_TTL`. A `BLOCK_SCENARIO_DURATION_MAP` override is not capped. The janitor lifts expired bans every `JANITOR_INTERVAL` and the unban reaches UniFi at the next sync. If CrowdSec still holds the decision, a restart or the periodic `CROWDSEC_RESYNC_INTERVAL` re-read applies it again for another `BAN_TTL`. `BAN_TTL` also bounds how long a failing blocklist feed keeps its bans, and caps manual `ban --duration`. |
 
-The database contains four bbolt buckets:
+The database contains four bbolt buckets (an empty `migrations` bucket left by a 2.4 pre-release build is deleted when the database is opened):
 
 | Bucket | Contents |
 |--------|---------|

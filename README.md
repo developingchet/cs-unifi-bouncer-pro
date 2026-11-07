@@ -222,7 +222,7 @@ A SIGHUP that arrives before the startup reconcile has run (the bouncer is still
 
 Filter changes stage a new block policy before removing the old one. If policy reconciliation fails after the configuration commits, the error is logged and the next reconciliation retries; some pairs may already have updated.
 
-A changed `CLOUDFLARE_ZONE_PAIRS` is handed to the Cloudflare whitelist, which syncs at once (`SIGHUP: Cloudflare zone pairs reloaded; the whitelist syncs them now`, then `Cloudflare whitelist synced with the reloaded zone pairs`): ALLOW policies and filter lists are created for new pairs and removed for dropped ones, as on a periodic refresh. A failed sync logs `Cloudflare whitelist sync of the reloaded zone pairs failed` and fires `cloudflare_whitelist_sync_failed` with phase `reload`; the next refresh retries it. Turning the whitelist on or off needs a restart.
+A changed `CLOUDFLARE_ZONE_PAIRS` is handed to the Cloudflare whitelist, which syncs at once (`SIGHUP: Cloudflare zone pairs reloaded; the whitelist syncs them now`, then `Cloudflare whitelist synced with the reloaded zone pairs`): ALLOW policies and filter lists are created for new pairs and removed for dropped ones, as on a periodic refresh. Pairs that name a zone a site does not have refuse the whole reload (`SIGHUP: Cloudflare zone pairs refused; keeping the current zone pairs`); sites on the classic firewall are skipped by that check. A failed sync logs `Cloudflare whitelist sync of the reloaded zone pairs failed` and fires `cloudflare_whitelist_sync_failed` with phase `reload`; the next refresh retries it. Turning the whitelist on or off needs a restart.
 
 What a SIGHUP applies, exactly:
 

@@ -92,7 +92,8 @@ Behaviour that changes without action:
   at once; before, it needed a restart. The new pairs take effect only once
   the `ZONE_PAIRS` reload has succeeded. Pairs that name a zone a site does
   not have refuse the whole reload (`SIGHUP: Cloudflare zone pairs refused;
-  keeping the current zone pairs`). A failed sync fires
+  keeping the current zone pairs`); sites on the classic firewall are skipped
+  by that check, as they have no zones. A failed sync fires
   `cloudflare_whitelist_sync_failed` with the new phase `reload`.
 - **What SIGHUP does not apply**: a SIGHUP logs, at info, the names of
   changed settings it does not apply (`SIGHUP: changed settings take effect
@@ -105,11 +106,13 @@ Behaviour that changes without action:
   [CONFIGURATION.md](CONFIGURATION.md#pairs-for-one-site)). Pairs without a
   prefix apply to every site as before. A zone name that contains `/` is now
   read as a site prefix; use the zone's ID instead. With
-  `FIREWALL_MODE=zone`, and with `auto` once a `ZONE_PAIRS` pair has a
-  prefix, validation requires every site in `UNIFI_SITES` to be left with a
-  pair (`ZONE_PAIRS leaves site "branch" without a zone pair; add a pair
-  without a site prefix or one starting with "branch/"`), since a site on
-  the zone-based firewall without one cannot start.
+  `FIREWALL_MODE=zone`, validation requires every site in `UNIFI_SITES` to
+  be left with a pair (`ZONE_PAIRS leaves site "branch" without a zone pair;
+  add a pair without a site prefix or one starting with "branch/"`), since a
+  site on the zone-based firewall without one cannot start. With `auto`,
+  once a `ZONE_PAIRS` pair has a prefix, the same text is a startup warning
+  ending `; if the site uses the zone-based firewall it will not start`: a
+  site on the classic firewall needs no pair.
 - **Feed redirects through a proxy**: with `HTTPS_PROXY` or `HTTP_PROXY` set,
   a feed redirect to another host is followed only when that host name
   resolves, from the bouncer, to public addresses. A redirect to a name the
@@ -172,7 +175,9 @@ Behaviour that changes without action:
   claims in the first LAPI batch is lifted when that decision is deleted;
   before, deleting any decision for the address lifted it. One that no
   decision claims stays until it expires. `DRY_RUN` converts nothing, so a
-  dry run against a 1.x database shows its bans without claims.
+  dry run against a 1.x database shows its bans without claims. An empty
+  `migrations` bucket left by a 2.4 pre-release build is deleted when the
+  database is opened.
 - **Legacy rules removed with their group**: when a shard's group is pruned,
   merged away or drained, every rule of the bouncer's that uses only that
   group is deleted first, with either block action (`drop` or `reject`) and
