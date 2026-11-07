@@ -64,6 +64,7 @@ func newReconcileProbe(t *testing.T) *reconcileProbe {
 	ctrl.SetZones("default", []controller.Zone{
 		{ID: "z-ext", Name: "External", NetworkIDs: []string{"n-wan"}},
 		{ID: "z-int", Name: "Internal", NetworkIDs: []string{"n-lan"}},
+		{ID: "z-dmz", Name: "Dmz", NetworkIDs: []string{"n-dmz"}},
 	})
 	namer, err := firewall.NewNamer("crowdsec-block-{{.Family}}-{{.Index}}", "crowdsec-drop-{{.Family}}-{{.Index}}",
 		"crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}")

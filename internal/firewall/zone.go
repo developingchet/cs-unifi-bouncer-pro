@@ -212,11 +212,17 @@ func (zm *ZoneManager) Reload(ctx context.Context, sites []string, pairs []confi
 
 // CheckZones reports an error naming the first of names that is not a zone of
 // site, read fresh from the controller. A setting that names zones, such as
-// CLOUDFLARE_ZONE_PAIRS, is checked with it before it is applied.
+// CLOUDFLARE_ZONE_PAIRS, is checked with it before it is applied. A site on
+// the legacy firewall has no zones and passes: the setting does not apply
+// to it.
 func (zm *ZoneManager) CheckZones(ctx context.Context, site string, names []string) error {
 	zm.ctrl.InvalidateZoneCache(site)
 	for _, name := range names {
-		if _, err := zm.ctrl.GetZoneID(ctx, site, name); err != nil {
+		_, err := zm.ctrl.GetZoneID(ctx, site, name)
+		if controller.ZoneFirewallNotConfigured(err) {
+			return nil
+		}
+		if err != nil {
 			return fmt.Errorf("resolve zone %q for site %q: %w", name, site, err)
 		}
 	}

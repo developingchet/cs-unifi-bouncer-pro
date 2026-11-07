@@ -383,7 +383,11 @@ func (m *MockController) GetZoneID(ctx context.Context, siteID, zoneName string)
 			return z.ID, nil
 		}
 	}
-	// Default fallback for tests that provide UUID-like strings directly.
+	if len(zones) > 0 {
+		return "", fmt.Errorf("zone %q not found at site %q", zoneName, siteID)
+	}
+	// A site without preset zones resolves any name to itself, for tests
+	// that pass zone IDs directly.
 	return zoneName, nil
 }
 

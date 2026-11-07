@@ -132,7 +132,6 @@ func TestReloadZonesKeepsCloudflarePairsWhenZoneReloadFails(t *testing.T) {
 func TestReloadZonesRefusesCloudflarePairsWithAnUnknownZone(t *testing.T) {
 	probe, running, source := cloudflareReloadFixture(t, "External->Nowhere")
 	initial := source.Pairs()
-	probe.ctrl.SetError("GetZoneID", errors.New(`zone "Nowhere" not found on this controller`))
 
 	var out bytes.Buffer
 	reloadZones(context.Background(), running, probe, source, func() bool { return true }, zerolog.New(&out))
