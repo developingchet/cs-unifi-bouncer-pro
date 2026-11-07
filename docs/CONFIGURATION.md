@@ -149,7 +149,7 @@ The bouncer uses Go templates for all managed UniFi object names. This allows mu
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GROUP_NAME_TEMPLATE` | `crowdsec-block-{{.Family}}-{{.Index}}` | Name template for firewall address groups. The classic firewall API refuses a group name longer than 64 characters, so with `FIREWALL_MODE=legacy`, validation fails when the name of the first shard (index `0`, on each site in `UNIFI_SITES`, or `default` with `UNIFI_SITES_AUTO`) is longer; with `auto` it logs a warning instead, as sites on the zone-based firewall name traffic matching lists, which have no such limit. A name that passes 64 characters only at a higher index is refused when that shard is created, which logs an error and fires `shard_create_failed`. |
+| `GROUP_NAME_TEMPLATE` | `crowdsec-block-{{.Family}}-{{.Index}}` | Name template for firewall address groups. The classic firewall API refuses a group name longer than 64 characters, so with `FIREWALL_MODE=legacy`, validation fails when the name of the first shard (index `0`, on each site in `UNIFI_SITES`, or `default` with `UNIFI_SITES_AUTO`) is longer; with `auto` it logs a warning instead, as sites on the zone-based firewall name traffic matching lists, which accept names of up to 1000 characters, as do zone policies. A name that passes 64 characters only at a higher index is refused when that shard is created, which logs an error and fires `shard_create_failed`. |
 | `RULE_NAME_TEMPLATE` | `crowdsec-drop-{{.Family}}-{{.Index}}` | Name template for legacy firewall rules |
 | `POLICY_NAME_TEMPLATE` | `crowdsec-policy-{{.SrcZone}}-{{.DstZone}}-{{.Family}}-{{.Index}}` | Name template for zone firewall policies |
 | `OBJECT_DESCRIPTION` | `Managed by cs-unifi-bouncer-pro. Do not edit manually.` | Description set on all managed objects |
@@ -355,7 +355,7 @@ When enabled, the bouncer periodically fetches current Cloudflare IP ranges and 
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | No | Enable the Cloudflare IP whitelist sync. Requires zone mode and `UNIFI_API_KEY`; startup fails with `FIREWALL_MODE=legacy` or without an API key. With `FIREWALL_ENABLE_IPV6=false` only the IPv4 list and ALLOW policies are kept; IPv6 ones from an earlier run are removed. |
+| `CLOUDFLARE_WHITELIST_ENABLED` | `false` | No | Enable the Cloudflare IP whitelist sync. Requires zone mode and `UNIFI_API_KEY`; startup fails with `FIREWALL_MODE=legacy` or without an API key. With `FIREWALL_ENABLE_IPV6=false` only the IPv4 list and ALLOW policies are kept; IPv6 ones from an earlier run are removed, and a pair whose destination IPs are all IPv6 logs a warning, as it then gets no policy. |
 | `CLOUDFLARE_REFRESH_INTERVAL` | `168h` | No | How often to re-fetch Cloudflare IP ranges and update the IP TMLs (default: weekly). |
 | `CLOUDFLARE_IPV4_URL` | `https://www.cloudflare.com/ips-v4` | No | `https://` URL to fetch the current Cloudflare IPv4 CIDR list. |
 | `CLOUDFLARE_IPV6_URL` | `https://www.cloudflare.com/ips-v6` | No | `https://` URL to fetch the current Cloudflare IPv6 CIDR list. |
@@ -580,7 +580,7 @@ ABUSEIPDB_COUNTRY_EXCLUDE=US
 
 If a response contains an invalid entry, valid matching entries are still imported, but no existing feed claims are pruned that round. The response does not reset the `BAN_TTL` outage timer; if incomplete responses continue, claims absent from the valid entries eventually expire. The startup log pairs each opaque claim source key with the feed's scheme and host for database troubleshooting, without logging URL paths or queries.
 
-**Size limits.** A feed may hold at most 250,000 addresses, counted after filtering, and the download is capped at 64 MB. As of this writing the `1d` list is about 51,000 addresses and `90d` about 13 MB; `120d` and longer exceed the address limit unfiltered, so they are only accepted with `ABUSEIPDB_COUNTRY_INCLUDE`. If a filtered result still exceeds the limit, the fetch fails and the previous bans are kept, as for any failing feed.
+**Size limits.** A feed may hold at most 250,000 addresses, counted after filtering, and the download is capped at 64 MiB. As of this writing the `1d` list is about 51,000 addresses and `90d` about 13 MB; `120d` and longer exceed the address limit unfiltered, so they are only accepted with `ABUSEIPDB_COUNTRY_INCLUDE`. If a filtered result still exceeds the limit, the fetch fails and the previous bans are kept, as for any failing feed.
 
 The feed shares the ban database, whitelist (`BLOCK_WHITELIST`) and outage handling of [External Blocklists](#external-blocklists). Its opaque `abuseipdb:sha256:...` claim key is distinct from a generic blocklist claim even when both use the same URL. Fetch logs include `filtered` and `removed` counts.
 
@@ -621,7 +621,7 @@ The events that repeat at most once an hour add `"suppressed": N` to `detail` wh
 
 The payload always has `event` and `timestamp` (UTC, RFC 3339). `detail` is omitted for the circuit breaker events.
 
-Notifications are delivered in the background, so a slow endpoint never delays syncing. Up to 64 events can be queued; further events are dropped with a `webhook: queue full` warning. On shutdown, including the exit on a firewall mode change, queued events get up to 5 seconds to send. Webhook errors are logged at `warn` level and never cause the bouncer to exit or retry. The HTTP timeout for webhook POSTs is 5 seconds. Redirects are not followed, so the payload is only ever sent to `WEBHOOK_URL` itself, and an `http://` URL logs a startup warning because the payload then travels unencrypted. Logs show only the webhook host, because Slack- and Discord-style URLs carry a token in the path.
+Notifications are delivered in the background, so a slow endpoint never delays syncing. Up to 64 events can be queued; further events are dropped with a `webhook: queue full, event dropped` warning. On shutdown, including the exit on a firewall mode change, queued events get up to 5 seconds to send. Webhook errors are logged at `warn` level and never cause the bouncer to exit or retry. The HTTP timeout for webhook POSTs is 5 seconds. Redirects are not followed, so the payload is only ever sent to `WEBHOOK_URL` itself, and an `http://` URL logs a startup warning because the payload then travels unencrypted. Logs show only the webhook host, because Slack- and Discord-style URLs carry a token in the path.
 
 ```bash
 # Fire a notification when the circuit breaker trips or resets
