@@ -202,15 +202,19 @@ func TestValidateRequiresAZonePairForEverySiteInZoneMode(t *testing.T) {
 	}
 }
 
-// In auto mode a site prefix means the sites run the zone-based firewall, so
-// every site needs a pair once one pair has a prefix.
-func TestValidateRequiresAZonePairForEverySiteInAutoModeWithSitePrefixes(t *testing.T) {
+// In auto mode a site without a pair may be on the legacy firewall, so once a
+// pair has a site prefix a site left without one is a warning, not an error.
+func TestValidateWarnsOfASiteWithoutAZonePairInAutoModeWithSitePrefixes(t *testing.T) {
 	setSitePairEnv(t, "default,branch")
 	setEnv(t, "FIREWALL_MODE", "auto")
 	setEnv(t, "ZONE_PAIRS", "default/External->Internal")
-	want := `ZONE_PAIRS leaves site "branch" without a zone pair; add a pair without a site prefix or one starting with "branch/"`
-	if _, err := Load(); err == nil || err.Error() != want {
-		t.Fatalf("Load: err = %v, want %q", err, want)
+	want := `ZONE_PAIRS leaves site "branch" without a zone pair; add a pair without a site prefix or one starting with "branch/"; if the site uses the zone-based firewall it will not start`
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !slices.Contains(cfg.DeprecationWarnings, want) {
+		t.Fatalf("warnings = %q, want %q", cfg.DeprecationWarnings, want)
 	}
 
 	for _, ok := range []string{

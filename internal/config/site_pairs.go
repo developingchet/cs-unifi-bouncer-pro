@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -158,19 +159,26 @@ func (c *Config) validatePairSites() error {
 	if c.FirewallMode == "legacy" {
 		return nil
 	}
-	// With FIREWALL_MODE=auto a site on the legacy firewall needs no pair.
-	// A site prefix only means something on the zone-based firewall, though,
-	// so once a pair has one every site must be left with a pair: a zone
-	// site without one fails startup and every SIGHUP reload.
+	// With FIREWALL_MODE=auto a site on the legacy firewall needs no pair,
+	// and which firewall a site has is known only once it is resolved. Once
+	// a pair has a site prefix, a site left without a pair is only a warning
+	// there: a mixed deployment is valid, but a zone site without a pair
+	// fails startup and every SIGHUP reload.
 	inbound := settings[0].pairs
 	if c.FirewallMode == "auto" && len(PairSites(inbound)) == 0 {
 		return nil
 	}
 	for _, site := range c.UnifiSites {
-		if len(PairsForSite(inbound, site)) == 0 {
-			return fmt.Errorf("ZONE_PAIRS leaves site %q without a zone pair; add a pair without a site prefix or one starting with %q",
-				site, site+"/")
+		if len(PairsForSite(inbound, site)) > 0 {
+			continue
 		}
+		msg := fmt.Sprintf("ZONE_PAIRS leaves site %q without a zone pair; add a pair without a site prefix or one starting with %q",
+			site, site+"/")
+		if c.FirewallMode == "zone" {
+			return errors.New(msg)
+		}
+		c.DeprecationWarnings = append(c.DeprecationWarnings,
+			msg+"; if the site uses the zone-based firewall it will not start")
 	}
 	return nil
 }
