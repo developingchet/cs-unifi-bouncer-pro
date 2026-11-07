@@ -48,6 +48,25 @@ During and after the upgrade:
 
 ## From 2.3 to 2.4
 
+### Before upgrading to 2.4
+
+2.4 refuses to start with some settings that 2.3 accepted or ignored (listed
+under [Settings now rejected](#settings-now-rejected)): a zone pair named
+twice, `METRICS_ADDR` and `HEALTH_ADDR` on one port, negative durations, an
+invalid `FIREWALL_BATCH_WINDOW`, unknown legacy rulesets, out-of-range rule indexes,
+legacy group names over 64 characters, unreadable CA certificate files and an
+`ENABLE_IPV6` that is not a boolean. While the bouncer is down it enforces no
+new bans. The compose files run `latest`, so a plain pull upgrades; check the
+configuration with the new image before restarting:
+
+```bash
+docker compose pull
+docker compose run --rm --no-deps cs-unifi-bouncer-pro validate
+docker compose up -d
+```
+
+### Changes
+
 The compose files still run `latest`, and now read `BOUNCER_IMAGE` from
 `.env` when it is set, so a release or `@sha256:` digest can be pinned without
 editing the compose file (see [SETUP.md](SETUP.md#updating)). Release images
@@ -224,7 +243,9 @@ accepts only the boolean forms Go reads (`true`, `false`, `1`, `0`, ...); any
 other value, such as `yes`, stops startup with `ENABLE_IPV6 must be true or
 false; got "yes"`, also when `UNIFI_DIAL_IPV6` is set.
 
-Settings now rejected. These configurations were accepted by 2.3 and now stop
+### Settings now rejected
+
+These configurations were accepted by 2.3 and now stop
 startup with a validation error, and a SIGHUP reload that introduces one is
 refused; run `validate` before upgrading:
 

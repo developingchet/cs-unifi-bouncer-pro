@@ -273,7 +273,7 @@ docker logs cs-unifi-bouncer-pro
 Look for these startup log lines (exact field order may vary):
 
 ```json
-{"level":"info","version":"v2.3.0","msg":"cs-unifi-bouncer-pro starting"}
+{"level":"info","version":"v2.4.0","msg":"cs-unifi-bouncer-pro starting"}
 {"level":"info","addr":"[::]:8081","msg":"health server started"}
 {"level":"info","sites":["default"],"msg":"loading firewall infrastructure"}
 {"level":"info","addr":":9090","msg":"Prometheus metrics server started"}
@@ -405,7 +405,7 @@ docker logs cs-unifi-bouncer-pro
 ```
 
 To stay on a release until you choose to move, set
-`BOUNCER_IMAGE=developingchet/cs-unifi-bouncer-pro:2.3.0` in `.env`, or pin the
+`BOUNCER_IMAGE=developingchet/cs-unifi-bouncer-pro:2.4.0` in `.env`, or pin the
 `@sha256:` digest that `cosign verify` printed; that digest runs exactly the
 image that was checked, even if a tag were later moved.
 
