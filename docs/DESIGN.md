@@ -217,7 +217,7 @@ flowchart LR
 
 In legacy mode each shard is a firewall address group with one rule; in zone mode each shard is a traffic matching list that every inbound and egress pair references through one block policy per shard and family.
 
-A classic firewall address group and an integration traffic matching list are the same controller object, which is why the shard lists survive a site's move to the zone-based firewall and are adopted by name. Per-pair port and destination-IP filters are separate lists (`crowdsec-ports-*`, `crowdsec-dstips-*`) attached to the pair's policies.
+A classic firewall address group and an integration traffic matching list are the same controller object, which is why the shard lists survive a site's move to the zone-based firewall and are adopted by name. Per-pair port and destination-IP filters are separate lists (`crowdsec-ports-*`, `crowdsec-dstips-*`) attached to the pair's policies. Name lengths differ by API: the classic API refuses a group name longer than 64 characters while accepting longer rule names, and Network 11 accepts traffic matching list and zone policy names of up to 1000 characters; `GROUP_NAME_TEMPLATE` is checked against the classic limit for legacy sites (see [Object Naming Templates](CONFIGURATION.md#object-naming-templates)).
 
 ### UniFi Network 11
 
@@ -371,7 +371,7 @@ Persistent state is stored in a single [bbolt](https://github.com/etcd-io/bbolt)
 | `bans` | IP string | msgpack-encoded `BanEntry` with expiry, source claims, and pending state |
 | `groups` | site and group name | msgpack-encoded `GroupRecord` with UniFi ID, shard index, family, and members |
 | `policies` | site and policy name | msgpack-encoded `PolicyRecord` with UniFi ID and firewall mode |
-| `events` | uint64 big-endian sequence | JSON-encoded `EventEntry` {Action, Origin, Scenario, IP, RecordedAt} |
+| `events` | uint64 big-endian sequence | msgpack-encoded `EventEntry` {Action, Origin, Scenario, IP, RecordedAt} |
 
 A shard's `groups` record saves its members when the shard is created, then at most every 10 minutes during syncs, at the end of each reconcile and at shutdown, rather than after every flush. The members are read only at startup, to restore a shard whose controller list was emptied or deleted while the bouncer was down; they are checked against `bans` first, and the startup reconcile adds any ban the record missed.
 

@@ -56,7 +56,7 @@ For full setup including CrowdSec registration, TLS, multi-site, and Docker Secr
 - **Ban history audit trail** — ring-buffer event log (up to 10,000 entries) for every ban, unban, and expiry; queryable via `status bans`, `status ip`, `status history`, also against the running bouncer via `docker exec`
 - **External blocklist import** — fetch plain-text IP/CIDR lists from external URLs on a configurable interval; bans auto-expire if the feed goes offline
 - **AbuseIPDB lists with country filters** — import a borestad AbuseIPDB list by report window and include or exclude two-letter country codes; configure `ABUSEIPDB_LIST` and optionally `ABUSEIPDB_COUNTRY_INCLUDE`, `ABUSEIPDB_COUNTRY_EXCLUDE`, and `ABUSEIPDB_REFRESH_INTERVAL`
-- **Webhook notifications** — POST JSON alerts when the circuit breaker trips or reconcile drift is detected
+- **Webhook notifications** — POST JSON alerts when the circuit breaker trips or resets, a reconcile finds drift, a shard or ban entry is refused, the Cloudflare sync fails or the bouncer exits to change firewall mode
 - **Per-scenario duration overrides** — set a duration for matching CrowdSec scenarios via `BLOCK_SCENARIO_DURATION_MAP`, including durations longer than `BAN_TTL`
 - **Destination IP filtering** — scope block policies to specific destination hosts or subnets via `@ip1,ip2,...` suffix on zone pairs
 - **Decision rate limiter** — token-bucket throttle for ban waves (`DECISION_RATE_LIMIT`)

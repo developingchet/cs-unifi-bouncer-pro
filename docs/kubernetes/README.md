@@ -69,6 +69,8 @@ Restart the pod after changing its Secret or ConfigMap. Kubernetes refreshes mou
 kubectl -n crowdsec rollout restart deployment/cs-unifi-bouncer-pro
 ```
 
+Zone pairs are the one setting a SIGHUP reloads, from the files named by `ZONE_PAIRS_FILE`, `EGRESS_ZONE_PAIRS_FILE` and `CLOUDFLARE_ZONE_PAIRS_FILE` (see [SIGHUP Hot-Reload](../../README.md#sighup-hot-reload)). To use that here, keep the pairs in a ConfigMap mounted as a volume without `subPath`, which the kubelet updates in place within about a minute. The image has no shell to send the signal from, so a rollout restart remains the simplest way to apply a changed ConfigMap.
+
 ## Prometheus Scraping
 
 The deployment includes `prometheus.io/scrape: "true"` annotations on the pod template.

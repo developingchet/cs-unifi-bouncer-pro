@@ -116,9 +116,9 @@ All configuration is via environment variables. The most common settings are bel
 | `BLOCKLIST_URLS` | — | Plain-text IP/CIDR blocklists to import |
 | `ABUSEIPDB_LIST` | — | AbuseIPDB list window to import, e.g. `7d`; filter with `ABUSEIPDB_COUNTRY_INCLUDE`/`_EXCLUDE` |
 | `CLOUDFLARE_WHITELIST_ENABLED` | `false` | Keep ALLOW policies for Cloudflare's ranges on `CLOUDFLARE_ZONE_PAIRS` |
-| `WEBHOOK_URL` | — | POST alerts on circuit breaker and reconcile drift events |
+| `WEBHOOK_URL` | — | POST alerts on circuit breaker, reconcile drift, firewall mode change, shard failure and whitelist sync events |
 | `DRY_RUN` | `false` | Read the controller and log intended changes without writing anything |
-| `LOG_LEVEL` | `info` | `trace`, `debug`, `info`, `warn`, `error` |
+| `LOG_LEVEL` | `info` | `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `panic` |
 
 ¹ Provide either `UNIFI_API_KEY` **or** both `UNIFI_USERNAME` and `UNIFI_PASSWORD`. Username/password manages legacy firewall rules only; the zone-based firewall and the Cloudflare whitelist need an API key, and so does UniFi Network 11 and later.
 

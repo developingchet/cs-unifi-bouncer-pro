@@ -324,7 +324,7 @@ docker exec crowdsec cscli decisions add -i 203.0.113.42 -t ban -d 1h -r "setup 
 docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status ip 203.0.113.42
 ```
 
-Individual bans are not logged at the default `info` level. Within `SYNC_INTERVAL` (default 30 s) the shard holding the address is written, logged as `shard flushed to UniFi`. At `LOG_LEVEL=debug` each decision also logs `job applied` with `"action":"ban"` and the address.
+Individual bans are not logged at the default `info` level. Once the decision batch has been processed, the shard holding the address is written, logged as `shard flushed to UniFi`; a write that fails is retried every `SYNC_INTERVAL` (default 30 s). At `LOG_LEVEL=debug` each decision also logs `job applied` with `"action":"ban"` and the address.
 
 Verify the IP appears in a `crowdsec-block-v4-*` group (legacy mode) or traffic matching list (zone mode), then clean up:
 

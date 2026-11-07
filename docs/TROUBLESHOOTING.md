@@ -58,6 +58,7 @@ docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro diagnose --lapi-auth
   - [The bouncer exits with "firewall mode changed"](#the-bouncer-exits-with-firewall-mode-changed)
   - [Policies named like legacy rules after a controller upgrade](#policies-named-like-legacy-rules-after-a-controller-upgrade)
   - [Log warns that an ALLOW policy is evaluated before an egress block policy](#log-warns-that-an-allow-policy-is-evaluated-before-an-egress-block-policy)
+  - [Log warns that a site has no policy to enforce IPv6 bans](#log-warns-that-a-site-has-no-policy-to-enforce-ipv6-bans)
 - [Sync Issues](#sync-issues)
   - [Shard sync failures](#shard-sync-failures)
   - [A range ban for one host stopped all syncing](#a-range-ban-for-one-host-stopped-all-syncing)
@@ -643,7 +644,7 @@ docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status ip 203.0.113.42
 docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro reconcile
 ```
 
-At `LOG_LEVEL=debug` each processed deletion logs `job applied` with `"action":"delete"`. An address stays banned while another source (a blocklist, a manual ban, a second CrowdSec decision) still claims it; `status ip` lists the claims.
+At `LOG_LEVEL=debug` each processed deletion logs `job applied` with `"action":"delete"`. An address stays banned while another source (a blocklist, a manual ban, a second CrowdSec decision) still claims it; the history that `status ip` prints shows, in its `ORIGIN` column, which sources banned it.
 
 The reconcile command compares the ban database with the current UniFi firewall state and removes any IPs not in the active ban list.
 

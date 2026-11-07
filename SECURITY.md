@@ -60,7 +60,7 @@ The Docker image is hardened by default:
 - **`http://` is only safe** when the connection is confined to a loopback address (`127.0.0.1`, `::1`) or a Unix socket — i.e. the LAPI process is on the same host and the connection never crosses a network interface. On a shared container bridge network, `http://` sends the LAPI key in plaintext and exposes it to any process that can observe the network traffic.
 - A non-loopback `http://` URL requires `CROWDSEC_LAPI_ALLOW_HTTP=true` and emits a startup warning.
 
-The `.env.example` file opts into HTTP for a same-host Docker network. Remote LAPI and multi-node deployments should use HTTPS with certificate verification.
+`.env.example` keeps the default `https://` URL and shows, commented out, the two lines an `http://` LAPI on a same-host Docker network needs. Remote LAPI and multi-node deployments should use HTTPS with certificate verification.
 
 ## Seccomp Profile
 
