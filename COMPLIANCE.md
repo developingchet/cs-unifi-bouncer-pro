@@ -46,7 +46,7 @@ workflow identity. Docker Hub and `ghcr.io/developingchet/cs-unifi-bouncer-pro`
 each store their own copy of the signature and attestations.
 
 ```bash
-cosign verify developingchet/cs-unifi-bouncer-pro:2.4.0 \
+cosign verify developingchet/cs-unifi-bouncer-pro:2.4.1 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 ```
@@ -61,7 +61,7 @@ binaries, signed through GitHub Actions OIDC. Each image attestation is also
 pushed to its registry.
 
 ```bash
-gh attestation verify oci://developingchet/cs-unifi-bouncer-pro:2.4.0 \
+gh attestation verify oci://developingchet/cs-unifi-bouncer-pro:2.4.1 \
   --repo developingchet/cs-unifi-bouncer-pro
 gh attestation verify cs-unifi-bouncer-pro-linux-amd64 \
   --repo developingchet/cs-unifi-bouncer-pro
@@ -225,12 +225,12 @@ Independent verification of each supply chain claim:
 
 ```bash
 # Verify image signature
-cosign verify developingchet/cs-unifi-bouncer-pro:2.4.0 \
+cosign verify developingchet/cs-unifi-bouncer-pro:2.4.1 \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
 
 # Inspect SBOM attestation
-cosign verify-attestation developingchet/cs-unifi-bouncer-pro:2.4.0 \
+cosign verify-attestation developingchet/cs-unifi-bouncer-pro:2.4.1 \
   --type cyclonedx \
   --certificate-identity-regexp="https://github.com/developingchet/cs-unifi-bouncer-pro/.github/workflows/release.yml@refs/tags/.*" \
   --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \

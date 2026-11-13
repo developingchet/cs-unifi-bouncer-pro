@@ -12,7 +12,7 @@ body:
     attributes:
       label: Version
       description: Output of `cs-unifi-bouncer-pro version` or the release tag
-      placeholder: "v2.4.0"
+      placeholder: "v2.4.1"
     validations:
       required: true
 
