@@ -378,9 +378,9 @@ socketsecurity==2.11.6 \
     --hash=sha256:22dab39b00473f0725a48cd9069052a552f222fade468aef01c9d9608c202f08 \
     --hash=sha256:4a37f7bc0b2c72672cbcce3ef4cce7d5444d9164a3ea4d632111461ece8558a8
     # via -r socket-cli.in
-soupsieve==2.10 \
-    --hash=sha256:49e9380d7d2905463583bafe285e818c7366a9ed7b3aee221c1ac79c905d8bc0 \
-    --hash=sha256:8596eb8967d744174820280fa62b4542a2e955bfaccca73ed8a13c6eb8e9b502
+soupsieve==4.0 \
+    --hash=sha256:5e7494bfce90e06676cfb4c5c2cf22243e98e5cf24646bb1ecdda46d318550a0 \
+    --hash=sha256:ccd6470b256394ac44b08b86fd94b30a17d335a5335c8a3d15565f7b03d3c8cf
     # via beautifulsoup4
 typing-extensions==4.16.0 \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
