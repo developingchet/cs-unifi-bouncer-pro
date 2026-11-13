@@ -74,7 +74,10 @@ are also published to `ghcr.io/developingchet/cs-unifi-bouncer-pro`, with
 their own signature and attestations (see [SECURITY.md](../SECURITY.md#supply-chain-integrity)).
 
 Building from source now requires Go 1.27.3 or newer, which fixes
-CVE-2026-111943 in `crypto/x509`.
+CVE-2026-111943 in `crypto/x509`. From 2.4.1 it requires Go 1.27.4, which
+fixes GO-2026-6859, a crash of HTTP/1 servers such as the health and control
+endpoints; the 2.4.1 images are built with it. 2.4.1 changes no settings or
+behaviour, so upgrading from 2.4.0 needs no action.
 
 Behaviour that changes without action:
 
