@@ -128,7 +128,7 @@ jobs:
           exit-code: "1"
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          version: v0.69.2
+          version: v0.76.2
           format: table
 
       - name: Trivy SARIF scan (non-blocking, for Security tab)
@@ -139,7 +139,7 @@ jobs:
           exit-code: "0"
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          version: v0.69.2
+          version: v0.76.2
           format: sarif
           output: trivy-results.sarif
           skip-setup-trivy: true
@@ -236,7 +236,7 @@ jobs:
           exit-code: "1"
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          version: v0.69.2
+          version: v0.76.2
 
       - name: Trivy scan of the pushed image (linux/arm64)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0

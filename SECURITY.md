@@ -198,6 +198,7 @@ Every pull request and push to `main`, plus a weekly scheduled run, also:
 - Verifies module checksums against `go.sum` (`go mod verify`)
 - Runs **govulncheck**, which fails on known vulnerabilities in code the bouncer calls
 - Builds the image and scans it with **Trivy**
+- Runs **CodeQL** static analysis (`security-extended` Go queries); findings go to the Security tab
 - Scans the Go modules and GitHub Actions with **[Socket](https://socket.dev)**; pull requests that add a dependency violating the Socket policy are blocked
 
 A weekly workflow rescans the published `latest` image for every platform, so CVEs disclosed after a release show up in the Security tab. [OpenSSF Scorecard](https://scorecard.dev/viewer/?uri=github.com/developingchet/cs-unifi-bouncer-pro) grades the repository's own practices (pinned actions, token permissions, branch protection, signed releases).
