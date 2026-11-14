@@ -123,7 +123,7 @@ jobs:
           exit-code: "1"
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          version: v0.69.2
+          version: v0.76.2
 
       - name: Run bouncer version under seccomp profile
         run: |

@@ -199,7 +199,7 @@ the source of truth.
 | `actions/upload-artifact` | v7.0.2 | release, Scorecard |
 | `anchore/sbom-action` | v0 | release |
 | `aquasecurity/trivy-action` | v0.36.0 | CI, release, image-scan |
-| `github/codeql-action/upload-sarif` | v4.39.1 | release, image-scan, Scorecard |
+| `github/codeql-action/upload-sarif` | v4.39.3 | release, image-scan, Scorecard |
 | `docker/build-push-action` | v7.4.0 | CI, release |
 | `docker/login-action` | v4.7.0 | release |
 | `docker/metadata-action` | v6.2.0 | release |
@@ -212,6 +212,8 @@ the source of truth.
 | `softprops/action-gh-release` | v2 | release |
 
 CI runs race tests, lint, `govulncheck`, and a container scan before a release.
+CodeQL code scanning runs through GitHub's default setup (no workflow file)
+on pull requests and pushes to `main`, and reports to the Security tab.
 The weekly image-scan workflow checks published images for newly disclosed
 fixable vulnerabilities. Scorecard uploads repository security findings, and
 Socket scans Go modules and GitHub Actions on pull requests and `main` when

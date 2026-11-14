@@ -41,7 +41,7 @@ jobs:
           image-ref: ${{ env.IMAGE }}
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          version: v0.69.2
+          version: v0.76.2
           format: sarif
           output: trivy.sarif
           limit-severities-for-sarif: true
@@ -61,6 +61,6 @@ jobs:
           image-ref: ${{ env.IMAGE }}
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          version: v0.69.2
+          version: v0.76.2
           exit-code: '1'
           skip-setup-trivy: true
