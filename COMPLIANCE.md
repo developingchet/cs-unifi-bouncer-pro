@@ -184,7 +184,7 @@ private reporting channel, and response timelines.
 
 ## Workflow Integrity
 
-Actions in the CI, CodeQL, release, image-scan, Scorecard, Socket and Docker Hub
+Actions in the CI, release, image-scan, Scorecard, Socket and Docker Hub
 description workflows are pinned to full commit SHAs. The YAML comments
 identify these upstream versions; the SHA references in the workflow files are
 the source of truth.
@@ -192,14 +192,13 @@ the source of truth.
 | Action | Upstream version | Workflows |
 |--------|------------------|-----------|
 | `actions/attest-build-provenance` | v4.2.2 | release |
-| `actions/checkout` | v7.0.1 | CI, CodeQL, release, Socket, Scorecard, update-dockerhub |
+| `actions/checkout` | v7.0.1 | CI, release, Socket, Scorecard, update-dockerhub |
 | `actions/download-artifact` | v8 | release |
-| `actions/setup-go` | v7 | CI, CodeQL, release |
+| `actions/setup-go` | v7 | CI, release |
 | `actions/setup-python` | v7.1.0 | Socket |
 | `actions/upload-artifact` | v7.0.2 | release, Scorecard |
 | `anchore/sbom-action` | v0 | release |
 | `aquasecurity/trivy-action` | v0.36.0 | CI, release, image-scan |
-| `github/codeql-action/init`, `analyze` | v4.39.3 | CodeQL |
 | `github/codeql-action/upload-sarif` | v4.39.3 | release, image-scan, Scorecard |
 | `docker/build-push-action` | v7.4.0 | CI, release |
 | `docker/login-action` | v4.7.0 | release |
@@ -213,8 +212,8 @@ the source of truth.
 | `softprops/action-gh-release` | v2 | release |
 
 CI runs race tests, lint, `govulncheck`, and a container scan before a release.
-CodeQL runs the `security-extended` Go queries on every pull request, every
-push to `main` and weekly, and reports to the Security tab.
+CodeQL code scanning runs through GitHub's default setup (no workflow file)
+on pull requests and pushes to `main`, and reports to the Security tab.
 The weekly image-scan workflow checks published images for newly disclosed
 fixable vulnerabilities. Scorecard uploads repository security findings, and
 Socket scans Go modules and GitHub Actions on pull requests and `main` when
