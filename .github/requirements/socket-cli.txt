@@ -374,10 +374,10 @@ socketdev==3.6.2 \
     --hash=sha256:ad51c879cad8d897ed1b949339fb7aded30d0fe25b2a3810c83079887e8610b5 \
     --hash=sha256:ea94b2da1bdb89f3b70209b606f3abe5c609f66549c1deb160cf18f58e0c2e48
     # via socketsecurity
-socketsecurity==2.11.11 \
-    --hash=sha256:317ca858cc9a1bb29a10e3998dbfd397c81fcf5c2ad87b42d15fdfe42ff5cfa1 \
-    --hash=sha256:fc2baa537398e4b981f198501d7d8ff7038e693962e1ecbc7e03276cbcb5adbe
-    # via -r .github/requirements/socket-cli.in
+socketsecurity==2.11.13 \
+    --hash=sha256:7e5192cf9998157051ce06b39772642a546a8ea9eb290bcc776a9f2167245f0b \
+    --hash=sha256:a4884d9d6a1ee3cad9a763fbcd0f10864c6ea3930ea4808181383ea0bb33af13
+    # via -r socket-cli.in
 soupsieve==4.1 \
     --hash=sha256:ca9abf7126667010d8f6e9b39bfc1bc3b23c8aed9bcb0f54a754dde969bb8aab \
     --hash=sha256:e4d667b3974ce6e038e7390486b8093369854a1d345ffdd4c121dfc4a782e809
