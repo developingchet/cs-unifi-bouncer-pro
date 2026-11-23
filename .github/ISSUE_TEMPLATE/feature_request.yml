@@ -2,6 +2,14 @@ name: Feature Request
 description: Suggest an improvement or new capability
 labels: ["enhancement"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include exploit details or a security vulnerability in a feature
+        request. Use
+        [private vulnerability reporting](https://github.com/developingchet/cs-unifi-bouncer-pro/security/advisories/new)
+        for those reports.
+
   - type: textarea
     id: problem
     attributes:
@@ -23,5 +31,13 @@ body:
     attributes:
       label: Alternatives considered
       description: Any workarounds or alternative approaches you've tried
+    validations:
+      required: false
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks and trade-offs
+      description: Effects on the security model, firewall behaviour, upgrades or compatibility
     validations:
       required: false

@@ -3,7 +3,7 @@
 </p>
 
 # cs-unifi-bouncer-pro
-[![Build](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml/badge.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml)
+[![Release](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml/badge.svg)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/release.yml)
 [![CI](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/developingchet/cs-unifi-bouncer-pro/actions/workflows/ci.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/developingchet/cs-unifi-bouncer-pro/badge)](https://scorecard.dev/viewer/?uri=github.com/developingchet/cs-unifi-bouncer-pro)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/developingchet/cs-unifi-bouncer-pro)](https://github.com/developingchet/cs-unifi-bouncer-pro)
@@ -36,7 +36,7 @@ It turns CrowdSec ban decisions into UniFi firewall objects, so malicious addres
 
 ## Quick Start
 
-**Prerequisites**: Docker Engine 20.10+, Docker Compose v2+, a running CrowdSec instance.
+**Prerequisites**: Docker Engine 20.10+, Docker Compose v2+, a running CrowdSec instance and a UniFi Network controller reachable over HTTPS.
 
 ```bash
 # 1. Register the bouncer with CrowdSec (copy the key — shown once)
@@ -63,9 +63,18 @@ cosign verify developingchet/cs-unifi-bouncer-pro:latest \
 # 5. Start
 docker compose -f docker-compose.standalone.yml up -d
 
-# 6. Verify
-docker logs -f cs-unifi-bouncer-pro
+# 6. Verify: readiness needs the first decision batch and a reachable controller
+curl -fsS http://127.0.0.1:8081/readyz
+
+# A test decision proves the firewall object is written.
+# 203.0.113.42 is a documentation address, not a real host.
+docker exec crowdsec cscli decisions add -i 203.0.113.42 -t ban -d 5m
+docker exec cs-unifi-bouncer-pro /cs-unifi-bouncer-pro status ip 203.0.113.42
 ```
+
+`/readyz` returns HTTP 200 with the body `ready`; before the first decision batch it returns 503 `starting`. `status ip` should list `203.0.113.42`, and the managed group or traffic matching list for each configured site should contain it in the UniFi controller. Remove the test decision with `docker exec crowdsec cscli decisions delete --ip 203.0.113.42` when finished. A running container alone does not prove that the controller accepted the ban.
+
+CrowdSec must be reachable from the bouncer container: either attach it to the same Docker network under the `crowdsec` name used by the default LAPI URL, or set `CROWDSEC_LAPI_URL` and uncomment its line in the compose file.
 
 The compose file runs `latest`. To run a specific release instead, set
 `BOUNCER_IMAGE` in `.env`, for example to `developingchet/cs-unifi-bouncer-pro:2.4.1`
@@ -267,8 +276,24 @@ Besides Docker Compose, the repository ships:
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues and solutions |
 | [docs/REFERENCES.md](docs/REFERENCES.md) | External specifications and links |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
+| [AGENTS.md](AGENTS.md) | Guide for coding agents working in this repository |
+| [SUPPORT.md](SUPPORT.md) | Where to ask usage questions and report problems |
 | [SECURITY.md](SECURITY.md) | Vulnerability disclosure policy |
 | [COMPLIANCE.md](COMPLIANCE.md) | Security posture and supply-chain controls |
+
+---
+
+## Update, roll back and remove
+
+The Compose files run `latest` unless `BOUNCER_IMAGE` names another image. [docs/SETUP.md](docs/SETUP.md#updating) covers pulling a signed release and recreating the container, and [docs/SETUP.md](docs/SETUP.md#uninstalling) covers removing the container, the data volume, the CrowdSec registration and the managed firewall objects.
+
+A roll back is more than an image swap. Back up `/data/bouncer.db` before an upgrade, set `BOUNCER_IMAGE` to the previous release or its `@sha256:` digest, then follow the version-specific notes in [docs/UPGRADING.md](docs/UPGRADING.md). A database written by a newer release may not be readable by an older one.
+
+---
+
+## Support
+
+For usage questions and setup help, see [SUPPORT.md](SUPPORT.md) or open a Question / Support issue. Report bugs through the issue forms and vulnerabilities privately as described in [SECURITY.md](SECURITY.md). [CONTRIBUTING.md](CONTRIBUTING.md) covers development, and [AGENTS.md](AGENTS.md) is the guide for coding agents.
 
 ---
 

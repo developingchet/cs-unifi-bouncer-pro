@@ -6,6 +6,10 @@ body:
     attributes:
       value: |
         Before filing, please check existing issues and confirm you are on the latest release.
+        For a usage question, see [SUPPORT.md](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/SUPPORT.md).
+
+        Do not report security vulnerabilities here. Use
+        [private vulnerability reporting](https://github.com/developingchet/cs-unifi-bouncer-pro/security/advisories/new).
 
   - type: input
     id: version
