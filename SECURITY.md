@@ -24,7 +24,9 @@ Report security issues privately via [GitHub Security Advisories](https://github
 | Remediation target | 30 days from confirmed reproduction |
 | Critical (CVSS ≥ 9.0) | Expedited — best effort |
 
-We follow coordinated vulnerability disclosure. We will credit reporters in the release notes unless anonymity is requested.
+We follow coordinated vulnerability disclosure. We will credit reporters in the release notes unless anonymity is requested. GitHub keeps a private report confidential until the advisory is published.
+
+Reproduce a problem only against a CrowdSec instance, a UniFi controller and a host you own or are authorized to test. Do not change a production firewall policy, submit real addresses to a third-party abuse service, or include an unfixed vulnerability in someone else's project in a report. Reports made in good faith within this scope will not be treated as a violation of this policy.
 
 ## Security Features
 

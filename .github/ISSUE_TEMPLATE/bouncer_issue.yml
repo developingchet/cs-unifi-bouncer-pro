@@ -1,7 +1,15 @@
 name: Bouncer / CrowdSec Integration Issue
 description: Issues specific to the CrowdSec engine, LAPI connection, or bouncer behavior
-labels: ["crowdsec", "integration"]
+labels: ["bug"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        For a usage question, see [SUPPORT.md](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/SUPPORT.md).
+
+        Do not report security vulnerabilities here. Use
+        [private vulnerability reporting](https://github.com/developingchet/cs-unifi-bouncer-pro/security/advisories/new).
+
   - type: input
     id: crowdsec-version
     attributes:
@@ -33,7 +41,7 @@ body:
     id: config
     attributes:
       label: Relevant config (sanitized)
-      description: Paste relevant bouncer config — remove API keys and credentials
+      description: Paste relevant bouncer config after removing API keys and credentials
       render: yaml
     validations:
       required: false

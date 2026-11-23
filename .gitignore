@@ -1,6 +1,12 @@
 .env
 .env.*
 !.env.example
+
+# Local agent instruction files (never committed)
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+
 *.local
 *.local.yml
 docker-compose.override.yml

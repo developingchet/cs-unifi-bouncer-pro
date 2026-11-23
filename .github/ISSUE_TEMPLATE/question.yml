@@ -1,0 +1,79 @@
+name: Question / Support
+description: Ask a usage, setup or configuration question
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check [docs/SETUP.md](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/SETUP.md),
+        the [configuration reference](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/CONFIGURATION.md)
+        and [docs/TROUBLESHOOTING.md](https://github.com/developingchet/cs-unifi-bouncer-pro/blob/main/docs/TROUBLESHOOTING.md)
+        before opening a question.
+
+        Do not report security vulnerabilities here. Use
+        [private vulnerability reporting](https://github.com/developingchet/cs-unifi-bouncer-pro/security/advisories/new).
+        Remove API keys, controller addresses and private network details from
+        any configuration or logs you paste.
+
+  - type: dropdown
+    id: topic
+    attributes:
+      label: Topic
+      options:
+        - Installation and first run
+        - Configuration and environment variables
+        - Decisions, bans and blocklists
+        - UniFi firewall objects and zones
+        - Health, readiness and metrics
+        - Upgrading, rolling back or removing
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `cs-unifi-bouncer-pro version` or the release tag
+      placeholder: "v2.4.1"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Install mode, host OS and architecture, UniFi Network version and CrowdSec version
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: What are you trying to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried, and what happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      description: Paste relevant logs after removing keys, controller addresses and private addresses
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: sanitized
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed credentials and private network details from anything I pasted
+          required: true

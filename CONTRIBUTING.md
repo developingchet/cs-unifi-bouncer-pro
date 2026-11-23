@@ -1,6 +1,6 @@
 # Contributing to cs-unifi-bouncer-pro
 
-Thank you for your interest in contributing! This document describes how to report bugs, suggest features, and submit code changes.
+Thank you for your interest in contributing! This document describes how to report bugs, suggest features, and submit code changes. Coding agents should also read [AGENTS.md](AGENTS.md) for the repository layout, working commands and boundaries.
 
 ## Table of Contents
 
@@ -163,14 +163,16 @@ func TestParseAndSanitize(t *testing.T) {
 
 Use temporary directories for tests that write to disk. Clean them up with `t.TempDir()`.
 
-**Manual testing checklist before PR:**
+**End-to-end checks (optional, local Docker targets only):**
+
+The checks below are optional and run against local Docker targets only. Never point them at a production UniFi controller or a production CrowdSec deployment. The offline checks above (`go test ./...`, `go test -race ./...` and `golangci-lint run ./...`) are required for every PR. `make docker-test` is the local container check for image and seccomp changes; it uses documentation addresses and placeholder keys, and CI runs the seccomp integration test.
 
 - [ ] `make docker-build` succeeds; deployment with `docker compose up -d` uses the published image configured in Compose
-- [ ] Bouncer appears in `docker exec crowdsec cscli bouncers list`
+- [ ] Bouncer appears in the local CrowdSec `cscli bouncers list`
 - [ ] A test decision (`cscli decisions add -i 203.0.113.42 -t ban -d 1h`) appears in logs
-- [ ] Firewall group or zone policy is created/updated in the UniFi controller
+- [ ] Firewall group or zone policy is created/updated in the local lab controller
 - [ ] `GET /healthz` returns 200
-- [ ] `GET /readyz` returns 200 once the first LAPI batch is processed (controller reachable)
+- [ ] `GET /readyz` returns 200 once the first LAPI batch is processed (local lab controller reachable)
 - [ ] `DRY_RUN=true` produces log output but no UniFi write requests
 
 ---

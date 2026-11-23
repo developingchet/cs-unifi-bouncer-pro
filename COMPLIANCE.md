@@ -201,14 +201,14 @@ the source of truth.
 | `aquasecurity/trivy-action` | v0.36.0 | CI, release, image-scan |
 | `github/codeql-action/upload-sarif` | v4.39.3 | release, image-scan, Scorecard |
 | `docker/build-push-action` | v7.4.0 | CI, release |
-| `docker/login-action` | v4.7.0 | release |
+| `docker/login-action` | v4.8.0 | release |
 | `docker/metadata-action` | v6.2.0 | release |
 | `docker/setup-buildx-action` | v4.4.1 | CI, release |
 | `docker/setup-qemu-action` | v4.4.0 | release |
 | `golangci/golangci-lint-action` | v9 | CI |
 | `ossf/scorecard-action` | v2.5.0 | Scorecard |
 | `peter-evans/dockerhub-description` | v5.0.0 | release, update-dockerhub |
-| `sigstore/cosign-installer` | v4.1.2 | release |
+| `sigstore/cosign-installer` | v4.1.3 | release |
 | `softprops/action-gh-release` | v2 | release |
 
 CI runs race tests, lint, `govulncheck`, and a container scan before a release.
